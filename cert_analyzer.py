@@ -22,8 +22,7 @@ from prometheus_client import Gauge, Counter, start_http_server
 
 # Import generated Tetragon protos
 try:
-    from tetragon import tetragon_pb2
-    from tetragon import tetragon_pb2_grpc
+    from tetragon import tetragon_pb2, events_pb2, sensors_pb2_grpc
 except ImportError:
     print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
     sys.exit(1)
@@ -250,8 +249,8 @@ class CertificateAnalyzer:
             subject=subject,
             issuer=issuer,
             serial_number=str(cert.serial_number),
-            not_before=cert.not_valid_before_utc,
-            not_after=cert.not_valid_after_utc,
+            not_before=cert.not_valid_before,
+            not_after=cert.not_valid_after,
             process=process,
             pid=pid,
             namespace=namespace,
@@ -413,15 +412,15 @@ class CertificateAnalyzer:
         else:
             channel = grpc.insecure_channel(self.tetragon_address)
         
-        stub = tetragon_pb2_grpc.FineGuidanceSensorsStub(channel)
+        stub = sensors_pb2_grpc.FineGuidanceSensorsStub(channel)
         
         # Create request with filters
-        request = tetragon_pb2.GetEventsRequest(
+        request = events_pb2.GetEventsRequest(
             allow_list=[
-                tetragon_pb2.Filter(
+                events_pb2.Filter(
                     event_set=[
-                        tetragon_pb2.EVENT_TYPE_PROCESS_KPROBE,
-                        tetragon_pb2.EVENT_TYPE_PROCESS_UPROBE,
+                        events_pb2.PROCESS_KPROBE,
+                        events_pb2.PROCESS_UPROBE,
                     ]
                 )
             ]

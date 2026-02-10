@@ -4,7 +4,7 @@ set -e
 echo "Generating Tetragon Protocol Buffer files..."
 
 # Install grpcio-tools if not present
-pip install --quiet grpcio-tools
+pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
 
 # Create directory for proto files
 mkdir -p tetragon
@@ -22,11 +22,12 @@ curl -sL "${BASE_URL}/tetragon/events.proto" -o tetragon/events.proto
 curl -sL "${BASE_URL}/tetragon/sensors.proto" -o tetragon/sensors.proto
 curl -sL "${BASE_URL}/tetragon/stack.proto" -o tetragon/stack.proto
 
-# Generate Python code
+# Generate Python code with protoc 3 compatibility
 echo "Generating Python gRPC code..."
 python -m grpc_tools.protoc \
     -I. \
     --python_out=. \
+    --pyi_out=. \
     --grpc_python_out=. \
     tetragon/tetragon.proto \
     tetragon/capabilities.proto \
@@ -50,5 +51,4 @@ rm tetragon/stack.proto
 
 echo ""
 echo "✅ Tetragon proto files generated successfully in tetragon/"
-echo "Generated files:"
 ls -1 tetragon/*.py
