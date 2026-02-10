@@ -153,6 +153,7 @@ This will create a `tetragon/` directory with the necessary Python gRPC files.
 ### 2. Build the Container Image
 
 ```bash
+chmod -R a+rX tetragon/
 chmod +x build.sh
 ./build.sh
 ```

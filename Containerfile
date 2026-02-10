@@ -19,7 +19,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY cert_analyzer.py .
-COPY tetragon/ tetragon/
+
+# Copy tetragon directory - ensure all files are copied
+COPY tetragon ./tetragon
+
+# Verify files were copied
+RUN ls -la /app/tetragon/ && test -f /app/tetragon/__init__.py
 
 # Create non-root user (already exists in UBI, just set permissions)
 RUN chown -R 1001:0 /app && \
