@@ -106,6 +106,33 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
+
+# Copy BPF files to where Tetragon is actually looking
+sudo mkdir -p /usr/local/lib/tetragon/bpf
+sudo cp tetragon-v1.0.0-amd64/usr/local/lib/tetragon/bpf/* /usr/local/lib/tetragon/bpf/
+
+# Verify
+ls -la /usr/local/lib/tetragon/bpf/ | head -10
+
+# Also copy the config directory (optional but good to have)
+sudo mkdir -p /etc/tetragon/tetragon.conf.d
+sudo cp tetragon-v1.0.0-amd64/usr/local/lib/tetragon/tetragon.conf.d/* /etc/tetragon/tetragon.conf.d/
+
+# Now start Tetragon
+sudo systemctl start tetragon
+
+# Wait a moment for it to start
+sleep 3
+
+# Check status
+sudo systemctl status tetragon
+
+# Check for the socket
+sudo ls -la /var/run/tetragon/tetragon.sock
+
+# If successful, watch the logs briefly
+sudo journalctl -u tetragon -n 50
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now tetragon
 sudo systemctl status tetragon
