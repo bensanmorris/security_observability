@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cert-expiry-monitor
+  namespace: kube-system
+  labels:
+    app: cert-expiry-monitor
+spec:
+  selector:
+    matchLabels:
+      app: cert-expiry-monitor
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics

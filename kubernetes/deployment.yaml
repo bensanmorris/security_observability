@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-expiry-monitor
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cert-expiry-monitor
+  namespace: kube-system
+  labels:
+    app: cert-expiry-monitor
+spec:
+  selector:
+    matchLabels:
+      app: cert-expiry-monitor
+  template:
+    metadata:
+      labels:
+        app: cert-expiry-monitor
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: cert-expiry-monitor
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: analyzer
+        image: your-registry/cert-analyzer:latest
+        imagePullPolicy: Always
+        env:
+        - name: TETRAGON_ADDR
+          value: "unix:///var/run/cilium/tetragon/tetragon.sock"
+        - name: METRICS_PORT
+          value: "9090"
+        - name: ALERT_THRESHOLD_DAYS
+          value: "30"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: CERT_SCAN_PATHS
+          value: "/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki"
+        - name: SCAN_INTERVAL_SECONDS
+          value: "3600"
+        volumeMounts:
+        - name: tetragon-sock
+          mountPath: /var/run/cilium/tetragon
+        - name: host-root
+          mountPath: /host
+          readOnly: true
+        resources:
+          limits:
+            memory: 256Mi
+            cpu: 200m
+          requests:
+            memory: 128Mi
+            cpu: 100m
+        ports:
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 9090
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1001
+          seccompProfile:
+            type: RuntimeDefault
+      volumes:
+      - name: tetragon-sock
+        hostPath:
+          path: /var/run/cilium/tetragon
+          type: DirectoryOrCreate
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cert-expiry-monitor
+  namespace: kube-system
+  labels:
+    app: cert-expiry-monitor
+spec:
+  selector:
+    app: cert-expiry-monitor
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+    protocol: TCP
+  type: ClusterIP

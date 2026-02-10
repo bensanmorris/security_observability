@@ -1,0 +1,27 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: certificate-file-access
+spec:
+  kprobes:
+  - call: "fd_install"
+    syscall: false
+    return: false
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "file"
+    returnArg:
+      type: "int"
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: "Postfix"
+        values:
+        - ".crt"
+        - ".pem"
+        - ".cert"
+        - ".cer"
+      matchActions:
+      - action: Post

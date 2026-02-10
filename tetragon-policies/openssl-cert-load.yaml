@@ -1,0 +1,34 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openssl-cert-load
+spec:
+  uprobes:
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_file"
+    - "SSL_CTX_use_certificate_chain_file"
+    - "PEM_read_X509"
+    - "d2i_X509"
+    args:
+    - index: 0
+      type: "pointer"
+    - index: 1
+      type: "string"
+    selectors:
+    - matchActions:
+      - action: Post
+  - path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_file"
+    - "SSL_CTX_use_certificate_chain_file"
+    - "PEM_read_X509"
+    - "d2i_X509"
+    args:
+    - index: 0
+      type: "pointer"
+    - index: 1
+      type: "string"
+    selectors:
+    - matchActions:
+      - action: Post

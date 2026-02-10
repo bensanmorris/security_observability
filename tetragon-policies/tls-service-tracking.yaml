@@ -1,0 +1,29 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: tls-service-tracking
+spec:
+  kprobes:
+  - call: "security_socket_bind"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    - index: 1
+      type: "sockaddr"
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: "Protocol"
+        values:
+        - "IPPROTO_TCP"
+      matchBinaries:
+      - operator: "In"
+        values:
+        - "/usr/sbin/nginx"
+        - "/usr/bin/envoy"
+        - "/usr/local/bin/haproxy"
+        - "/usr/bin/httpd"
+        - "/usr/sbin/httpd"
+      matchActions:
+      - action: Post

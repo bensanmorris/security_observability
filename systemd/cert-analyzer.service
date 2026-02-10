@@ -1,0 +1,47 @@
+[Unit]
+Description=TLS Certificate Expiry Monitor
+Documentation=https://github.com/your-org/cert-expiry-monitor
+After=network-online.target tetragon.service
+Wants=network-online.target
+Requires=tetragon.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+TimeoutStartSec=0
+TimeoutStopSec=30
+
+# Run as root to access Tetragon socket and system certs
+User=root
+Group=root
+
+# Pull latest image on start (optional, comment out if not needed)
+#ExecStartPre=-/usr/bin/podman pull localhost/cert-analyzer:latest
+
+# Start container
+ExecStart=/usr/bin/podman run \
+    --rm \
+    --name cert-analyzer \
+    --network host \
+    --pid host \
+    -v /run/cilium/tetragon/tetragon.sock:/var/run/cilium/tetragon/tetragon.sock:Z \
+    -v /:/host:ro,rslave \
+    -e TETRAGON_ADDR=unix:///var/run/cilium/tetragon/tetragon.sock \
+    -e METRICS_PORT=9090 \
+    -e ALERT_THRESHOLD_DAYS=30 \
+    -e LOG_LEVEL=INFO \
+    -e CERT_SCAN_PATHS=/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki \
+    -e SCAN_INTERVAL_SECONDS=3600 \
+    localhost/cert-analyzer:latest
+
+# Stop container
+ExecStop=/usr/bin/podman stop -t 10 cert-analyzer
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cert-analyzer
+
+[Install]
+WantedBy=multi-user.target

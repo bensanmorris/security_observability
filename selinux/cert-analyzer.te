@@ -1,0 +1,22 @@
+module cert-analyzer 1.0;
+
+require {
+    type container_t;
+    type cert_t;
+    type user_home_t;
+    type spc_t;
+    class sock_file write;
+    class unix_stream_socket connectto;
+    class file { read open getattr };
+    class dir { search getattr };
+}
+
+# Allow container to read certificates
+allow container_t cert_t:file { read open getattr };
+allow container_t cert_t:dir { search getattr };
+
+# Allow container to read system directories
+allow container_t user_home_t:dir search;
+
+# Allow SPC (Super Privileged Container) access
+allow spc_t cert_t:file { read open getattr };

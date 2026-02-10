@@ -1,0 +1,120 @@
+{
+  "dashboard": {
+    "title": "TLS Certificate Expiry Monitoring",
+    "tags": ["certificates", "security", "tls"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Certificates Expiring Soon (< 90 days)",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "tls_certificate_expiry_days < 90",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "Time": true,
+                "__name__": true,
+                "instance": true,
+                "job": true
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Days Until Expiry (Timeline)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "tls_certificate_expiry_days",
+            "legendFormat": "{{common_name}} ({{process}})"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Certificate Status Distribution",
+        "type": "piechart",
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "count(tls_certificate_expiry_days < 7)",
+            "legendFormat": "< 7 days"
+          },
+          {
+            "expr": "count(tls_certificate_expiry_days >= 7 and tls_certificate_expiry_days < 30)",
+            "legendFormat": "7-30 days"
+          },
+          {
+            "expr": "count(tls_certificate_expiry_days >= 30 and tls_certificate_expiry_days < 90)",
+            "legendFormat": "30-90 days"
+          },
+          {
+            "expr": "count(tls_certificate_expiry_days >= 90)",
+            "legendFormat": "> 90 days"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Certificate Event Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 8},
+        "targets": [
+          {
+            "expr": "rate(tls_certificate_events_total[5m])",
+            "legendFormat": "{{event_type}} - {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Analysis Errors",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(tls_certificate_analysis_errors_total[5m])",
+            "legendFormat": "{{error_type}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Analyzer Health",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "cert_analyzer_healthy"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Total Certificates Monitored",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 18, "y": 16},
+        "targets": [
+          {
+            "expr": "count(tls_certificate_expiry_days)"
+          }
+        ]
+      }
+    ]
+  }
+}

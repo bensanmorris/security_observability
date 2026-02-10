@@ -1,0 +1,62 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: certificate-expiry-alerts
+  namespace: kube-system
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+  - name: certificates
+    interval: 1m
+    rules:
+    - alert: CertificateExpiringSoon
+      expr: tls_certificate_expiry_days < 30 and tls_certificate_expiry_days > 7
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "Certificate {{ $labels.cert_path }} expires soon"
+        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expires in {{ $value | humanizeDuration }} (path: {{ $labels.cert_path }})"
+    
+    - alert: CertificateExpiringCritical
+      expr: tls_certificate_expiry_days < 7 and tls_certificate_expiry_days > 0
+      for: 5m
+      labels:
+        severity: critical
+        component: certificate
+      annotations:
+        summary: "Certificate {{ $labels.cert_path }} expires very soon!"
+        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expires in {{ $value | humanizeDuration }} (path: {{ $labels.cert_path }}). IMMEDIATE ACTION REQUIRED!"
+    
+    - alert: CertificateExpired
+      expr: tls_certificate_expiry_days < 0
+      for: 1m
+      labels:
+        severity: critical
+        component: certificate
+      annotations:
+        summary: "Certificate {{ $labels.cert_path }} has EXPIRED"
+        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expired {{ $value | humanizeDuration }} ago (path: {{ $labels.cert_path }}). SERVICE MAY BE AFFECTED!"
+    
+    - alert: CertificateAnalyzerDown
+      expr: up{job="cert-expiry-monitor"} == 0
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "Certificate analyzer is down"
+        description: "The certificate expiry monitor has been down for more than 5 minutes"
+    
+    - alert: CertificateAnalysisErrors
+      expr: rate(tls_certificate_analysis_errors_total[5m]) > 0.1
+      for: 10m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "High rate of certificate analysis errors"
+        description: "Certificate analyzer is experiencing {{ $value }} errors per second analyzing certificates"
