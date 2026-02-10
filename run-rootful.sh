@@ -13,15 +13,15 @@ sudo podman run -d \
     --privileged \
     --network host \
     --pid host \
-    -v /run/cilium/tetragon/tetragon.sock:/var/run/cilium/tetragon/tetragon.sock:Z \
+    -v /var/run/tetragon/tetragon.sock:/var/run/tetragon/tetragon.sock:Z \
     -v /:/host:ro,rslave \
-    -e TETRAGON_ADDR=unix:///var/run/cilium/tetragon/tetragon.sock \
+    -e TETRAGON_ADDR=unix:///var/run/tetragon/tetragon.sock \
     -e METRICS_PORT=9090 \
     -e ALERT_THRESHOLD_DAYS=30 \
     -e LOG_LEVEL=INFO \
     -e CERT_SCAN_PATHS=/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki \
     -e SCAN_INTERVAL_SECONDS=3600 \
-    cert-analyzer:latest
+    localhost/cert-analyzer:latest
 
 echo ""
 echo "✅ Container started!"

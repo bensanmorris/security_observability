@@ -11,11 +11,11 @@ podman rm cert-analyzer 2>/dev/null || true
 podman run -d \
     --name cert-analyzer \
     --userns=keep-id \
-    -v /run/cilium/tetragon/tetragon.sock:/var/run/cilium/tetragon/tetragon.sock:Z \
+    -v /var/run/tetragon/tetragon.sock:/var/run/tetragon/tetragon.sock:Z \
     -v /etc/ssl:/host/etc/ssl:ro,Z \
     -v /etc/pki:/host/etc/pki:ro,Z \
     -p 9090:9090 \
-    -e TETRAGON_ADDR=unix:///var/run/cilium/tetragon/tetragon.sock \
+    -e TETRAGON_ADDR=unix:///var/run/tetragon/tetragon.sock \
     -e METRICS_PORT=9090 \
     -e ALERT_THRESHOLD_DAYS=30 \
     -e LOG_LEVEL=INFO \

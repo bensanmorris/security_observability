@@ -167,24 +167,25 @@ kubectl apply -f tetragon-policies/certificate-file-access.yaml
 kubectl apply -f tetragon-policies/openssl-cert-load.yaml
 
 # If using standalone Tetragon
-sudo cp tetragon-policies/*.yaml /etc/tetragon/policies/
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load.yaml
+
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking.yaml
+
+# Verify they were loaded
+sudo /usr/local/bin/tetra tracingpolicy list
 ```
 
 ### 4. Run the Analyzer
 
-**Option A: Rootless Podman (Recommended for development)**
-```bash
-chmod +x run-rootless.sh
-./run-rootless.sh
-```
-
-**Option B: Rootful Podman (Full system access)**
+**Option A: Rootful Podman (Full system access)**
 ```bash
 chmod +x run-rootful.sh
 sudo ./run-rootful.sh
 ```
 
-**Option C: Systemd Service (Production)**
+**Option B: Systemd Service (Production)**
 ```bash
 # Traditional systemd service
 sudo cp systemd/cert-analyzer.service /etc/systemd/system/

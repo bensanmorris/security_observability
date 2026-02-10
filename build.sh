@@ -13,7 +13,7 @@ fi
 
 # Build with Podman
 echo "Building container image..."
-podman build \
+sudo podman build \
     --tag cert-analyzer:latest \
     --file Containerfile \
     .
