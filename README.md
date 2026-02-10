@@ -85,14 +85,31 @@ helm install tetragon cilium/tetragon -n kube-system
 TETRAGON_VERSION=v1.0.0
 curl -LO https://github.com/cilium/tetragon/releases/download/${TETRAGON_VERSION}/tetragon-${TETRAGON_VERSION}-amd64.tar.gz
 tar xzf tetragon-${TETRAGON_VERSION}-amd64.tar.gz
-sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/bin/tetragon /usr/local/bin/
-sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/bin/tetra /usr/local/bin/
 
-# Start Tetragon
-sudo tetragon --export-filename /var/log/tetragon/tetragon.log &
+sudo mkdir -p /var/log/tetragon
 
-# Verify
-sudo tetra status
+cat <<EOF | sudo tee /etc/systemd/system/tetragon.service
+[Unit]
+Description=Tetragon eBPF Security Observability
+Documentation=https://tetragon.io/
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tetragon --export-filename /var/log/tetragon/tetragon.log
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now tetragon
+sudo systemctl status tetragon
+
 ```
 
 ## Quick Start
