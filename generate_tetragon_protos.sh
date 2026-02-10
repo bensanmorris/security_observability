@@ -11,25 +11,44 @@ mkdir -p tetragon
 
 # Download Tetragon proto files
 TETRAGON_VERSION="v1.0.0"
-echo "Downloading Tetragon proto from version ${TETRAGON_VERSION}..."
+BASE_URL="https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/api/v1"
 
-curl -sL "https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/api/v1/tetragon/tetragon.proto" \
-    -o tetragon.proto
+echo "Downloading Tetragon proto files from version ${TETRAGON_VERSION}..."
+
+# Download all proto files into the tetragon directory
+curl -sL "${BASE_URL}/tetragon/tetragon.proto" -o tetragon/tetragon.proto
+curl -sL "${BASE_URL}/tetragon/capabilities.proto" -o tetragon/capabilities.proto
+curl -sL "${BASE_URL}/tetragon/events.proto" -o tetragon/events.proto
+curl -sL "${BASE_URL}/tetragon/sensors.proto" -o tetragon/sensors.proto
+curl -sL "${BASE_URL}/tetragon/stack.proto" -o tetragon/stack.proto
 
 # Generate Python code
 echo "Generating Python gRPC code..."
 python -m grpc_tools.protoc \
     -I. \
-    --python_out=tetragon \
-    --grpc_python_out=tetragon \
-    tetragon.proto
+    --python_out=. \
+    --grpc_python_out=. \
+    tetragon/tetragon.proto \
+    tetragon/capabilities.proto \
+    tetragon/events.proto \
+    tetragon/sensors.proto \
+    tetragon/stack.proto
+
+# Fix imports in generated files (Python import issue)
+echo "Fixing imports in generated files..."
+sed -i 's/^import tetragon\./from . import /g' tetragon/*_pb2.py tetragon/*_pb2_grpc.py 2>/dev/null || true
 
 # Create __init__.py
 touch tetragon/__init__.py
 
-# Clean up
-rm tetragon.proto
+# Clean up downloaded proto files
+rm tetragon/tetragon.proto
+rm tetragon/capabilities.proto
+rm tetragon/events.proto  
+rm tetragon/sensors.proto
+rm tetragon/stack.proto
 
+echo ""
 echo "✅ Tetragon proto files generated successfully in tetragon/"
-echo "   - tetragon_pb2.py"
-echo "   - tetragon_pb2_grpc.py"
+echo "Generated files:"
+ls -1 tetragon/*.py
