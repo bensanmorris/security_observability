@@ -46,7 +46,55 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days | head 
 
 ## Demo Workflow (5 minutes)
 
+### Step 0: Set Up Live Log Monitoring (Recommended)
+
+**In a separate terminal**, run the colorized log watcher:
+
+```bash
+# Create the log watcher script
+cat > watch-certs.sh << 'EOF'
+#!/bin/bash
+
+# Color definitions
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo "Monitoring Certificate Analyzer (Ctrl+C to stop)..."
+echo "=================================================="
+
+sudo podman logs -f cert-analyzer --since 1m | while read line; do
+    if [[ $line == *"🔴 EXPIRED"* ]] || [[ $line == *"EXPIRED"* ]]; then
+        echo -e "${RED}${line}${NC}"
+    elif [[ $line == *"🔴 CRITICAL"* ]] || [[ $line == *"CRITICAL"* ]]; then
+        echo -e "${RED}${line}${NC}"
+    elif [[ $line == *"⚠️"* ]] || [[ $line == *"WARNING"* ]]; then
+        echo -e "${YELLOW}${line}${NC}"
+    elif [[ $line == *"✅"* ]] || [[ $line == *"OK:"* ]]; then
+        echo -e "${GREEN}${line}${NC}"
+    elif [[ $line == *"Connected to Tetragon"* ]]; then
+        echo -e "${BLUE}${line}${NC}"
+    else
+        echo "$line"
+    fi
+done
+EOF
+
+chmod +x watch-certs.sh
+
+# Run it
+./watch-certs.sh
+```
+
+Keep this running during the demo to show real-time detection!
+
+---
+
 ### Step 1: Show Baseline
+
+**In your main terminal:**
 
 ```bash
 echo "Currently monitoring certificates:"
@@ -60,39 +108,76 @@ echo "certificates tracked"
 python3 test_analyzer.py
 ```
 
-This creates certificates in `/tmp/test-certs-*/`:
+This creates certificates in `./test-certs/`:
 - `expired.crt` - Expired 10 days ago 🔴
 - `expiring-soon.crt` - Expires in 5 days 🔴
 - `expiring-week.crt` - Expires in 7 days ⚠️
 - `valid.crt` - Valid for 1 year ✅
 
-### Step 3: Trigger Real-Time Detection
+```bash
+# Verify they're created
+ls -la test-certs/
+```
+
+### Step 3: Copy Certificates to Monitored Path
+
+```bash
+# Copy test certificates to a path the analyzer monitors
+sudo cp test-certs/*.crt /etc/pki/tls/certs/
+
+# Verify they're copied
+ls -la /etc/pki/tls/certs/*.crt | tail -6
+```
+
+### Step 3.5: Load Tetragon Policies
+
+**Important**: Policies need to be loaded after each Tetragon restart.
+
+```bash
+# Load the certificate monitoring policies
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml
+
+# Verify they're loaded
+sudo /usr/local/bin/tetra tracingpolicy list
+```
+
+You should see:
+```
+[1] certificate-file-access enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-1
+[2] openssl-cert-load enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-2
+[3] tls-service-tracking enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-3
+```
+
+### Step 4: Trigger Real-Time Detection
 
 ```bash
 # Access the test certificates to trigger eBPF detection
-CERT_DIR=$(ls -d /tmp/test-certs-* | tail -1)
-cat $CERT_DIR/expired.crt
-cat $CERT_DIR/expiring-soon.crt
-cat $CERT_DIR/expiring-week.crt
-cat $CERT_DIR/valid.crt
+cat /etc/pki/tls/certs/expired.crt
+cat /etc/pki/tls/certs/expiring-soon.crt
+cat /etc/pki/tls/certs/expiring-week.crt
+cat /etc/pki/tls/certs/valid.crt
 ```
 
-### Step 4: View Detection Results
+**Watch Terminal 2** - You'll see real-time detection as certificates are accessed!
+
+### Step 5: View Detection Results
 
 ```bash
-# Show real-time detections in logs
-sudo podman logs cert-analyzer | tail -20 | grep -E "🔴|⚠️|✅"
+# Show real-time detections in logs (if not watching in Terminal 2)
+sudo podman logs cert-analyzer | tail -30 | grep -E "🔴|⚠️|✅"
 ```
 
 **Expected output:**
 ```
-🔴 EXPIRED: Certificate /tmp/test-certs-.../expired.crt expired 10.0 days ago
-🔴 CRITICAL: Certificate /tmp/test-certs-.../expiring-soon.crt expires in 5.0 days
-⚠️  WARNING: Certificate /tmp/test-certs-.../expiring-week.crt expires in 7.0 days
-✅ OK: Certificate /tmp/test-certs-.../valid.crt valid for 365.0 more days
+🔴 EXPIRED: Certificate /host/etc/pki/tls/certs/expired.crt expired 10.0 days ago
+🔴 CRITICAL: Certificate /host/etc/pki/tls/certs/expiring-soon.crt expires in 5.0 days
+⚠️  WARNING: Certificate /host/etc/pki/tls/certs/expiring-week.crt expires in 7.0 days
+✅ OK: Certificate /host/etc/pki/tls/certs/valid.crt valid for 365.0 more days
 ```
 
-### Step 5: Show Prometheus Metrics
+### Step 6: Show Prometheus Metrics
 
 ```bash
 # Expired certificates
@@ -133,6 +218,19 @@ sleep 3
 echo "✅ Services running"
 echo ""
 
+# Load Tetragon policies (needed after Tetragon restart)
+echo "📜 Loading Tetragon policies..."
+POLICIES_LOADED=$(sudo /usr/local/bin/tetra tracingpolicy list 2>/dev/null | wc -l)
+if [ "$POLICIES_LOADED" -lt 3 ]; then
+    sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml 2>/dev/null || true
+    sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml 2>/dev/null || true
+    sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml 2>/dev/null || true
+    echo "   Policies loaded"
+else
+    echo "   Policies already loaded"
+fi
+echo ""
+
 # Show baseline
 echo "📊 Current monitoring status:"
 CERT_COUNT=$(curl -s http://localhost:9090/metrics | grep -c tls_certificate_expiry_days)
@@ -142,35 +240,43 @@ echo ""
 # Generate test certificates
 echo "🔧 Generating test certificates..."
 python3 test_analyzer.py 2>&1 | grep -E "Generated:|created in:"
-CERT_DIR=$(ls -d /tmp/test-certs-* | tail -1)
+echo ""
+
+# Copy to monitored path
+echo "📋 Copying certificates to monitored path..."
+sudo cp test-certs/*.crt /etc/pki/tls/certs/
+echo "   Copied to /etc/pki/tls/certs/"
 echo ""
 
 # Trigger detection
 echo "🔍 Triggering real-time detection..."
-cat $CERT_DIR/expired.crt $CERT_DIR/expiring-soon.crt $CERT_DIR/expiring-week.crt $CERT_DIR/valid.crt > /dev/null
-sleep 2
+cat /etc/pki/tls/certs/expired.crt /etc/pki/tls/certs/expiring-soon.crt \
+    /etc/pki/tls/certs/expiring-week.crt /etc/pki/tls/certs/valid.crt > /dev/null
 echo "   Certificates accessed - waiting for eBPF events..."
-sleep 1
+sleep 3
 echo ""
 
 # Show detections
 echo "📋 Detection Results:"
-sudo podman logs cert-analyzer | tail -20 | grep -E "🔴|⚠️|✅" || echo "   (Check logs with: sudo podman logs cert-analyzer)"
+sudo podman logs cert-analyzer | tail -30 | grep -E "🔴|⚠️|✅" | grep "pki/tls/certs" || \
+    echo "   (Check logs with: sudo podman logs cert-analyzer)"
 echo ""
 
 # Show metrics
 echo "📈 Prometheus Metrics:"
 echo ""
 echo "Expired certificates:"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expired{.*}.*1$' | head -3 | sed 's/^/  /'
+curl -s http://localhost:9090/metrics | grep 'tls_certificate_expired{.*}.*1$' | \
+    grep "pki/tls/certs" | head -3 | sed 's/^/  /'
 echo ""
 echo "Expiring soon (< 7 days):"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expiring_soon{.*threshold_days="7"}.*1$' | head -3 | sed 's/^/  /'
+curl -s http://localhost:9090/metrics | grep 'tls_certificate_expiring_soon{.*threshold_days="7"}.*1$' | \
+    grep "pki/tls/certs" | head -3 | sed 's/^/  /'
 echo ""
 
 # Show real-world finding
 echo "🔎 Real-world finding on this system:"
-sudo podman logs cert-analyzer | grep "🔴 EXPIRED" | grep -v "test-certs" | head -1 | sed 's/^/  /'
+sudo podman logs cert-analyzer | grep "🔴 EXPIRED" | grep -v "test-certs\|pki/tls/certs" | head -1 | sed 's/^/  /'
 echo ""
 
 echo "======================================"
@@ -179,6 +285,8 @@ echo "======================================"
 echo ""
 echo "Access metrics at: http://localhost:9090/metrics"
 echo "View logs: sudo podman logs -f cert-analyzer"
+echo ""
+echo "💡 TIP: Run './watch-certs.sh' in a separate terminal for live monitoring"
 EOF
 
 chmod +x quick-demo.sh
@@ -191,7 +299,41 @@ chmod +x quick-demo.sh
 
 ---
 
+## Two-Terminal Demo Setup
+
+For the best demo experience, use two terminals side-by-side:
+
+**Terminal 1 (Main Commands):**
+```bash
+./quick-demo.sh
+```
+
+**Terminal 2 (Live Monitoring):**
+```bash
+./watch-certs.sh
+```
+
+This shows real-time detection as you run commands in Terminal 1!
+
+---
+
 ## Useful Commands
+
+### Monitor Live Activity
+
+```bash
+# Color-coded live log monitoring (recommended for demos)
+./watch-certs.sh
+
+# Simple tail of logs
+sudo podman logs -f cert-analyzer
+
+# Show only certificate detections
+sudo podman logs -f cert-analyzer | grep -E "🔴|⚠️|✅"
+
+# Show logs from last 5 minutes
+sudo podman logs cert-analyzer --since 5m
+```
 
 ### Check Status
 
@@ -300,6 +442,23 @@ sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracki
 
 ---
 
+### Policies not loaded
+
+```bash
+# Check if policies are loaded
+sudo /usr/local/bin/tetra tracingpolicy list
+
+# If empty, reload them
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml
+
+# Verify
+sudo /usr/local/bin/tetra tracingpolicy list
+```
+
+**Note**: Policies are lost when Tetragon restarts and must be reloaded.
+
 ## Demo Talking Points
 
 1. **eBPF-based monitoring** - Zero application changes, kernel-level visibility
@@ -327,6 +486,7 @@ After the demo, you can:
 |---------|---------|
 | `sudo systemctl start tetragon` | Start Tetragon service |
 | `sudo ./run-rootful.sh` | Start analyzer |
+| `./watch-certs.sh` | Monitor live with colors (Terminal 2) |
 | `sudo podman logs -f cert-analyzer` | View live logs |
 | `curl http://localhost:9090/metrics` | View metrics |
 | `python3 test_analyzer.py` | Generate test certificates |
