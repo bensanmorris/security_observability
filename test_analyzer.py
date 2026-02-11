@@ -24,6 +24,16 @@ def generate_test_certificate(days_valid: int, output_path: str, cn: str = None)
         key_size=2048,
     )
     
+    # For expired certificates, set dates in the past
+    if days_valid < 0:
+        # Certificate expired 'days_valid' days ago
+        not_valid_before = datetime.utcnow() + timedelta(days=days_valid) - timedelta(days=365)
+        not_valid_after = datetime.utcnow() + timedelta(days=days_valid)
+    else:
+        # Normal certificate valid for 'days_valid' days
+        not_valid_before = datetime.utcnow()
+        not_valid_after = datetime.utcnow() + timedelta(days=days_valid)
+    
     # Create certificate
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
@@ -32,9 +42,6 @@ def generate_test_certificate(days_valid: int, output_path: str, cn: str = None)
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TestOrg"),
         x509.NameAttribute(NameOID.COMMON_NAME, cn),
     ])
-    
-    not_valid_before = datetime.utcnow()
-    not_valid_after = datetime.utcnow() + timedelta(days=days_valid)
     
     cert = x509.CertificateBuilder().subject_name(
         subject
@@ -69,8 +76,9 @@ def generate_test_certificate(days_valid: int, output_path: str, cn: str = None)
             encryption_algorithm=serialization.NoEncryption()
         ))
     
-    print(f"Generated: {output_path} (valid for {days_valid} days, expires {not_valid_after.strftime('%Y-%m-%d')})")
-    print(f"           {key_path}")
+    print(f"Generated: {output_path}")
+    print(f"           Valid from: {not_valid_before.strftime('%Y-%m-%d')} to {not_valid_after.strftime('%Y-%m-%d')}")
+    print(f"           Status: {'EXPIRED' if days_valid < 0 else f'Expires in {days_valid} days'}")
 
 if __name__ == '__main__':
     # Create test certificates with various expiry dates
@@ -90,13 +98,11 @@ if __name__ == '__main__':
     for filename, days, cn in test_cases:
         cert_path = os.path.join(test_dir, filename)
         generate_test_certificate(days, cert_path, cn)
+        print()
     
     print("="*60)
     print(f"\n✅ Test certificates created in: {test_dir}")
     print("\nTo test the analyzer:")
-    print(f"  1. Start the analyzer: ./run-rootless.sh")
-    print(f"  2. Access a certificate: cat {test_dir}/expiring-soon.crt")
-    print(f"  3. Check logs: podman logs cert-analyzer | grep expiring-soon")
-    print(f"  4. Check metrics: curl -s http://localhost:9090/metrics | grep expiring-soon")
-    print(f"\nOr run periodic scan with:")
-    print(f"  podman run -d -v {test_dir}:/test-certs:ro,Z -e CERT_SCAN_PATHS=/test-certs cert-analyzer:latest")
+    print(f"  1. Access certificates: cat {test_dir}/*.crt")
+    print(f"  2. Check logs: sudo podman logs cert-analyzer | grep test-certs")
+    print(f"  3. Check metrics: curl -s http://localhost:9090/metrics | grep test-certs")
