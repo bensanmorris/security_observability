@@ -392,6 +392,10 @@ class CertificateAnalyzer:
         if not cert_path:
             return
         
+        # Skip events from the analyzer itself to avoid feedback loop
+        if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
+            logger.debug(f"Skipping self-generated event from {process_name}")
+            return
         logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
         
         # Analyze the certificate

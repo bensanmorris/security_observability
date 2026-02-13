@@ -10,7 +10,8 @@ NC='\033[0m' # No Color
 echo "Monitoring Certificate Analyzer (Ctrl+C to stop)..."
 echo "=================================================="
 
-sudo podman logs -f cert-analyzer | while read line; do
+# Follow logs without --since limitation
+sudo podman logs -f cert-analyzer 2>&1 | while read line; do
     if [[ $line == *"🔴 EXPIRED"* ]] || [[ $line == *"EXPIRED"* ]]; then
         echo -e "${RED}${line}${NC}"
     elif [[ $line == *"🔴 CRITICAL"* ]] || [[ $line == *"CRITICAL"* ]]; then
@@ -19,9 +20,9 @@ sudo podman logs -f cert-analyzer | while read line; do
         echo -e "${YELLOW}${line}${NC}"
     elif [[ $line == *"✅"* ]] || [[ $line == *"OK:"* ]]; then
         echo -e "${GREEN}${line}${NC}"
+    elif [[ $line == *"🔍 Detected"* ]]; then
+        echo -e "${BLUE}${line}${NC}"
     elif [[ $line == *"Connected to Tetragon"* ]]; then
         echo -e "${BLUE}${line}${NC}"
-    else
-        echo "$line"
     fi
 done
