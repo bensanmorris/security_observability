@@ -509,10 +509,6 @@ For large deployments:
 - No secrets stored in container
 - Metrics endpoint is HTTP (use reverse proxy for HTTPS)
 
-## License
-
-MIT License
-
 ## Support
 
 For issues or questions, please open an issue in the repository.
