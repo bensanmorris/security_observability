@@ -268,9 +268,9 @@ class CertificateAnalyzer:
         """Analyze a certificate file and return certificate info"""
         
         # Skip if already processed recently
-        if cert_path in self.processed_paths:
-            logger.debug(f"Skipping already processed certificate: {cert_path}")
-            return self.known_certs.get(cert_path)
+        #if cert_path in self.processed_paths:
+        #    logger.debug(f"Skipping already processed certificate: {cert_path}")
+        #    return self.known_certs.get(cert_path)
         
         # Parse certificate
         cert = self.parse_certificate(cert_path)
@@ -351,11 +351,13 @@ class CertificateAnalyzer:
                     path = arg.file_arg.path
                     if self.is_cert_path(path):
                         cert_path = path
+                        logger.debug(f"Found cert path in file_arg: {cert_path}")
                         break
                 elif arg.HasField('string_arg'):
                     path = arg.string_arg
                     if self.is_cert_path(path):
                         cert_path = path
+                        logger.debug(f"Found cert path in string_arg: {cert_path}")
                         break
         
         # Handle uprobe events
@@ -373,18 +375,24 @@ class CertificateAnalyzer:
                     path = arg.string_arg
                     if self.is_cert_path(path):
                         cert_path = path
+                        logger.debug(f"Found cert path in uprobe string_arg: {cert_path}")
                         break
         
+        # Translate host paths to container paths
+        if cert_path and not cert_path.startswith("/host"):
+            cert_path = "/host" + cert_path
         return cert_path, process_name, pid, namespace
     
     def process_event(self, event):
         """Process a single Tetragon event"""
+        logger.debug(f"Processing event...")
         cert_path, process_name, pid, namespace = self.extract_cert_path_from_event(event)
+        logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}")
         
         if not cert_path:
             return
         
-        logger.debug(f"Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
+        logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
         
         # Analyze the certificate
         cert_info = self.analyze_certificate(cert_path, process_name, pid, namespace)

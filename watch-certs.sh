@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 echo "Monitoring Certificate Analyzer (Ctrl+C to stop)..."
 echo "=================================================="
 
-sudo podman logs -f cert-analyzer --since 1m | while read line; do
+sudo podman logs -f cert-analyzer | while read line; do
     if [[ $line == *"🔴 EXPIRED"* ]] || [[ $line == *"EXPIRED"* ]]; then
         echo -e "${RED}${line}${NC}"
     elif [[ $line == *"🔴 CRITICAL"* ]] || [[ $line == *"CRITICAL"* ]]; then
