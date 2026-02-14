@@ -2,6 +2,9 @@
 
 A comprehensive solution for monitoring TLS certificate expiry using Tetragon (eBPF) and Python, designed for RHEL9 with Podman.
 
+> ⚖️ **License**: GPL-3.0  
+> 💼 **Commercial licensing available** for proprietary/internal enterprise use — contact:
+
 ![Realtime certificate expiry checking](demo.gif)
 
 ## Overview
