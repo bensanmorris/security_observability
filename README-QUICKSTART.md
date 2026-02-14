@@ -51,40 +51,6 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days | head 
 **In a separate terminal**, run the colorized log watcher:
 
 ```bash
-# Create the log watcher script
-cat > watch-certs.sh << 'EOF'
-#!/bin/bash
-
-# Color definitions
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-echo "Monitoring Certificate Analyzer (Ctrl+C to stop)..."
-echo "=================================================="
-
-sudo podman logs -f cert-analyzer --since 1m | while read line; do
-    if [[ $line == *"🔴 EXPIRED"* ]] || [[ $line == *"EXPIRED"* ]]; then
-        echo -e "${RED}${line}${NC}"
-    elif [[ $line == *"🔴 CRITICAL"* ]] || [[ $line == *"CRITICAL"* ]]; then
-        echo -e "${RED}${line}${NC}"
-    elif [[ $line == *"⚠️"* ]] || [[ $line == *"WARNING"* ]]; then
-        echo -e "${YELLOW}${line}${NC}"
-    elif [[ $line == *"✅"* ]] || [[ $line == *"OK:"* ]]; then
-        echo -e "${GREEN}${line}${NC}"
-    elif [[ $line == *"Connected to Tetragon"* ]]; then
-        echo -e "${BLUE}${line}${NC}"
-    else
-        echo "$line"
-    fi
-done
-EOF
-
-chmod +x watch-certs.sh
-
-# Run it
 ./watch-certs.sh
 ```
 
