@@ -137,21 +137,6 @@ Key areas:
 - Metrics updates
 - Edge cases
 
-## Continuous Integration
-
-Add to your CI pipeline:
-
-```yaml
-# GitHub Actions example
-- name: Run tests
-  run: |
-    pip install -r test-requirements.txt
-    pytest test_cert_analyzer.py --cov=cert_analyzer_multi --cov-report=xml
-    
-- name: Upload coverage
-  uses: codecov/codecov-action@v3
-```
-
 ## Test Data
 
 All test certificates are generated dynamically using the `cryptography` library.
