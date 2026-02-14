@@ -2,6 +2,7 @@
 """
 TLS Certificate Expiry Monitor for RHEL9/Podman
 Consumes Tetragon events and analyzes certificate expiry dates
+EXTENDED: Now supports multiple certificates per file
 """
 
 import os
@@ -10,10 +11,11 @@ import logging
 import grpc
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, List
 from dataclasses import dataclass, field
 from concurrent import futures
 import time
+import re
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -52,6 +54,7 @@ class CertificateInfo:
     namespace: str = ""
     common_name: str = ""
     san_dns_names: list = field(default_factory=list)
+    cert_index: int = 0  # NEW: Index in multi-cert file
     
     @property
     def days_until_expiry(self) -> float:
@@ -67,6 +70,11 @@ class CertificateInfo:
     def expires_soon(self, days: int = 30) -> bool:
         """Check if certificate expires within specified days"""
         return 0 < self.days_until_expiry < days
+    
+    @property
+    def unique_key(self) -> str:
+        """Unique identifier for this certificate"""
+        return f"{self.path}:{self.cert_index}:{self.serial_number}"
 
 
 class PrometheusMetrics:
@@ -77,19 +85,19 @@ class PrometheusMetrics:
         self.cert_expiry_days = Gauge(
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name']
+            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name', 'cert_index']
         )
         
         self.cert_expiry_timestamp = Gauge(
             'tls_certificate_expiry_timestamp',
             'Unix timestamp of certificate expiry',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name']
+            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name', 'cert_index']
         )
         
         self.cert_valid_from = Gauge(
             'tls_certificate_valid_from_timestamp',
             'Unix timestamp of certificate valid from date',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name']
+            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name', 'cert_index']
         )
         
         # Event counters
@@ -109,13 +117,13 @@ class PrometheusMetrics:
         self.cert_expired = Gauge(
             'tls_certificate_expired',
             'Whether certificate is expired (1=expired, 0=valid)',
-            ['cert_path', 'process']
+            ['cert_path', 'process', 'cert_index']
         )
         
         self.cert_expiring_soon = Gauge(
             'tls_certificate_expiring_soon',
             'Whether certificate expires within threshold (1=yes, 0=no)',
-            ['cert_path', 'process', 'threshold_days']
+            ['cert_path', 'process', 'threshold_days', 'cert_index']
         )
         
         # System health
@@ -138,22 +146,26 @@ class PrometheusMetrics:
             'issuer': info.issuer[:100],
             'serial': info.serial_number,
             'process': info.process,
-            'common_name': info.common_name
+            'common_name': info.common_name,
+            'cert_index': str(info.cert_index)
         }
         
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
         self.cert_valid_from.labels(**labels).set(info.not_before.timestamp())
         
-        self.cert_expired.labels(cert_path=info.path, process=info.process).set(
-            1 if info.is_expired else 0
-        )
+        self.cert_expired.labels(
+            cert_path=info.path, 
+            process=info.process,
+            cert_index=str(info.cert_index)
+        ).set(1 if info.is_expired else 0)
         
         for threshold in [7, 30, 90]:
             self.cert_expiring_soon.labels(
                 cert_path=info.path,
                 process=info.process,
-                threshold_days=str(threshold)
+                threshold_days=str(threshold),
+                cert_index=str(info.cert_index)
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
 
 
@@ -166,7 +178,7 @@ class CertificateAnalyzer:
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.metrics = PrometheusMetrics()
-        self.known_certs: Dict[str, CertificateInfo] = {}
+        self.known_certs: Dict[str, CertificateInfo] = {}  # key = unique_key
         self.processed_paths: Set[str] = set()
         
     def is_cert_path(self, path: str) -> bool:
@@ -176,38 +188,59 @@ class CertificateAnalyzer:
         path_obj = Path(path)
         return path_obj.suffix.lower() in self.CERT_EXTENSIONS
     
-    def parse_certificate(self, cert_path: str) -> Optional[x509.Certificate]:
-        """Parse an X.509 certificate from a file"""
+    def parse_certificates(self, cert_path: str) -> List[x509.Certificate]:
+        """Parse ALL X.509 certificates from a file (supports multi-cert files)"""
         try:
             with open(cert_path, 'rb') as f:
                 cert_data = f.read()
             
-            # Try PEM format first
-            try:
-                cert = x509.load_pem_x509_certificate(cert_data, default_backend())
-                return cert
-            except Exception:
-                # Try DER format
-                try:
-                    cert = x509.load_der_x509_certificate(cert_data, default_backend())
-                    return cert
-                except Exception:
-                    pass
+            certificates = []
             
-            return None
+            # Try PEM format first (can contain multiple certs)
+            try:
+                # Split on PEM boundaries to find all certificates
+                pem_pattern = re.compile(
+                    b'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
+                    re.DOTALL
+                )
+                pem_certs = pem_pattern.findall(cert_data)
+                
+                if pem_certs:
+                    for pem_cert in pem_certs:
+                        try:
+                            cert = x509.load_pem_x509_certificate(pem_cert, default_backend())
+                            certificates.append(cert)
+                        except Exception as e:
+                            logger.debug(f"Failed to parse PEM cert in {cert_path}: {e}")
+                    
+                    if certificates:
+                        logger.debug(f"Loaded {len(certificates)} certificate(s) from {cert_path}")
+                        return certificates
+                        
+            except Exception as e:
+                logger.debug(f"PEM parsing failed for {cert_path}: {e}")
+            
+            # Try DER format (single certificate)
+            try:
+                cert = x509.load_der_x509_certificate(cert_data, default_backend())
+                return [cert]
+            except Exception:
+                pass
+            
+            return []
             
         except FileNotFoundError:
             logger.debug(f"Certificate file not found: {cert_path}")
             self.metrics.cert_analysis_errors.labels(error_type='file_not_found').inc()
-            return None
+            return []
         except PermissionError:
             logger.debug(f"Permission denied reading certificate: {cert_path}")
             self.metrics.cert_analysis_errors.labels(error_type='permission_denied').inc()
-            return None
+            return []
         except Exception as e:
             logger.debug(f"Error reading certificate {cert_path}: {e}")
             self.metrics.cert_analysis_errors.labels(error_type='read_error').inc()
-            return None
+            return []
     
     def extract_certificate_info(
         self, 
@@ -215,7 +248,8 @@ class CertificateAnalyzer:
         cert_path: str, 
         process: str, 
         pid: int,
-        namespace: str = ""
+        namespace: str = "",
+        cert_index: int = 0
     ) -> CertificateInfo:
         """Extract relevant information from an X.509 certificate"""
         
@@ -255,7 +289,8 @@ class CertificateAnalyzer:
             pid=pid,
             namespace=namespace,
             common_name=common_name,
-            san_dns_names=san_dns_names
+            san_dns_names=san_dns_names,
+            cert_index=cert_index
         )
     
     def analyze_certificate(
@@ -264,56 +299,61 @@ class CertificateAnalyzer:
         process: str, 
         pid: int,
         namespace: str = ""
-    ) -> Optional[CertificateInfo]:
-        """Analyze a certificate file and return certificate info"""
+    ) -> List[CertificateInfo]:
+        """Analyze a certificate file and return list of certificate info (supports multi-cert files)"""
         
-        # Skip if already processed recently
-        #if cert_path in self.processed_paths:
-        #    logger.debug(f"Skipping already processed certificate: {cert_path}")
-        #    return self.known_certs.get(cert_path)
+        # Parse ALL certificates from the file
+        certs = self.parse_certificates(cert_path)
+        if not certs:
+            return []
         
-        # Parse certificate
-        cert = self.parse_certificate(cert_path)
-        if cert is None:
-            return None
+        # Extract information from each certificate
+        cert_infos = []
+        for idx, cert in enumerate(certs):
+            try:
+                cert_info = self.extract_certificate_info(
+                    cert, cert_path, process, pid, namespace, cert_index=idx
+                )
+                cert_infos.append(cert_info)
+                self.metrics.cert_events_total.labels(event_type='analysis', status='success').inc()
+            except Exception as e:
+                logger.error(f"Error extracting certificate info from {cert_path} (cert {idx}): {e}")
+                self.metrics.cert_events_total.labels(event_type='analysis', status='failed').inc()
+                self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
         
-        # Extract information
-        try:
-            cert_info = self.extract_certificate_info(cert, cert_path, process, pid, namespace)
-            self.metrics.cert_events_total.labels(event_type='analysis', status='success').inc()
-            self.processed_paths.add(cert_path)
-            return cert_info
-        except Exception as e:
-            logger.error(f"Error extracting certificate info from {cert_path}: {e}")
-            self.metrics.cert_events_total.labels(event_type='analysis', status='failed').inc()
-            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
-            return None
+        self.processed_paths.add(cert_path)
+        return cert_infos
     
     def log_certificate_status(self, info: CertificateInfo):
         """Log certificate status with appropriate severity"""
         days_left = info.days_until_expiry
         
+        # Add cert index to path if there are multiple certs
+        display_path = info.path
+        if info.cert_index > 0:
+            display_path = f"{info.path} [cert #{info.cert_index + 1}]"
+        
         if info.is_expired:
             logger.error(
-                f"🔴 EXPIRED: Certificate {info.path} "
+                f"🔴 EXPIRED: Certificate {display_path} "
                 f"(process: {info.process}, CN: {info.common_name}) "
                 f"expired {abs(days_left):.1f} days ago"
             )
         elif days_left < 7:
             logger.critical(
-                f"🔴 CRITICAL: Certificate {info.path} "
+                f"🔴 CRITICAL: Certificate {display_path} "
                 f"(process: {info.process}, CN: {info.common_name}) "
                 f"expires in {days_left:.1f} days"
             )
         elif days_left < self.alert_threshold_days:
             logger.warning(
-                f"⚠️  WARNING: Certificate {info.path} "
+                f"⚠️  WARNING: Certificate {display_path} "
                 f"(process: {info.process}, CN: {info.common_name}) "
                 f"expires in {days_left:.1f} days"
             )
         else:
             logger.info(
-                f"✅ OK: Certificate {info.path} "
+                f"✅ OK: Certificate {display_path} "
                 f"(process: {info.process}, CN: {info.common_name}) "
                 f"valid for {days_left:.1f} more days"
             )
@@ -381,6 +421,7 @@ class CertificateAnalyzer:
         # Translate host paths to container paths
         if cert_path and not cert_path.startswith("/host"):
             cert_path = "/host" + cert_path
+        
         return cert_path, process_name, pid, namespace
     
     def process_event(self, event):
@@ -396,22 +437,40 @@ class CertificateAnalyzer:
         if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
             logger.debug(f"Skipping self-generated event from {process_name}")
             return
+        
         logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
         
-        # Analyze the certificate
-        cert_info = self.analyze_certificate(cert_path, process_name, pid, namespace)
-        if cert_info is None:
+        # Check if we've already analyzed this file
+        file_key = f"{cert_path}:*"
+        if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
+            # Re-log status for already-known certificates
+            logger.info(f"Re-detected known certificate file: {cert_path}")
+            for key, cert_info in self.known_certs.items():
+                if key.startswith(cert_path + ":"):
+                    self.log_certificate_status(cert_info)
+                    self.metrics.update_certificate_metrics(cert_info)
+            self.metrics.last_event_timestamp.set(time.time())
             return
         
-        # Update metrics
-        self.metrics.update_certificate_metrics(cert_info)
+        # Analyze new certificate file (may contain multiple certs)
+        cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
+        if not cert_infos:
+            return
+        
+        logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
+        
+        # Process each certificate
+        for cert_info in cert_infos:
+            # Update metrics
+            self.metrics.update_certificate_metrics(cert_info)
+            
+            # Log status
+            self.log_certificate_status(cert_info)
+            
+            # Store in known certificates
+            self.known_certs[cert_info.unique_key] = cert_info
+        
         self.metrics.last_event_timestamp.set(time.time())
-        
-        # Log status
-        self.log_certificate_status(cert_info)
-        
-        # Store in known certificates
-        self.known_certs[cert_path] = cert_info
     
     def start(self):
         """Start listening to Tetragon events"""
@@ -477,15 +536,15 @@ class CertificateAnalyzer:
                 cert_count = 0
                 for cert_file in path_obj.rglob('*'):
                     if cert_file.is_file() and self.is_cert_path(str(cert_file)):
-                        cert_info = self.analyze_certificate(
+                        cert_infos = self.analyze_certificate(
                             str(cert_file), 
                             "periodic_scan", 
                             0
                         )
-                        if cert_info:
+                        for cert_info in cert_infos:
                             self.metrics.update_certificate_metrics(cert_info)
                             self.log_certificate_status(cert_info)
-                            self.known_certs[str(cert_file)] = cert_info
+                            self.known_certs[cert_info.unique_key] = cert_info
                             cert_count += 1
                 
                 logger.info(f"Scanned {cert_count} certificates in {base_path}")
@@ -511,7 +570,7 @@ def main():
     logging.getLogger().setLevel(getattr(logging, log_level.upper()))
     
     logger.info("="*60)
-    logger.info("TLS Certificate Expiry Monitor")
+    logger.info("TLS Certificate Expiry Monitor (Multi-Cert Support)")
     logger.info("="*60)
     logger.info(f"Tetragon address: {tetragon_addr}")
     logger.info(f"Metrics port: {metrics_port}")
