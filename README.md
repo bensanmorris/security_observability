@@ -1,5 +1,9 @@
 # DRAFT: A WIP TLS Certificate Expiry Monitor
 
+![Tests](https://github.com/USERNAME/REPO/actions/workflows/test.yml/badge.svg)
+![CI Pipeline](https://github.com/USERNAME/REPO/actions/workflows/ci.yml/badge.svg)
+![Quick Test](https://github.com/USERNAME/REPO/actions/workflows/quick-test.yml/badge.svg)
+
 A comprehensive solution for monitoring TLS certificate expiry using Tetragon (eBPF) and Python, designed for RHEL9 with Podman.
 
 > ⚖️ **License**: GPL-3.0  
