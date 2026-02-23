@@ -4,7 +4,7 @@
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 
-A comprehensive solution for monitoring TLS certificate expiry using Tetragon (eBPF) and Python, designed for RHEL9 with Podman.
+Detect expired TLS certificates at runtime without modifying applications.
 
 > ⚖️ **License**: GPL-3.0  
 > 💼 **Commercial licensing available** for proprietary/internal enterprise use - contact: bensan.morris@googlemail.com
