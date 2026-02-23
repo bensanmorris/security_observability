@@ -1,5 +1,7 @@
 # Pod Enrichment Testing Guide
 
+![pod enrichment via k8s api](pod_enrich.png)
+
 ## Overview
 
 This guide walks through testing the Kubernetes pod enrichment feature of the cert-analyzer, which enriches expired certificate detection events with full workload context — pod name, namespace, and owning workload (Deployment, DaemonSet, StatefulSet).
@@ -202,7 +204,18 @@ kubectl logs -n kube-system -l app=cert-expiry-monitor -f
 
 ### 7. Run the Test Pod
 
-In a separate terminal, run a pod that creates and repeatedly accesses an expired certificate:
+The cert-analyzer mounts the node's root filesystem at `/host`, so it can only read certificate files that exist on the node filesystem — not inside other containers. To make the test certificate visible to the cert-analyzer, first create it directly on the kind node:
+
+```bash
+sudo docker exec cert-monitor-control-plane sh -c "openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout /tmp/test.key \
+  -out /tmp/test.crt \
+  -not_before 20230101000000Z \
+  -not_after 20230102000000Z \
+  -subj '/CN=expired.test.local'"
+```
+
+Then run the test pod mounting the node's `/tmp` as a hostPath volume so it can access the certificate:
 
 ```bash
 kubectl delete pod cert-test --ignore-not-found
@@ -210,17 +223,10 @@ kubectl run cert-test \
   --image=alpine \
   --restart=Never \
   --rm -it \
-  -- sh -c "apk add openssl && \
-    openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout /tmp/test.key \
-      -out /tmp/test.crt \
-      -not_before 20230101000000Z \
-      -not_after 20230102000000Z \
-      -subj '/CN=expired.test.local' && \
-    while true; do cat /tmp/test.crt; sleep 5; done"
+  --overrides='{"spec":{"volumes":[{"name":"host-tmp","hostPath":{"path":"/tmp"}}],"containers":[{"name":"cert-test","image":"alpine","command":["sh","-c","while true; do cat /host-tmp/test.crt; sleep 5; done"],"volumeMounts":[{"name":"host-tmp","mountPath":"/host-tmp"}]}]}}'
 ```
 
-The `-not_before` and `-not_after` flags create a certificate that was only valid on 1st January 2023 and is therefore already expired. This approach is used instead of `-days -1` as newer versions of OpenSSL in Alpine reject non-positive day values. The `while` loop repeatedly reads the certificate file every 5 seconds to generate a stream of Tetragon events.
+The `-not_before` and `-not_after` flags create a certificate that was only valid on 1st January 2023 and is therefore already expired. The `while` loop repeatedly reads the certificate file from the node filesystem every 5 seconds to generate a stream of Tetragon events that the cert-analyzer can intercept and enrich with pod context.
 
 ---
 

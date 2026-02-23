@@ -38,7 +38,7 @@ spec:
         - name: ALERT_THRESHOLD_DAYS
           value: "30"
         - name: LOG_LEVEL
-          value: "INFO"
+          value: "DEBUG"
         - name: CERT_SCAN_PATHS
           value: "/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki"
         - name: SCAN_INTERVAL_SECONDS

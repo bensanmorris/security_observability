@@ -484,6 +484,7 @@ class CertificateAnalyzer:
                         cert_path = path
                         logger.debug(f"Found cert path in string_arg: {cert_path}")
                         break
+            logger.debug(f"Pod field present: {kprobe.process.HasField('pod')}, pod fields: {kprobe.process.pod if kprobe.process.HasField('pod') else 'none'}")
 
         # Handle uprobe events
         elif event.HasField('process_uprobe'):
