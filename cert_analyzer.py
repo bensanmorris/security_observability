@@ -63,12 +63,10 @@ class CertificateInfo:
     common_name: str = ""
     san_dns_names: list = field(default_factory=list)
     cert_index: int = 0
-    # Workload context sourced directly from Tetragon event (always populated when available)
+    # Kubernetes workload context (populated by enricher when available)
     pod_name: str = ""
     workload_kind: str = ""
     workload_name: str = ""
-    pod_labels: dict = None
-    # Additional context from Kubernetes API enricher (supplements Tetragon data)
     app_label: str = ""
     container_name: str = ""
     container_image: str = ""
@@ -377,46 +375,23 @@ class CertificateAnalyzer:
         self.processed_paths.add(cert_path)
         return cert_infos
 
-    def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
-        """
-        Apply workload context to a CertificateInfo instance.
+    def _apply_pod_context(self, cert_info: CertificateInfo, pod_name: str):
+        """Look up pod metadata and apply it to a CertificateInfo instance"""
+        if not self.enricher or not self.enricher.available:
+            return
+        if not pod_name or not cert_info.namespace:
+            return
 
-        Primary source: Tetragon event pod proto - provides pod name, namespace,
-        workload kind/name, and pod labels with zero additional API calls.
+        pod_ctx = self.enricher.enrich(pod_name, cert_info.namespace)
+        if not pod_ctx:
+            return
 
-        Secondary source: Kubernetes API enricher - supplements with fields
-        Tetragon does not provide, specifically container name and container image.
-        """
-        # --- Primary: read directly from the Tetragon event proto ---
-        if tetragon_pod is not None:
-            cert_info.pod_name      = tetragon_pod.name
-            cert_info.namespace     = tetragon_pod.namespace
-            cert_info.workload_kind = tetragon_pod.workload_kind
-            cert_info.workload_name = tetragon_pod.workload
-            cert_info.pod_labels    = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
-            # Derive app_label from pod labels using common conventions
-            for key in ["app.kubernetes.io/name", "app", "name"]:
-                if key in cert_info.pod_labels:
-                    cert_info.app_label = cert_info.pod_labels[key]
-                    break
-            logger.debug(
-                f"Tetragon pod context: pod={cert_info.pod_name} "
-                f"namespace={cert_info.namespace} "
-                f"workload={cert_info.workload_kind}/{cert_info.workload_name} "
-                f"labels={cert_info.pod_labels}"
-            )
-
-        # --- Secondary: Kubernetes API for fields Tetragon doesn't provide ---
-        # Currently used for: container_name, container_image
-        if self.enricher and self.enricher.available and cert_info.pod_name and cert_info.namespace:
-            pod_ctx = self.enricher.enrich(cert_info.pod_name, cert_info.namespace)
-            if pod_ctx:
-                cert_info.container_name  = pod_ctx.container_name
-                cert_info.container_image = pod_ctx.container_image
-                logger.debug(
-                    f"K8s enricher added: container={cert_info.container_name} "
-                    f"image={cert_info.container_image}"
-                )
+        cert_info.pod_name       = pod_ctx.pod_name
+        cert_info.workload_kind  = pod_ctx.workload_kind
+        cert_info.workload_name  = pod_ctx.workload_name
+        cert_info.app_label      = pod_ctx.app_label
+        cert_info.container_name = pod_ctx.container_name
+        cert_info.container_image = pod_ctx.container_image
 
     def log_certificate_status(self, info: CertificateInfo):
         """Log certificate status with appropriate severity"""
@@ -478,13 +453,20 @@ class CertificateAnalyzer:
             logger.debug(f"   Workload: {info.workload}")
             logger.debug(f"   Container: {info.container_name} ({info.container_image})")
 
-    def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, str]:
-        """Extract certificate path, process name, PID, namespace, and pod name from Tetragon event"""
-        cert_path = None
+    def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
+        """
+        Extract certificate path, process name, PID, namespace, and the raw
+        Tetragon pod proto from a Tetragon event.
+
+        Returns the pod proto object directly rather than individual string fields
+        so that _apply_pod_context can read all available pod metadata (name,
+        namespace, workload, labels) in one place without multiple return values.
+        """
+        cert_path    = None
         process_name = ""
-        pid = 0
-        namespace = ""
-        pod_name = ""
+        pid          = 0
+        namespace    = ""
+        tetragon_pod = None
 
         # Handle kprobe events
         if event.HasField('process_kprobe'):
@@ -493,8 +475,8 @@ class CertificateAnalyzer:
             pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
 
             if kprobe.process.HasField('pod'):
-                namespace = kprobe.process.pod.namespace
-                pod_name  = kprobe.process.pod.name
+                tetragon_pod = kprobe.process.pod
+                namespace    = tetragon_pod.namespace
 
             for arg in kprobe.args:
                 if arg.HasField('file_arg'):
@@ -517,8 +499,8 @@ class CertificateAnalyzer:
             pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
 
             if uprobe.process.HasField('pod'):
-                namespace = uprobe.process.pod.namespace
-                pod_name  = uprobe.process.pod.name
+                tetragon_pod = uprobe.process.pod
+                namespace    = tetragon_pod.namespace
 
             for arg in uprobe.args:
                 if arg.HasField('string_arg'):
@@ -532,14 +514,13 @@ class CertificateAnalyzer:
         if cert_path and not cert_path.startswith("/host"):
             cert_path = "/host" + cert_path
 
-        return cert_path, process_name, pid, namespace, pod_name
+        return cert_path, process_name, pid, namespace, tetragon_pod
 
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
-        cert_path, process_name, pid, namespace, tetragon_pod = \
+        cert_path, process_name, pid, namespace, pod_name = \
             self.extract_cert_path_from_event(event)
-        pod_name = tetragon_pod.name if tetragon_pod is not None else ""
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
 
         if not cert_path:
@@ -573,8 +554,8 @@ class CertificateAnalyzer:
         logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
 
         for cert_info in cert_infos:
-            # Apply pod context: Tetragon event first, k8s API for extras
-            self._apply_pod_context(cert_info, tetragon_pod)
+            # Enrich with Kubernetes pod context if available
+            self._apply_pod_context(cert_info, pod_name)
 
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)
