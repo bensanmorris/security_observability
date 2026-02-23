@@ -1,4 +1,4 @@
-# Runtime TLS certificate expiry detection via eBPF
+# CertSight - Runtime TLS certificate expiry detection via eBPF
 
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
