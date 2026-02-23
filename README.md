@@ -13,9 +13,10 @@ A comprehensive solution for monitoring TLS certificate expiry using Tetragon (e
 
 ## Quick start guides
 
-- [Deployment guide](DEPLOYMENT-README.md)
-- [Demo quickstart guide](README-QUICKSTART.md)
+- [Demo - intercepting certificates](README-QUICKSTART.md)
+- [Demo - intercepting certificates in k8s with pod enrichment](POD-ENRICHMENT-DEMO-README.md)
 - [Testing guide](TEST-README.md)
+- [Deployment guide](DEPLOYMENT-README.md)
 
 ## Overview
 
