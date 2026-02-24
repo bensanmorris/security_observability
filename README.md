@@ -30,14 +30,14 @@ This tool monitors TLS certificate usage and expiry in real-time by:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ Kernel Space (eBPF via Tetragon)               │
+│ Kernel Space (eBPF via Tetragon)                │
 │ - Intercept TLS operations                      │
-│ - Monitor file access to certificates          │
+│ - Monitor file access to certificates           │
 └──────────────────┬──────────────────────────────┘
                    │ Events via gRPC
                    ▼
 ┌─────────────────────────────────────────────────┐
-│ Certificate Analyzer (Python/Podman)           │
+│ Certificate Analyzer (Python/Podman)            │
 │ - Parse X.509 certificates                      │
 │ - Extract expiry dates                          │
 │ - Generate metrics & alerts                     │
@@ -45,7 +45,7 @@ This tool monitors TLS certificate usage and expiry in real-time by:
                    │ Prometheus Metrics
                    ▼
 ┌─────────────────────────────────────────────────┐
-│ Observability Stack (Prometheus/Grafana)       │
+│ Observability Stack (Prometheus/Grafana)        │
 └─────────────────────────────────────────────────┘
 ```
 
