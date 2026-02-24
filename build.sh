@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 echo "============================================"
 echo "Building Certificate Analyzer for Podman"
