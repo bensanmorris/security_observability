@@ -12,28 +12,28 @@ The full production stack consists of five components:
 ┌─────────────────────────────────────────────────────────────┐
 │ Kubernetes Node                                             │
 │                                                             │
-│  ┌──────────────────────┐   gRPC   ┌───────────────────┐   │
-│  │  Tetragon (DaemonSet)│ ───────► │ cert-analyzer     │   │
-│  │  eBPF interception   │          │ (DaemonSet)       │   │
-│  │  of cert file access │          │ Publishes metrics  │   │
-│  └──────────────────────┘          └────────┬──────────┘   │
-│                                             │ :9090        │
-└─────────────────────────────────────────────┼─────────────-┘
+│  ┌──────────────────────┐   gRPC   ┌───────────────────┐    │
+│  │  Tetragon (DaemonSet)│ ───────► │ cert-analyzer     │    │
+│  │  eBPF interception   │          │ (DaemonSet)       │    │
+│  │  of cert file access │          │ Publishes metrics │    │
+│  └──────────────────────┘          └────────┬──────────┘    │
+│                                             │ :9090         │
+└─────────────────────────────────────────────┼───────────────┘
                                               │ scrape
                                     ┌─────────▼──────────┐
-                                    │    Prometheus       │
-                                    │  Stores metrics &   │
-                                    │  evaluates rules    │
+                                    │    Prometheus      │
+                                    │  Stores metrics &  │
+                                    │  evaluates rules   │
                                     └─────────┬──────────┘
                                               │ fires alerts
                                     ┌─────────▼──────────┐
-                                    │    Alertmanager     │
-                                    │  Routes & notifies  │
+                                    │    Alertmanager    │
+                                    │  Routes & notifies │
                                     └─────────┬──────────┘
                                               │
                                     ┌─────────▼──────────┐
-                                    │      Grafana        │
-                                    │  Visualises metrics │
+                                    │      Grafana       │
+                                    │  Visualises metrics│
                                     └────────────────────┘
 ```
 
