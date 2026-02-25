@@ -10,10 +10,10 @@ if [ ! -d "tetragon" ] || [ ! -f "tetragon/tetragon_pb2.py" ]; then
     bash generate_tetragon_protos.sh
 fi
 
-# Stop and remove running container
-sudo podman stop cert-analyzer
-sudo podman rm cert-analyzer
-sudo podman rmi localhost/cert-analyzer:latest
+# Stop and remove running container (ignore errors if not running/present)
+sudo podman stop cert-analyzer 2>/dev/null || true
+sudo podman rm cert-analyzer 2>/dev/null || true
+sudo podman rmi localhost/cert-analyzer:latest 2>/dev/null || true
 
 # Build with Podman
 echo "Building container image..."

@@ -225,7 +225,7 @@ sudo systemctl status cert-analyzer
 
 ```bash
 # Check container logs
-podman logs -f cert-analyzer
+sudo podman logs -f cert-analyzer
 # OR with systemd
 sudo journalctl -u cert-analyzer -f
 
