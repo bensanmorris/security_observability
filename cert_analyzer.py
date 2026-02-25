@@ -567,6 +567,11 @@ class CertificateAnalyzer:
             logger.info(f"Re-detected known certificate file: {cert_path}")
             for key, cert_info in self.known_certs.items():
                 if key.startswith(cert_path + ":"):
+                    # If this event carries pod context that the cached entry lacks,
+                    # apply it now so log lines and metrics reflect the correct workload.
+                    if tetragon_pod is not None and not cert_info.pod_name:
+                        logger.debug(f"Applying pod context to cached entry for {cert_path}")
+                        self._apply_pod_context(cert_info, tetragon_pod)
                     self.log_certificate_status(cert_info)
                     self.metrics.update_certificate_metrics(cert_info)
             self.metrics.last_event_timestamp.set(time.time())

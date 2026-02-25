@@ -80,6 +80,12 @@ kubectl cluster-info --context kind-cert-monitor
 kubectl get nodes
 ```
 
+NB. If you receive dial tcp connection refused errors then it's likely you are not running these steps for the first time in which case start the control plane:
+
+```bash
+sudo docker start cert-monitor-control-plane
+```
+
 ### 2. Load the cert-analyzer Image
 
 kind uses its own internal image store so rather than pushing to a registry you load the image directly:
@@ -96,14 +102,41 @@ sudo docker exec cert-monitor-control-plane crictl images | grep cert-analyzer
 
 You should see `cert-analyzer` listed with the `latest` tag.
 
-Update `kubernetes/deployment.yaml` to match:
+### 3. Deploy Tetragon
 
-```yaml
-image: cert-analyzer:latest
-imagePullPolicy: Never
+NB. If you've previously installed Tetragon then skip the Tetragon installation steps below and instead simply:
+
+```bash
+sudo /usr/local/bin/kind get kubeconfig --name cert-monitor > ~/.kube/config
 ```
 
-### 3. Deploy Tetragon
+You should see output such as:
+
+```bash
+kubectl cluster-info --context kind-cert-monitor
+enabling experimental podman provider
+Kubernetes control plane is running at https://127.0.0.1:33821
+CoreDNS is running at https://127.0.0.1:33821/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.
+```
+
+You can verify your (pre-installed) Tetragon is running:
+
+```bash
+kubectl get pods -n kube-system -l app.kubernetes.io/name=tetragon
+```
+
+You should see output like:
+
+```bash
+NAME             READY   STATUS    RESTARTS      AGE
+tetragon-w5qk7   2/2     Running   2 (10m ago)   47h
+[benm@localhost security_observability]$ 
+
+```
+
+#### Tetragon Installation Steps
 
 If helm is not already installed, install it first (it is not available via dnf on RHEL9):
 
@@ -210,8 +243,7 @@ The cert-analyzer mounts the node's root filesystem at `/host`, so it can only r
 sudo docker exec cert-monitor-control-plane sh -c "openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout /tmp/test.key \
   -out /tmp/test.crt \
-  -not_before 20230101000000Z \
-  -not_after 20230102000000Z \
+  -days 1 \
   -subj '/CN=expired.test.local'"
 ```
 
@@ -222,11 +254,8 @@ kubectl delete pod cert-test --ignore-not-found
 kubectl run cert-test \
   --image=alpine \
   --restart=Never \
-  --rm -it \
-  --overrides='{"spec":{"volumes":[{"name":"host-tmp","hostPath":{"path":"/tmp"}}],"containers":[{"name":"cert-test","image":"alpine","command":["sh","-c","while true; do cat /host-tmp/test.crt; sleep 5; done"],"volumeMounts":[{"name":"host-tmp","mountPath":"/host-tmp"}]}]}}'
+  --overrides='{"spec":{"volumes":[{"name":"host-tmp","hostPath":{"path":"/tmp"}}],"containers":[{"name":"cert-test","image":"alpine","command":["sh","-c","while true; do cat /tmp/test.crt; sleep 5; done"],"volumeMounts":[{"name":"host-tmp","mountPath":"/tmp"}]}]}}'
 ```
-
-The `-not_before` and `-not_after` flags create a certificate that was only valid on 1st January 2023 and is therefore already expired. The `while` loop repeatedly reads the certificate file from the node filesystem every 5 seconds to generate a stream of Tetragon events that the cert-analyzer can intercept and enrich with pod context.
 
 ---
 
@@ -235,12 +264,14 @@ The `-not_before` and `-not_after` flags create a certificate that was only vali
 In the cert-analyzer log terminal you should see output similar to the following for each event:
 
 ```
-🔴 EXPIRED: /tmp/test.crt |
-  pod=cert-test namespace=default
-  workload=Pod/cert-test
-  container=cert-test
-  CN=expired.test.local
-  expired 1.0 days ago
+2026-02-25 14:35:04,316 - __main__ - CRITICAL - 🔴 CRITICAL: /host/tmp/test.crt (process=/bin/cat CN=expired.test.local:q) expires in 1.0 days | pod=cert-test namespace=default workload=Pod/cert-test
+2026-02-25 14:35:04,316 - __main__ - DEBUG -    Subject: CN=expired.test.local:q
+2026-02-25 14:35:04,316 - __main__ - DEBUG -    Issuer: CN=expired.test.local:q
+2026-02-25 14:35:04,316 - __main__ - DEBUG -    Serial: 709202244463139163012325764075681776346166910609
+2026-02-25 14:35:04,317 - __main__ - DEBUG -    Valid: 2026-02-25 -> 2026-02-26
+2026-02-25 14:35:04,317 - __main__ - DEBUG -    Pod: default/cert-test
+2026-02-25 14:35:04,317 - __main__ - DEBUG -    Workload: Pod/cert-test
+2026-02-25 14:35:04,317 - __main__ - DEBUG -    Container:  ()
 ```
 
 And in the Prometheus metrics (accessible at `http://localhost:9090/metrics` via port-forward):
