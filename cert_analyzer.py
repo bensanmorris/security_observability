@@ -478,13 +478,20 @@ class CertificateAnalyzer:
             logger.debug(f"   Workload: {info.workload}")
             logger.debug(f"   Container: {info.container_name} ({info.container_image})")
 
-    def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, str]:
-        """Extract certificate path, process name, PID, namespace, and pod name from Tetragon event"""
-        cert_path = None
+    def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
+        """
+        Extract certificate path, process name, PID, namespace, and the raw
+        Tetragon pod proto from a Tetragon event.
+
+        Returns the pod proto object directly rather than individual string fields
+        so that _apply_pod_context can read all available pod metadata (name,
+        namespace, workload, labels) in one place without multiple return values.
+        """
+        cert_path    = None
         process_name = ""
-        pid = 0
-        namespace = ""
-        pod_name = ""
+        pid          = 0
+        namespace    = ""
+        tetragon_pod = None
 
         # Handle kprobe events
         if event.HasField('process_kprobe'):
@@ -493,8 +500,8 @@ class CertificateAnalyzer:
             pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
 
             if kprobe.process.HasField('pod'):
-                namespace = kprobe.process.pod.namespace
-                pod_name  = kprobe.process.pod.name
+                tetragon_pod = kprobe.process.pod
+                namespace    = tetragon_pod.namespace
 
             for arg in kprobe.args:
                 if arg.HasField('file_arg'):
@@ -517,8 +524,8 @@ class CertificateAnalyzer:
             pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
 
             if uprobe.process.HasField('pod'):
-                namespace = uprobe.process.pod.namespace
-                pod_name  = uprobe.process.pod.name
+                tetragon_pod = uprobe.process.pod
+                namespace    = tetragon_pod.namespace
 
             for arg in uprobe.args:
                 if arg.HasField('string_arg'):
@@ -532,7 +539,7 @@ class CertificateAnalyzer:
         if cert_path and not cert_path.startswith("/host"):
             cert_path = "/host" + cert_path
 
-        return cert_path, process_name, pid, namespace, pod_name
+        return cert_path, process_name, pid, namespace, tetragon_pod
 
     def process_event(self, event):
         """Process a single Tetragon event"""
