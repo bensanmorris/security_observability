@@ -6,9 +6,6 @@
 
 Detect expired TLS certificates at runtime without modifying applications.
 
-> ⚖️ **License**: GPL-3.0  
-> 💼 **Commercial licensing available** for proprietary/internal enterprise use - contact: bensan.morris@googlemail.com
-
 ![Realtime certificate expiry checking](demo.gif)
 
 ## Quick start guides
