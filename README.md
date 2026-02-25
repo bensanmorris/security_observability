@@ -1,10 +1,10 @@
-# DRAFT: A WIP TLS Certificate Expiry Monitor
+# CertSight - Runtime TLS certificate expiry detection via eBPF
 
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 
-A comprehensive solution for monitoring TLS certificate expiry using Tetragon (eBPF) and Python, designed for RHEL9 with Podman.
+Detect expired TLS certificates at runtime without modifying applications.
 
 > ⚖️ **License**: GPL-3.0  
 > 💼 **Commercial licensing available** for proprietary/internal enterprise use - contact: bensan.morris@googlemail.com
@@ -30,14 +30,14 @@ This tool monitors TLS certificate usage and expiry in real-time by:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ Kernel Space (eBPF via Tetragon)               │
+│ Kernel Space (eBPF via Tetragon)                │
 │ - Intercept TLS operations                      │
-│ - Monitor file access to certificates          │
+│ - Monitor file access to certificates           │
 └──────────────────┬──────────────────────────────┘
                    │ Events via gRPC
                    ▼
 ┌─────────────────────────────────────────────────┐
-│ Certificate Analyzer (Python/Podman)           │
+│ Certificate Analyzer (Python/Podman)            │
 │ - Parse X.509 certificates                      │
 │ - Extract expiry dates                          │
 │ - Generate metrics & alerts                     │
@@ -45,7 +45,7 @@ This tool monitors TLS certificate usage and expiry in real-time by:
                    │ Prometheus Metrics
                    ▼
 ┌─────────────────────────────────────────────────┐
-│ Observability Stack (Prometheus/Grafana)       │
+│ Observability Stack (Prometheus/Grafana)        │
 └─────────────────────────────────────────────────┘
 ```
 
