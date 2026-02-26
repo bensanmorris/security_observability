@@ -88,21 +88,41 @@ podman --version
 python3 --version
 ```
 
-### Install Tetragon
+# Tetragon Native Install (RHEL9, No Kubernetes)
 
-**Option 1: Kubernetes/OpenShift**
-```bash
-helm repo add cilium https://helm.cilium.io
-helm install tetragon cilium/tetragon -n kube-system
-```
+## Install / Upgrade Tetragon
 
-**Option 2: Standalone on RHEL9**
 ```bash
-# Download Tetragon binary
 TETRAGON_VERSION=v1.6.0
+
+# Download and extract
 curl -LO https://github.com/cilium/tetragon/releases/download/${TETRAGON_VERSION}/tetragon-${TETRAGON_VERSION}-amd64.tar.gz
 tar xzf tetragon-${TETRAGON_VERSION}-amd64.tar.gz
 
+# Copy binaries
+sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/bin/tetragon /usr/local/bin/tetragon
+sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/bin/tetra    /usr/local/bin/tetra
+
+# Copy BPF object files (must match the binary version exactly)
+sudo mkdir -p /usr/local/lib/tetragon/bpf
+sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/lib/tetragon/bpf/* /usr/local/lib/tetragon/bpf/
+
+# Copy default config
+sudo mkdir -p /etc/tetragon/tetragon.conf.d
+sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/lib/tetragon/tetragon.conf.d/* /etc/tetragon/tetragon.conf.d/
+
+# Verify binary version matches BPF files
+/usr/local/bin/tetragon --version
+```
+
+The binary and BPF files **must** come from the same release. A mismatch causes:
+```
+struct alignment checks failed: type name msg_cred_minimal: not found
+```
+
+## Create the systemd Service
+
+```bash
 sudo mkdir -p /var/log/tetragon
 
 cat <<EOF | sudo tee /etc/systemd/system/tetragon.service
@@ -123,38 +143,24 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-
-# Copy BPF files to where Tetragon is actually looking
-sudo mkdir -p /usr/local/lib/tetragon/bpf
-sudo cp tetragon-$TETRAGON_VERSION-amd64/usr/local/lib/tetragon/bpf/* /usr/local/lib/tetragon/bpf/
-
-# Verify
-ls -la /usr/local/lib/tetragon/bpf/ | head -10
-
-# Also copy the config directory (optional but good to have)
-sudo mkdir -p /etc/tetragon/tetragon.conf.d
-sudo cp tetragon-$TETRAGON_VERSION-amd64/usr/local/lib/tetragon/tetragon.conf.d/* /etc/tetragon/tetragon.conf.d/
-
-# Now start Tetragon
-sudo systemctl start tetragon
-
-# Wait a moment for it to start
-sleep 3
-
-# Check status
-sudo systemctl status tetragon
-
-# Check for the socket
-sudo ls -la /var/run/tetragon/tetragon.sock
-
-# If successful, watch the logs briefly
-sudo journalctl -u tetragon -n 50
-
 sudo systemctl daemon-reload
 sudo systemctl enable --now tetragon
+```
+
+## Verify
+
+```bash
+# Check the service is running
 sudo systemctl status tetragon
 
+# Confirm the version shown in logs matches what you installed
+sudo journalctl -u tetragon -n 5 | grep version
+
+# Confirm the gRPC socket is present
+sudo ls -la /var/run/tetragon/tetragon.sock
 ```
+
+You should see `version=v1.6.0` in the journal output.
 
 ## Quick Start
 
