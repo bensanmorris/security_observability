@@ -126,7 +126,7 @@ EOF
 
 # Copy BPF files to where Tetragon is actually looking
 sudo mkdir -p /usr/local/lib/tetragon/bpf
-sudo cp tetragon-v1.0.0-amd64/usr/local/lib/tetragon/bpf/* /usr/local/lib/tetragon/bpf/
+sudo cp tetragon-$TETRAGON_VERSION-amd64/usr/local/lib/tetragon/bpf/* /usr/local/lib/tetragon/bpf/
 
 # Verify
 ls -la /usr/local/lib/tetragon/bpf/ | head -10
