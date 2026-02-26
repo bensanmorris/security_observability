@@ -4,12 +4,11 @@ metadata:
   name: openssl-cert-load
 spec:
   uprobes:
+  # SSL_CTX_* functions are exported from libssl on both RHEL9 and Debian/Ubuntu
   - path: "/usr/lib64/libssl.so.3"
     symbols:
     - "SSL_CTX_use_certificate_file"
     - "SSL_CTX_use_certificate_chain_file"
-    - "PEM_read_X509"
-    - "d2i_X509"
     args:
     - index: 0
       type: "pointer"
@@ -22,6 +21,31 @@ spec:
     symbols:
     - "SSL_CTX_use_certificate_file"
     - "SSL_CTX_use_certificate_chain_file"
+    args:
+    - index: 0
+      type: "pointer"
+    - index: 1
+      type: "string"
+    selectors:
+    - matchActions:
+      - action: Post
+  # PEM_read_X509 and d2i_X509 are implemented in libcrypto, not libssl.
+  # On RHEL9 both symbols resolve as T (exported) in libcrypto.so.3.
+  - path: "/usr/lib64/libcrypto.so.3"
+    symbols:
+    - "PEM_read_X509"
+    - "d2i_X509"
+    args:
+    - index: 0
+      type: "pointer"
+    - index: 1
+      type: "string"
+    selectors:
+    - matchActions:
+      - action: Post
+  # libcrypto path for Debian/Ubuntu-based nodes (e.g. kind)
+  - path: "/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
+    symbols:
     - "PEM_read_X509"
     - "d2i_X509"
     args:
