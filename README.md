@@ -99,7 +99,7 @@ helm install tetragon cilium/tetragon -n kube-system
 **Option 2: Standalone on RHEL9**
 ```bash
 # Download Tetragon binary
-TETRAGON_VERSION=v1.0.0
+TETRAGON_VERSION=v1.6.0
 curl -LO https://github.com/cilium/tetragon/releases/download/${TETRAGON_VERSION}/tetragon-${TETRAGON_VERSION}-amd64.tar.gz
 tar xzf tetragon-${TETRAGON_VERSION}-amd64.tar.gz
 
@@ -133,7 +133,7 @@ ls -la /usr/local/lib/tetragon/bpf/ | head -10
 
 # Also copy the config directory (optional but good to have)
 sudo mkdir -p /etc/tetragon/tetragon.conf.d
-sudo cp tetragon-v1.0.0-amd64/usr/local/lib/tetragon/tetragon.conf.d/* /etc/tetragon/tetragon.conf.d/
+sudo cp tetragon-$TETRAGON_VERSION-amd64/usr/local/lib/tetragon/tetragon.conf.d/* /etc/tetragon/tetragon.conf.d/
 
 # Now start Tetragon
 sudo systemctl start tetragon
