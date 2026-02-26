@@ -11,7 +11,7 @@ spec:
     - "SSL_CTX_use_certificate_chain_file"
     args:
     - index: 0
-      type: "pointer"
+      type: "uint64"
     - index: 1
       type: "string"
     selectors:
@@ -23,7 +23,7 @@ spec:
     - "SSL_CTX_use_certificate_chain_file"
     args:
     - index: 0
-      type: "pointer"
+      type: "uint64"
     - index: 1
       type: "string"
     selectors:
@@ -37,7 +37,7 @@ spec:
     - "d2i_X509"
     args:
     - index: 0
-      type: "pointer"
+      type: "uint64"
     - index: 1
       type: "string"
     selectors:
@@ -50,7 +50,7 @@ spec:
     - "d2i_X509"
     args:
     - index: 0
-      type: "pointer"
+      type: "uint64"
     - index: 1
       type: "string"
     selectors:
