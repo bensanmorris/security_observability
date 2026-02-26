@@ -1,7 +1,14 @@
 #!/bin/bash
 set -e
 
-echo "Generating Tetragon Protocol Buffer files..."
+# TETRAGON_VERSION must be set by the caller, e.g.:
+#   TETRAGON_VERSION=v1.6.0 ./generate_tetragon_protos.sh
+if [ -z "${TETRAGON_VERSION}" ]; then
+    echo "ERROR: TETRAGON_VERSION is not set. Usage: TETRAGON_VERSION=v1.6.0 $0"
+    exit 1
+fi
+
+echo "Generating Tetragon Protocol Buffer files for version ${TETRAGON_VERSION}..."
 
 # Install grpcio-tools if not present
 pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
@@ -9,18 +16,29 @@ pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
 # Create directory for proto files
 mkdir -p tetragon
 
-# Download Tetragon proto files
-TETRAGON_VERSION="v1.0.0"
 BASE_URL="https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/api/v1"
 
 echo "Downloading Tetragon proto files from version ${TETRAGON_VERSION}..."
 
-# Download all proto files into the tetragon directory
-curl -sL "${BASE_URL}/tetragon/tetragon.proto" -o tetragon/tetragon.proto
-curl -sL "${BASE_URL}/tetragon/capabilities.proto" -o tetragon/capabilities.proto
-curl -sL "${BASE_URL}/tetragon/events.proto" -o tetragon/events.proto
-curl -sL "${BASE_URL}/tetragon/sensors.proto" -o tetragon/sensors.proto
-curl -sL "${BASE_URL}/tetragon/stack.proto" -o tetragon/stack.proto
+# Note: bpf.proto was added in v1.6.0 and is required by tetragon.proto
+PROTO_FILES=(
+    "tetragon.proto"
+    "capabilities.proto"
+    "events.proto"
+    "sensors.proto"
+    "stack.proto"
+    "bpf.proto"
+)
+
+for proto in "${PROTO_FILES[@]}"; do
+    echo "  Downloading ${proto}..."
+    curl -sL "${BASE_URL}/tetragon/${proto}" -o "tetragon/${proto}"
+    # Verify the file was downloaded and is not empty/an error page
+    if [ ! -s "tetragon/${proto}" ]; then
+        echo "ERROR: Failed to download ${proto} (file is empty)"
+        exit 1
+    fi
+done
 
 # Generate Python code with protoc 3 compatibility
 echo "Generating Python gRPC code..."
@@ -33,9 +51,10 @@ python -m grpc_tools.protoc \
     tetragon/capabilities.proto \
     tetragon/events.proto \
     tetragon/sensors.proto \
-    tetragon/stack.proto
+    tetragon/stack.proto \
+    tetragon/bpf.proto
 
-# Fix imports in generated files (Python import issue)
+# Fix imports in generated files (Python relative import issue)
 echo "Fixing imports in generated files..."
 sed -i 's/^import tetragon\./from . import /g' tetragon/*_pb2.py tetragon/*_pb2_grpc.py 2>/dev/null || true
 
@@ -43,11 +62,10 @@ sed -i 's/^import tetragon\./from . import /g' tetragon/*_pb2.py tetragon/*_pb2_
 touch tetragon/__init__.py
 
 # Clean up downloaded proto files
-rm tetragon/tetragon.proto
-rm tetragon/capabilities.proto
-rm tetragon/events.proto  
-rm tetragon/sensors.proto
-rm tetragon/stack.proto
+echo "Cleaning up proto source files..."
+for proto in "${PROTO_FILES[@]}"; do
+    rm -f "tetragon/${proto}"
+done
 
 echo ""
 echo "✅ Tetragon proto files generated successfully in tetragon/"

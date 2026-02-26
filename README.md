@@ -112,7 +112,7 @@ sudo mkdir -p /etc/tetragon/tetragon.conf.d
 sudo cp tetragon-${TETRAGON_VERSION}-amd64/usr/local/lib/tetragon/tetragon.conf.d/* /etc/tetragon/tetragon.conf.d/
 
 # Verify binary version matches BPF files
-/usr/local/bin/tetragon --version
+/usr/local/bin/tetragon version
 ```
 
 The binary and BPF files **must** come from the same release. A mismatch causes:
