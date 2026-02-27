@@ -4,7 +4,7 @@
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 
-Get a realtime view on certificate accesses across your estate. Surfaces certificate details, paths and process details enriched with pod info (where available).
+Get a realtime view on certificate accesses across your estate. Surfaces certificate details, paths and process information enriched with pod info (where available).
 
 ![Realtime certificate expiry checking](demo.gif)
 
