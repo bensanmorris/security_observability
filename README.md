@@ -4,7 +4,7 @@
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 
-Detect expired TLS certificates at runtime without modifying applications.
+Get a realtime view on certificate accesses across your estate. Surfaces certificate details, paths, processes and accessing applications enriched with pod info (where available).
 
 ![Realtime certificate expiry checking](demo.gif)
 
