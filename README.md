@@ -8,6 +8,14 @@ Detect expired TLS certificates at runtime without modifying applications. Get r
 
 ![Realtime certificate expiry checking](demo.gif)
 
+## Video Presentations
+
+1. [The Problem - the elevator pitch]([presentation/1_The_Problem.mp4](https://github.com/bensanmorris/security_observability/raw/refs/heads/main/presentation/1_The_Problem.mp4))
+2. [The Soloution - a closer look at how it works]()
+3. [Demo - Certificate File Hooking]()
+4. [Demo - k8s POD Context Enrichment]()
+5. [Demo - SSL Hooking]
+
 ## Quick start guides
 
 - [Demo - intercepting certificates](README-QUICKSTART.md)
