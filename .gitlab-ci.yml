@@ -1,0 +1,142 @@
+stages:
+  - lint
+  - security
+  - test
+  - status
+
+default:
+  image: python:3.11
+
+# ── Caching ────────────────────────────────────────────────────────────────────
+.pip-cache: &pip-cache
+  cache:
+    key:
+      files:
+        - test-requirements.txt
+    paths:
+      - .cache/pip
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# ── Templates ──────────────────────────────────────────────────────────────────
+.install-test-deps: &install-test-deps
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -r test-requirements.txt
+
+
+lint:
+  stage: lint
+  <<: *pip-cache
+  before_script:
+    - pip install flake8 black isort
+  script:
+    - echo "Checking code formatting with Black..."
+    - black --check cert_analyzer.py test_cert_analyzer.py || true
+    - echo "Checking import sorting with isort..."
+    - isort --check-only cert_analyzer.py test_cert_analyzer.py || true
+    - echo "Linting with flake8 (syntax errors and undefined names)..."
+    - flake8 cert_analyzer.py test_cert_analyzer.py --count --select=E9,F63,F7,F82 --show-source --statistics
+    - echo "Linting with flake8 (warnings)..."
+    - flake8 cert_analyzer.py test_cert_analyzer.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop")'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - changes:
+        - "**.py"
+        - "test-requirements.txt"
+
+
+security:
+  stage: security
+  <<: *pip-cache
+  before_script:
+    - pip install bandit safety
+    - pip install -r test-requirements.txt
+  script:
+    - echo "Running Bandit security scan..."
+    - bandit -r cert_analyzer.py -f json -o bandit-report.json || true
+    - bandit -r cert_analyzer.py || true
+    - echo "Checking dependencies for known vulnerabilities..."
+    - safety check || true
+  artifacts:
+    when: always
+    paths:
+      - bandit-report.json
+    expire_in: 30 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop")'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+
+.test-base:
+  stage: test
+  <<: *pip-cache
+  <<: *install-test-deps
+  script:
+    - echo "Running tests..."
+    - pytest test_cert_analyzer.py -v --tb=short --strict-markers
+    - echo "Generating coverage report..."
+    - pytest test_cert_analyzer.py
+        --cov=cert_analyzer
+        --cov-report=xml:coverage.xml
+        --cov-report=html:htmlcov
+        --cov-report=term-missing
+        --cov-fail-under=35
+  needs:
+    - lint
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - htmlcov/
+      - coverage.xml
+    expire_in: 30 days
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop")'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - changes:
+        - "**.py"
+        - "test-requirements.txt"
+
+test:python3.9:
+  extends: .test-base
+  image: python:3.9
+
+test:python3.10:
+  extends: .test-base
+  image: python:3.10
+
+test:python3.11:
+  extends: .test-base
+  image: python:3.11
+
+test:python3.12:
+  extends: .test-base
+  image: python:3.12
+
+
+build-status:
+  stage: status
+  image: alpine:latest
+  needs:
+    - lint
+    - security
+    - test:python3.9
+    - test:python3.10
+    - test:python3.11
+    - test:python3.12
+  script:
+    - echo "✅ All jobs completed successfully"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop")'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  when: on_success
