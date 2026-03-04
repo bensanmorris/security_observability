@@ -26,5 +26,7 @@ spec:
         - ".jks"
         - ".keystore"
         - ".truststore"
+        - ".p12"
+        - ".pfx"
       matchActions:
       - action: Post

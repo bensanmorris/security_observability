@@ -2,7 +2,7 @@ grpcio==1.60.1
 grpcio-tools==1.60.1
 protobuf==4.25.3
 prometheus-client==0.19.0
-cryptography==41.0.7
+cryptography==41.0.7      # also provides PKCS12 (.p12/.pfx) support
 pyyaml==6.0.1
 kubernetes>=28.1.0
-pyjks==20.0.0
+pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
