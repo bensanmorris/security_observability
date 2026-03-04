@@ -226,8 +226,9 @@ class PrometheusMetrics:
 class CertificateAnalyzer:
     """Main analyzer that processes Tetragon events and extracts certificate info"""
 
-    CERT_EXTENSIONS = {'.crt', '.pem', '.cert', '.cer', '.key'}
-    JKS_EXTENSIONS  = {'.jks', '.keystore', '.truststore'}
+    CERT_EXTENSIONS  = {'.crt', '.pem', '.cert', '.cer', '.key'}
+    JKS_EXTENSIONS   = {'.jks', '.keystore', '.truststore'}
+    PKCS12_EXTENSIONS = {'.p12', '.pfx'}
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True):
@@ -254,7 +255,9 @@ class CertificateAnalyzer:
         if not path:
             return False
         suffix = Path(path).suffix.lower()
-        return suffix in self.CERT_EXTENSIONS or suffix in self.JKS_EXTENSIONS
+        return (suffix in self.CERT_EXTENSIONS
+                or suffix in self.JKS_EXTENSIONS
+                or suffix in self.PKCS12_EXTENSIONS)
 
     def parse_jks_certificates(self, cert_path: str) -> List[x509.Certificate]:
         """
@@ -328,11 +331,86 @@ class CertificateAnalyzer:
         logger.debug(f"JKS: loaded {len(certificates)} certificate(s) from {cert_path}")
         return certificates
 
+    def parse_pkcs12_certificates(self, cert_path: str) -> List[x509.Certificate]:
+        """
+        Parse X.509 certificates from a PKCS12 keystore (.p12 / .pfx).
+
+        PKCS12 is the modern industry-standard keystore format (replacing JKS)
+        and is used by Java apps, .NET, OpenSSL, and browsers. A PKCS12 file
+        contains a leaf certificate, its private key, and optionally a chain of
+        intermediate/root CA certificates.
+
+        No additional dependencies are required — the 'cryptography' library
+        already provides PKCS12 support via load_pkcs12().
+
+        Set the PKCS12_PASSWORD env var if the file uses a non-default password.
+        """
+        from cryptography.hazmat.primitives.serialization.pkcs12 import load_pkcs12
+
+        configured = os.getenv('PKCS12_PASSWORD', '')
+        passwords_to_try = list(dict.fromkeys(
+            [configured, 'changeit', 'changeme', 'password', '']
+        ))
+
+        try:
+            with open(cert_path, 'rb') as f:
+                p12_data = f.read()
+        except FileNotFoundError:
+            logger.debug(f"PKCS12 file not found: {cert_path}")
+            self.metrics.cert_analysis_errors.labels(error_type='file_not_found').inc()
+            return []
+        except PermissionError:
+            logger.debug(f"Permission denied reading PKCS12: {cert_path}")
+            self.metrics.cert_analysis_errors.labels(error_type='permission_denied').inc()
+            return []
+
+        p12 = None
+        for password in passwords_to_try:
+            try:
+                pw_bytes = password.encode() if password else b''
+                p12 = load_pkcs12(p12_data, pw_bytes)
+                logger.debug(
+                    f"Opened PKCS12 {cert_path} "
+                    f"(password={'<empty>' if not password else '<set>'})"
+                )
+                break
+            except Exception:
+                continue
+
+        if p12 is None:
+            logger.warning(
+                f"Could not open PKCS12 {cert_path}: all passwords failed. "
+                "Set PKCS12_PASSWORD env var if the file uses a custom password."
+            )
+            self.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed').inc()
+            return []
+
+        certificates = []
+
+        # Leaf certificate (the primary end-entity cert)
+        if p12.cert and p12.cert.certificate:
+            certificates.append(p12.cert.certificate)
+            logger.debug(f"PKCS12 leaf cert: path={cert_path}")
+
+        # Additional certificates — intermediate and root CAs in the chain
+        if p12.additional_certs:
+            for additional in p12.additional_certs:
+                if additional.certificate:
+                    certificates.append(additional.certificate)
+                    logger.debug(f"PKCS12 chain cert: path={cert_path}")
+
+        logger.debug(f"PKCS12: loaded {len(certificates)} certificate(s) from {cert_path}")
+        return certificates
+
     def parse_certificates(self, cert_path: str) -> List[x509.Certificate]:
-        """Parse ALL X.509 certificates from a file (supports PEM, DER, and JKS)"""
-        # Dispatch JKS/keystore formats to the dedicated parser
-        if Path(cert_path).suffix.lower() in self.JKS_EXTENSIONS:
+        """Parse ALL X.509 certificates from a file (supports PEM, DER, JKS, and PKCS12)"""
+        suffix = Path(cert_path).suffix.lower()
+
+        if suffix in self.JKS_EXTENSIONS:
             return self.parse_jks_certificates(cert_path)
+
+        if suffix in self.PKCS12_EXTENSIONS:
+            return self.parse_pkcs12_certificates(cert_path)
 
         try:
             with open(cert_path, 'rb') as f:

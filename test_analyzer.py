@@ -156,6 +156,58 @@ def generate_test_jks(days_valid: int, output_path: str, cn: str = None, passwor
     print(f"           Password: {password}")
 
 
+def generate_test_pkcs12(days_valid: int, output_path: str, cn: str = None, password: str = 'changeit'):
+    """
+    Generate a PKCS12 keystore (.p12) containing a self-signed certificate.
+
+    Uses the cryptography library directly — no keytool or OpenSSL binary needed.
+    The keystore contains a leaf certificate and its private key, matching the
+    structure produced by 'keytool -importkeystore -deststoretype pkcs12'.
+    """
+    from cryptography.hazmat.primitives.serialization.pkcs12 import serialize_key_and_certificates
+    from cryptography.x509.oid import NameOID as _NameOID
+
+    if cn is None:
+        cn = f"pkcs12-test-{days_valid}days.local"
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    if days_valid < 0:
+        not_valid_before = datetime.utcnow() + timedelta(days=days_valid) - timedelta(days=365)
+        not_valid_after  = datetime.utcnow() + timedelta(days=days_valid)
+    else:
+        not_valid_before = datetime.utcnow()
+        not_valid_after  = datetime.utcnow() + timedelta(days=days_valid)
+
+    subject = issuer = x509.Name([x509.NameAttribute(_NameOID.COMMON_NAME, cn)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject).issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_valid_before)
+        .not_valid_after(not_valid_after)
+        .sign(private_key, hashes.SHA256())
+    )
+
+    p12_data = serialize_key_and_certificates(
+        name=cn.encode(),
+        key=private_key,
+        cert=cert,
+        cas=None,
+        encryption_algorithm=serialization.BestAvailableEncryption(password.encode()),
+    )
+
+    with open(output_path, 'wb') as f:
+        f.write(p12_data)
+
+    status = 'EXPIRED' if days_valid < 0 else f'Expires in {days_valid} days'
+    print(f"Generated: {output_path}")
+    print(f"           CN={cn}")
+    print(f"           Valid: {not_valid_before.strftime('%Y-%m-%d')} → {not_valid_after.strftime('%Y-%m-%d')}")
+    print(f"           Status: {status}")
+    print(f"           Password: {password}")
+
+
 if __name__ == '__main__':
     # Create test-certs directory in current repo
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -202,10 +254,24 @@ if __name__ == '__main__':
         print()
 
     print("="*60)
+    print("Generating PKCS12 keystores...")
+    print("="*60)
+    pkcs12_cases = [
+        ("expired.p12",       -10,  "expired-pkcs12.example.com"),
+        ("expiring-soon.p12",   5,  "soon-pkcs12.example.com"),
+        ("valid.p12",         365,  "valid-pkcs12.example.com"),
+    ]
+    for filename, days, cn in pkcs12_cases:
+        generate_test_pkcs12(days, os.path.join(test_dir, filename), cn)
+        print()
+
+    print("="*60)
     print("\nTo test the analyzer:")
-    print(f"  1. Copy PEM certs:  sudo cp {test_dir}/*.crt /etc/pki/tls/certs/")
-    print(f"  2. Copy JKS files:  sudo cp {test_dir}/*.jks /etc/pki/tls/certs/")
-    print(f"  3. Trigger access:  cat /etc/pki/tls/certs/expired.crt")
-    print(f"                      cat /etc/pki/tls/certs/expired.jks")
-    print(f"  4. Check logs:      sudo podman logs cert-analyzer | tail -20")
-    print(f"  5. Check metrics:   curl -s http://localhost:9090/metrics | grep expired")
+    print(f"  1. Copy PEM certs:   sudo cp {test_dir}/*.crt /etc/pki/tls/certs/")
+    print(f"  2. Copy JKS files:   sudo cp {test_dir}/*.jks /etc/pki/tls/certs/")
+    print(f"  3. Copy PKCS12:      sudo cp {test_dir}/*.p12 /etc/pki/tls/certs/")
+    print(f"  4. Trigger access:   cat /etc/pki/tls/certs/expired.crt")
+    print(f"                       cat /etc/pki/tls/certs/expired.jks")
+    print(f"                       cat /etc/pki/tls/certs/expired.p12")
+    print(f"  5. Check logs:       sudo podman logs cert-analyzer | tail -20")
+    print(f"  6. Check metrics:    curl -s http://localhost:9090/metrics | grep expired")
