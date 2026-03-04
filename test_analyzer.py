@@ -11,6 +11,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from datetime import datetime, timedelta
 import os
+import struct
+import hashlib
+import time
 
 def generate_test_certificate(days_valid: int, output_path: str, cn: str = None):
     """Generate a self-signed test certificate"""
@@ -79,6 +82,80 @@ def generate_test_certificate(days_valid: int, output_path: str, cn: str = None)
     print(f"           Valid from: {not_valid_before.strftime('%Y-%m-%d')} to {not_valid_after.strftime('%Y-%m-%d')}")
     print(f"           Status: {'EXPIRED' if days_valid < 0 else f'Expires in {days_valid} days'}")
 
+def generate_test_jks(days_valid: int, output_path: str, cn: str = None, password: str = 'changeit'):
+    """
+    Generate a minimal JKS keystore containing a single self-signed certificate.
+
+    Constructs the JKS binary format by hand so that no JDK (keytool) is needed.
+    The keystore contains one TrustedCertEntry under the alias 'test-cert', which
+    is the format produced by 'keytool -importcert' and read by Java TrustManagers.
+
+    JKS binary layout:
+      magic(4) + version(4) + entry_count(4) + entries... + SHA1_digest(20)
+
+    The SHA1 digest is computed over:
+      password_as_java_chars + b"Mighty Aphrodite" + all_preceding_bytes
+    """
+    try:
+        import jks  # noqa: verify pyjks is installed before writing the file
+    except ImportError:
+        print(f"Skipping {output_path}: pyjks not installed (pip install pyjks)")
+        return
+
+    if cn is None:
+        cn = f"jks-test-{days_valid}days.local"
+
+    # Build the certificate
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    if days_valid < 0:
+        not_valid_before = datetime.utcnow() + timedelta(days=days_valid) - timedelta(days=365)
+        not_valid_after  = datetime.utcnow() + timedelta(days=days_valid)
+    else:
+        not_valid_before = datetime.utcnow()
+        not_valid_after  = datetime.utcnow() + timedelta(days=days_valid)
+
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject).issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_valid_before)
+        .not_valid_after(not_valid_after)
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
+
+    # Encode alias as UTF-16-BE (Java's internal string encoding)
+    alias     = 'test-cert'
+    alias_enc = alias.encode('utf-16-be')
+    cert_type = b'X.509'
+    timestamp = int(time.time() * 1000)  # Java Date: milliseconds since epoch
+
+    # TrustedCertEntry: tag=2, alias, timestamp, cert_type, cert_der
+    entry  = struct.pack('>I', 2)                               # tag
+    entry += struct.pack('>H', len(alias_enc)) + alias_enc     # alias
+    entry += struct.pack('>Q', timestamp)                       # date
+    entry += struct.pack('>H', len(cert_type)) + cert_type     # cert type
+    entry += struct.pack('>I', len(cert_der))  + cert_der      # cert data
+
+    body = struct.pack('>III', 0xFEEDFEED, 2, 1) + entry      # header + 1 entry
+
+    # JKS integrity digest: SHA1(pw_as_java_chars + "Mighty Aphrodite" + body)
+    pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
+    digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
+
+    with open(output_path, 'wb') as f:
+        f.write(body + digest)
+
+    status = 'EXPIRED' if days_valid < 0 else f'Expires in {days_valid} days'
+    print(f"Generated: {output_path}")
+    print(f"           CN={cn}")
+    print(f"           Valid: {not_valid_before.strftime('%Y-%m-%d')} → {not_valid_after.strftime('%Y-%m-%d')}")
+    print(f"           Status: {status}")
+    print(f"           Password: {password}")
+
+
 if __name__ == '__main__':
     # Create test-certs directory in current repo
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -111,8 +188,24 @@ if __name__ == '__main__':
     
     print("="*60)
     print(f"\n✅ Test certificates created in: {test_dir}")
+
+    print()
+    print("Generating JKS keystores...")
+    print("="*60)
+    jks_cases = [
+        ("expired.jks",       -10,  "expired-jks.example.com"),
+        ("expiring-soon.jks",   5,  "soon-jks.example.com"),
+        ("valid.jks",         365,  "valid-jks.example.com"),
+    ]
+    for filename, days, cn in jks_cases:
+        generate_test_jks(days, os.path.join(test_dir, filename), cn)
+        print()
+
+    print("="*60)
     print("\nTo test the analyzer:")
-    print(f"  1. Copy to monitored path: sudo cp {test_dir}/*.crt /etc/pki/tls/certs/")
-    print(f"  2. Access certificates: cat /etc/pki/tls/certs/expired.crt")
-    print(f"  3. Check logs: sudo podman logs cert-analyzer | tail -20")
-    print(f"  4. Check metrics: curl -s http://localhost:9090/metrics | grep expired")
+    print(f"  1. Copy PEM certs:  sudo cp {test_dir}/*.crt /etc/pki/tls/certs/")
+    print(f"  2. Copy JKS files:  sudo cp {test_dir}/*.jks /etc/pki/tls/certs/")
+    print(f"  3. Trigger access:  cat /etc/pki/tls/certs/expired.crt")
+    print(f"                      cat /etc/pki/tls/certs/expired.jks")
+    print(f"  4. Check logs:      sudo podman logs cert-analyzer | tail -20")
+    print(f"  5. Check metrics:   curl -s http://localhost:9090/metrics | grep expired")

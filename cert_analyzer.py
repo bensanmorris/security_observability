@@ -37,6 +37,14 @@ try:
 except ImportError:
     K8S_ENRICHER_AVAILABLE = False
 
+# Import JKS parser - optional, degrades gracefully if unavailable
+# Install with: pip install pyjks
+try:
+    import jks
+    JKS_AVAILABLE = True
+except ImportError:
+    JKS_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -219,6 +227,7 @@ class CertificateAnalyzer:
     """Main analyzer that processes Tetragon events and extracts certificate info"""
 
     CERT_EXTENSIONS = {'.crt', '.pem', '.cert', '.cer', '.key'}
+    JKS_EXTENSIONS  = {'.jks', '.keystore', '.truststore'}
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True):
@@ -241,14 +250,90 @@ class CertificateAnalyzer:
             logger.info("Kubernetes pod enrichment disabled - k8s_enricher not found")
 
     def is_cert_path(self, path: str) -> bool:
-        """Check if a path looks like a certificate file"""
+        """Check if a path looks like a certificate or keystore file"""
         if not path:
             return False
-        path_obj = Path(path)
-        return path_obj.suffix.lower() in self.CERT_EXTENSIONS
+        suffix = Path(path).suffix.lower()
+        return suffix in self.CERT_EXTENSIONS or suffix in self.JKS_EXTENSIONS
+
+    def parse_jks_certificates(self, cert_path: str) -> List[x509.Certificate]:
+        """
+        Parse X.509 certificates from a JKS (Java KeyStore) file.
+
+        JKS keystores are used by Java applications (Spring Boot, Tomcat, etc.)
+        and contain trusted certificate entries and/or private key entries with
+        certificate chains. This method extracts both.
+
+        Requires the 'pyjks' package. Falls back gracefully if not installed.
+        Set the JKS_PASSWORD env var if the keystore uses a non-default password.
+        """
+        if not JKS_AVAILABLE:
+            logger.warning(
+                f"Skipping JKS file {cert_path}: pyjks not installed. "
+                "Add 'pyjks' to requirements.txt to enable JKS support."
+            )
+            self.metrics.cert_analysis_errors.labels(error_type='jks_unavailable').inc()
+            return []
+
+        # Try the configured password first, then common defaults
+        configured = os.getenv('JKS_PASSWORD', '')
+        passwords_to_try = list(dict.fromkeys(
+            [configured, 'changeit', 'changeme', 'password', '']
+        ))
+
+        ks = None
+        for password in passwords_to_try:
+            try:
+                ks = jks.KeyStore.load(cert_path, password)
+                logger.debug(
+                    f"Opened JKS {cert_path} "
+                    f"(password={'<empty>' if not password else '<set>'})"
+                )
+                break
+            except jks.util.BadKeystoreFormatException:
+                logger.debug(f"Not a valid JKS keystore: {cert_path}")
+                return []
+            except Exception:
+                continue
+
+        if ks is None:
+            logger.warning(
+                f"Could not open JKS {cert_path}: all passwords failed. "
+                "Set JKS_PASSWORD env var if the keystore uses a custom password."
+            )
+            self.metrics.cert_analysis_errors.labels(error_type='jks_password_failed').inc()
+            return []
+
+        certificates = []
+
+        # Trusted certificate entries (truststore / cacerts style)
+        for alias, entry in ks.certs.items():
+            try:
+                cert = x509.load_der_x509_certificate(entry.cert, default_backend())
+                certificates.append(cert)
+                logger.debug(f"JKS trusted cert: alias='{alias}' path={cert_path}")
+            except Exception as e:
+                logger.debug(f"JKS: failed to parse trusted cert alias='{alias}': {e}")
+
+        # Private key entries — extract the certificate chain
+        for alias, entry in ks.private_keys.items():
+            for _, cert_der in entry.cert_chain:
+                try:
+                    cert = x509.load_der_x509_certificate(cert_der, default_backend())
+                    certificates.append(cert)
+                    logger.debug(f"JKS chain cert: alias='{alias}' path={cert_path}")
+                except Exception as e:
+                    logger.debug(f"JKS: failed to parse chain cert alias='{alias}': {e}")
+
+        logger.debug(f"JKS: loaded {len(certificates)} certificate(s) from {cert_path}")
+        return certificates
 
     def parse_certificates(self, cert_path: str) -> List[x509.Certificate]:
-        """Parse ALL X.509 certificates from a file (supports multi-cert files)"""
+        """Parse ALL X.509 certificates from a file (supports PEM, DER, and JKS)"""
+        # Dispatch JKS/keystore formats to the dedicated parser
+        if Path(cert_path).suffix.lower() in self.JKS_EXTENSIONS:
+            return self.parse_jks_certificates(cert_path)
+
         try:
             with open(cert_path, 'rb') as f:
                 cert_data = f.read()
