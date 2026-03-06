@@ -327,7 +327,21 @@ class TestPathDetection:
         assert analyzer.is_cert_path("/test/cert.cer")
         assert analyzer.is_cert_path("/test/cert.key")
         assert analyzer.is_cert_path("/TEST/CERT.PEM")  # Case insensitive
-    
+
+    def test_is_cert_path_jks_extensions(self, analyzer):
+        """Test detection of JKS keystore file extensions"""
+        assert analyzer.is_cert_path("/app/truststore.jks")
+        assert analyzer.is_cert_path("/app/server.keystore")
+        assert analyzer.is_cert_path("/app/ca.truststore")
+        assert analyzer.is_cert_path("/APP/TRUST.JKS")  # Case insensitive
+
+    def test_is_cert_path_pkcs12_extensions(self, analyzer):
+        """Test detection of PKCS12 keystore file extensions"""
+        assert analyzer.is_cert_path("/app/keystore.p12")
+        assert analyzer.is_cert_path("/app/keystore.pfx")
+        assert analyzer.is_cert_path("/APP/KEYSTORE.P12")  # Case insensitive
+        assert analyzer.is_cert_path("/APP/KEYSTORE.PFX")  # Case insensitive
+
     def test_is_cert_path_invalid_extensions(self, analyzer):
         """Test rejection of invalid file extensions"""
         assert not analyzer.is_cert_path("/test/file.txt")
@@ -335,6 +349,168 @@ class TestPathDetection:
         assert not analyzer.is_cert_path("/test/file")
         assert not analyzer.is_cert_path("")
         assert not analyzer.is_cert_path(None)
+
+
+# ── PKCS12 helper ─────────────────────────────────────────────────────────────
+
+def _make_pkcs12(cert, private_key, chain_certs=None, password: bytes = b'changeit') -> bytes:
+    """Serialise a certificate + key (and optional chain) into a PKCS12 blob."""
+    from cryptography.hazmat.primitives.serialization.pkcs12 import serialize_key_and_certificates
+    from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
+
+    additional = None
+    if chain_certs:
+        # serialize_key_and_certificates wants a list of x509.Certificate, not tuples
+        from cryptography.hazmat.primitives.serialization.pkcs12 import PKCS12Certificate
+        additional = [
+            PKCS12Certificate(cert=c, friendly_name=None) for c in chain_certs
+        ]
+
+    return serialize_key_and_certificates(
+        name=b'test',
+        key=private_key,
+        cert=cert,
+        cas=additional,
+        encryption_algorithm=BestAvailableEncryption(password),
+    )
+
+
+class TestPKCS12Parsing:
+    """Test parsing of PKCS12 keystore files (.p12 / .pfx)"""
+
+    def test_parse_valid_p12_returns_leaf_cert(self, analyzer, temp_dir):
+        """parse_pkcs12_certificates extracts the leaf certificate from a .p12 file"""
+        cert, key = TestCertificateGeneration.generate_certificate("leaf.example.com", 365)
+        p12_data = _make_pkcs12(cert, key)
+
+        p12_path = os.path.join(temp_dir, "keystore.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        certs = analyzer.parse_pkcs12_certificates(p12_path)
+
+        assert len(certs) == 1
+        cn = certs[0].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        assert cn == "leaf.example.com"
+
+    def test_parse_p12_with_chain_returns_all_certs(self, analyzer, temp_dir):
+        """parse_pkcs12_certificates extracts the leaf and all chain certificates"""
+        root_ca, root_key         = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        intermediate, inter_key   = TestCertificateGeneration.generate_certificate("Intermediate CA", 1825, is_ca=True)
+        leaf, leaf_key            = TestCertificateGeneration.generate_certificate("server.example.com", 365)
+
+        p12_data = _make_pkcs12(leaf, leaf_key, chain_certs=[intermediate, root_ca])
+
+        p12_path = os.path.join(temp_dir, "chain.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        certs = analyzer.parse_pkcs12_certificates(p12_path)
+
+        assert len(certs) == 3
+        common_names = [
+            c.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            for c in certs
+        ]
+        assert "server.example.com" in common_names
+        assert "Intermediate CA" in common_names
+        assert "Root CA" in common_names
+
+    def test_parse_expired_p12_cert_detected(self, analyzer, temp_dir):
+        """An expired certificate inside a .p12 file is correctly identified as expired"""
+        cert, key = TestCertificateGeneration.generate_certificate("expired.example.com", -30)
+        p12_data = _make_pkcs12(cert, key)
+
+        p12_path = os.path.join(temp_dir, "expired.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        cert_infos = analyzer.analyze_certificate(p12_path, "java", 1234)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_expired
+        assert cert_infos[0].common_name == "expired.example.com"
+
+    def test_parse_pfx_extension_dispatched(self, analyzer, temp_dir):
+        """.pfx extension is treated identically to .p12"""
+        cert, key = TestCertificateGeneration.generate_certificate("pfx.example.com", 365)
+        p12_data = _make_pkcs12(cert, key)
+
+        pfx_path = os.path.join(temp_dir, "keystore.pfx")
+        with open(pfx_path, 'wb') as f:
+            f.write(p12_data)
+
+        certs = analyzer.parse_pkcs12_certificates(pfx_path)
+        assert len(certs) == 1
+
+    def test_parse_p12_wrong_password_returns_empty(self, analyzer, temp_dir, monkeypatch):
+        """parse_pkcs12_certificates returns [] and increments error metric when all passwords fail"""
+        cert, key = TestCertificateGeneration.generate_certificate("secure.example.com", 365)
+        p12_data = _make_pkcs12(cert, key, password=b'supersecret')
+
+        p12_path = os.path.join(temp_dir, "secured.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        # Ensure PKCS12_PASSWORD env var doesn't accidentally match
+        monkeypatch.delenv('PKCS12_PASSWORD', raising=False)
+
+        certs = analyzer.parse_pkcs12_certificates(p12_path)
+        assert certs == []
+
+    def test_parse_p12_custom_password_via_env(self, analyzer, temp_dir, monkeypatch):
+        """PKCS12_PASSWORD env var is used before the default password list"""
+        cert, key = TestCertificateGeneration.generate_certificate("env-pw.example.com", 365)
+        p12_data = _make_pkcs12(cert, key, password=b'mysecretpassword')
+
+        p12_path = os.path.join(temp_dir, "env-pw.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        monkeypatch.setenv('PKCS12_PASSWORD', 'mysecretpassword')
+
+        certs = analyzer.parse_pkcs12_certificates(p12_path)
+        assert len(certs) == 1
+        cn = certs[0].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        assert cn == "env-pw.example.com"
+
+    def test_parse_p12_file_not_found_returns_empty(self, analyzer):
+        """parse_pkcs12_certificates returns [] gracefully when the file does not exist"""
+        certs = analyzer.parse_pkcs12_certificates("/nonexistent/path/keystore.p12")
+        assert certs == []
+
+    def test_parse_certificates_dispatches_p12(self, analyzer, temp_dir):
+        """parse_certificates routes .p12 files to parse_pkcs12_certificates"""
+        cert, key = TestCertificateGeneration.generate_certificate("dispatch.example.com", 365)
+        p12_data = _make_pkcs12(cert, key)
+
+        p12_path = os.path.join(temp_dir, "dispatch.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        # Call the top-level dispatcher — must reach the PKCS12 parser
+        certs = analyzer.parse_certificates(p12_path)
+        assert len(certs) == 1
+
+    def test_analyze_certificate_returns_cert_info_for_p12(self, analyzer, temp_dir):
+        """analyze_certificate returns populated CertificateInfo objects for .p12 files"""
+        cert, key = TestCertificateGeneration.generate_certificate("java-app.example.com", 90)
+        p12_data = _make_pkcs12(cert, key)
+
+        p12_path = os.path.join(temp_dir, "java-app.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        cert_infos = analyzer.analyze_certificate(p12_path, "/usr/bin/java", 4242)
+
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.common_name == "java-app.example.com"
+        assert info.path == p12_path
+        assert info.process == "/usr/bin/java"
+        assert info.pid == 4242
+        assert not info.is_expired
+        assert 89 < info.days_until_expiry <= 90
 
 
 class TestCABundles:
