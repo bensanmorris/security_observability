@@ -6,6 +6,8 @@
 
 Detect expired TLS certificates at runtime without modifying applications. Get real-time visibility into TLS certificate usage across your estate including expiry, file paths, processes, and Kubernetes pod context (where applicable).
 
+**Supports PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) certificate formats.**
+
 ![Realtime certificate expiry checking](demo.gif)
 
 ## Video Presentations
