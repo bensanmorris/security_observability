@@ -456,6 +456,9 @@ podman logs cert-analyzer | grep "Connected to Tetragon"
 # For rootless, ensure socket permissions
 sudo chmod 666 /run/cilium/tetragon/tetragon.sock
 
+# Confirm CertSight itself holds no BPF capabilities (expected)
+podman inspect cert-analyzer | grep -i cap
+
 # For SELinux issues
 sudo ausearch -m avc -ts recent | grep cert-analyzer
 sudo audit2allow -a -M cert-analyzer-custom
@@ -530,6 +533,26 @@ For large deployments:
 - No secrets stored in container
 - Metrics endpoint is HTTP (use reverse proxy for HTTPS)
 
+### Linux Capabilities
+
+CertSight is intentionally designed to require **no eBPF capabilities itself**.
+It operates purely as a gRPC client to Tetragon — all eBPF program loading
+and kernel hooking is delegated to the Tetragon daemon, which holds the
+necessary privileges.
+
+| Component | Required Capabilities |
+|---|---|
+| **Tetragon daemon** | `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` |
+| **CertSight analyser** | None (gRPC socket access only) |
+
+**RHEL 9 note**: Unprivileged eBPF is disabled by default
+(`kernel.unprivileged_bpf_disabled=1`). This does not affect CertSight
+as Tetragon runs as a privileged daemon. Verify with:
+
+```bash
+sysctl kernel.unprivileged_bpf_disabled
+```
+
 ## Support
 
 For issues or questions, please open an issue in the repository.
@@ -550,5 +573,3 @@ For issues or questions, please open an issue in the repository.
 - Grafana dashboard
 - SELinux policy
 - Systemd integration
-
-
