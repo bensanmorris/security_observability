@@ -5,17 +5,12 @@ USER 0
 
 WORKDIR /app
 
-# Install system dependencies
-RUN dnf install -y --setopt=tsflags=nodocs \
-    gcc \
-    python3-devel \
-    && dnf clean all
-
 # Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip --no-cache-dir && \
+    pip install --no-cache-dir --only-binary=grpcio -r requirements.txt
 
 # Copy application files
 COPY cert_analyzer.py .
