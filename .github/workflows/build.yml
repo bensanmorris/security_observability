@@ -31,7 +31,6 @@ jobs:
     # Run after tests pass on pushes to main/develop; run standalone on PRs
     permissions:
       contents: read
-      packages: write
 
     steps:
     - name: Checkout code
@@ -58,27 +57,17 @@ jobs:
           # Tag main branch as latest
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-    - name: Log in to GitHub Container Registry
-      # Only push on non-PR events
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Build (and push on merge)
       uses: docker/build-push-action@v5
       with:
         context: .
         file: Containerfile
-        # Push only when merging to a branch (not on PRs)
-        push: ${{ github.event_name != 'pull_request' }}
+        # Push disabled - build only
+        push: false
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        # Cache layers in the registry to speed up repeat builds
-        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:buildcache
-        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:buildcache,mode=max
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
         platforms: linux/amd64
 
     - name: Build summary
