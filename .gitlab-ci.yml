@@ -2,6 +2,7 @@ stages:
   - lint
   - security
   - test
+  - build
   - status
 
 default:
@@ -123,7 +124,36 @@ test:python3.12:
   image: python:3.12
 
 
-build-status:
+build-container:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  needs:
+    - lint
+    - security
+    - test:python3.11
+  script:
+    - echo "Building container image (no push)..."
+    - /kaniko/executor
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/Containerfile"
+        --no-push
+        --cache=true
+        --cache-dir=/cache
+        --destination "cert-analyzer:${CI_COMMIT_SHORT_SHA}"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop")'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - changes:
+        - "Containerfile"
+        - "cert_analyzer.py"
+        - "requirements.txt"
+        - "tetragon/**"
+        - ".gitlab-ci.yml"
+
+
+
   stage: status
   image: alpine:latest
   needs:
@@ -133,6 +163,7 @@ build-status:
     - test:python3.10
     - test:python3.11
     - test:python3.12
+    - build-container
   script:
     - echo "✅ All jobs completed successfully"
   rules:
