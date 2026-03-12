@@ -126,22 +126,22 @@ test:python3.12:
 
 build-container:
   stage: build
-  image:
-    name: gcr.io/kaniko-project/executor:debug
-    entrypoint: [""]
+  image: docker:26
+  services:
+    - docker:26-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
   needs:
     - lint
     - security
     - test:python3.11
   script:
     - echo "Building container image (no push)..."
-    - /kaniko/executor
-        --context "${CI_PROJECT_DIR}"
-        --dockerfile "${CI_PROJECT_DIR}/Containerfile"
-        --no-push
-        --cache=true
-        --cache-dir=/cache
-        --destination "cert-analyzer:${CI_COMMIT_SHORT_SHA}"
+    - docker build
+        --file Containerfile
+        --tag cert-analyzer:${CI_COMMIT_SHORT_SHA}
+        .
+    - echo "Build complete - image cert-analyzer:${CI_COMMIT_SHORT_SHA}"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop")'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
