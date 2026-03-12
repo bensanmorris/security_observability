@@ -66,9 +66,8 @@ jobs:
         push: false
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        # Cache layers in the registry to speed up repeat builds
-        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:buildcache
-        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:buildcache,mode=max
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
         platforms: linux/amd64
 
     - name: Build summary
