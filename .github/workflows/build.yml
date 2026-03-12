@@ -57,7 +57,7 @@ jobs:
           # Tag main branch as latest
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-- name: Build (and push on merge)
+    - name: Build (and push on merge)
       uses: docker/build-push-action@v5
       with:
         context: .
