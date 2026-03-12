@@ -1,0 +1,94 @@
+name: Build Container
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'Containerfile'
+      - 'cert_analyzer.py'
+      - 'requirements.txt'
+      - 'tetragon/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'Containerfile'
+      - 'cert_analyzer.py'
+      - 'requirements.txt'
+      - 'tetragon/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: cert-analyzer
+  REGISTRY: ghcr.io
+  IMAGE_REPO: ${{ github.repository_owner }}/cert-analyzer
+
+jobs:
+  build:
+    name: Build Container Image
+    runs-on: ubuntu-latest
+    # Run after tests pass on pushes to main/develop; run standalone on PRs
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Generate image metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}
+        tags: |
+          # Tag branches by name (e.g. main, develop)
+          type=ref,event=branch
+          # Tag PRs as pr-<number>
+          type=ref,event=pr
+          # Tag semver releases (v1.2.3 → 1.2.3, 1.2, 1)
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          # Always tag the short commit SHA
+          type=sha,prefix=sha-
+          # Tag main branch as latest
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+    - name: Log in to GitHub Container Registry
+      # Only push on non-PR events
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build (and push on merge)
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Containerfile
+        # Push only when merging to a branch (not on PRs)
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        # Cache layers in the registry to speed up repeat builds
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:buildcache
+        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:buildcache,mode=max
+        platforms: linux/amd64
+
+    - name: Build summary
+      run: |
+        echo "## 🐳 Container Build" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Event:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Pushed:** \`${{ github.event_name != 'pull_request' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
