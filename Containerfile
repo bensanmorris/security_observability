@@ -27,10 +27,6 @@ RUN pip install --no-cache-dir \
     grpcio-tools==1.60.1 \
     protobuf==4.25.3
 
-# Display Tetragon structure
-RUN echo "=== Tetragon repo structure ===" && \
-    find /build/tetragon-src/api -type f | sort
-
 # Fetch only the api/ subtree of the Tetragon repo at the requested tag —
 # a sparse checkout avoids pulling the entire repo history
 RUN git clone --depth 1 --branch ${TETRAGON_VERSION} \
@@ -39,14 +35,18 @@ RUN git clone --depth 1 --branch ${TETRAGON_VERSION} \
     cd /build/tetragon-src && \
     git sparse-checkout set api
 
-# Compile .proto files into Python bindings
+# Compile .proto files into Python bindings.
+# --proto_path points at api/v1 (the parent of the tetragon/ package dir) so
+# that inter-proto imports like 'import "tetragon/foo.proto"' resolve correctly.
+# The well-known google.protobuf types are resolved via the grpcio-tools
+# bundled _proto directory.
 RUN mkdir -p /build/tetragon && \
     python -m grpc_tools.protoc \
         --proto_path=/build/tetragon-src/api/v1 \
+        --proto_path=$(python -c "import grpc_tools, os; print(os.path.join(os.path.dirname(grpc_tools.__file__), '_proto'))") \
         --python_out=/build/tetragon \
         --grpc_python_out=/build/tetragon \
-        /build/tetragon-src/api/v1/tetragon/*.proto \
-        /build/tetragon-src/api/v1/*.proto && \
+        /build/tetragon-src/api/v1/tetragon/*.proto && \
     touch /build/tetragon/__init__.py
 
 # Sanity check — fail the build here rather than at runtime
