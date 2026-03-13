@@ -27,6 +27,10 @@ RUN pip install --no-cache-dir \
     grpcio-tools==1.60.1 \
     protobuf==4.25.3
 
+# Display Tetragon structure
+RUN echo "=== Tetragon repo structure ===" && \
+    find /build/tetragon-src/api -type f | sort
+
 # Fetch only the api/ subtree of the Tetragon repo at the requested tag —
 # a sparse checkout avoids pulling the entire repo history
 RUN git clone --depth 1 --branch ${TETRAGON_VERSION} \
