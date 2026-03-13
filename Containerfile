@@ -40,17 +40,18 @@ RUN git clone --depth 1 --branch ${TETRAGON_VERSION} \
 # that inter-proto imports like 'import "tetragon/foo.proto"' resolve correctly.
 # The well-known google.protobuf types are resolved via the grpcio-tools
 # bundled _proto directory.
-RUN mkdir -p /build/tetragon && \
+RUN mkdir -p /build/generated && \
     python -m grpc_tools.protoc \
         --proto_path=/build/tetragon-src/api/v1 \
         --proto_path=$(python -c "import grpc_tools, os; print(os.path.join(os.path.dirname(grpc_tools.__file__), '_proto'))") \
-        --python_out=/build/tetragon \
-        --grpc_python_out=/build/tetragon \
+        --python_out=/build/generated \
+        --grpc_python_out=/build/generated \
         /build/tetragon-src/api/v1/tetragon/*.proto && \
-    touch /build/tetragon/__init__.py
+    touch /build/generated/tetragon/__init__.py && \
+    echo "=== Generated files ===" && find /build/generated -type f | sort
 
 # Sanity check — fail the build here rather than at runtime
-RUN python -c "import sys; sys.path.insert(0, '/build'); from tetragon import tetragon_pb2, events_pb2, sensors_pb2_grpc; print('Proto generation OK')"
+RUN python -c "import sys; sys.path.insert(0, '/build/generated'); from tetragon import tetragon_pb2, events_pb2, sensors_pb2_grpc; print('Proto generation OK')"
 
 # =============================================================================
 # Stage 2: Runtime image
@@ -81,7 +82,7 @@ RUN pip install --upgrade pip --no-cache-dir \
 COPY cert_analyzer.py .
 
 # Copy compiled proto bindings from builder stage (not the compiler)
-COPY --from=proto-builder /build/tetragon ./tetragon
+COPY --from=proto-builder /build/generated/tetragon ./tetragon
 
 # Verify bindings are present and importable
 RUN ls -la /app/tetragon/ && \
