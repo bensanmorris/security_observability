@@ -549,10 +549,6 @@ class TestCABundles:
         assert not cert_infos[2].is_expired  # Leaf is valid
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 class MockTetragonPod:
     """
     Minimal mock of the Tetragon pod proto object.
@@ -872,3 +868,292 @@ class TestLogCertificateStatusOutput:
 
         log_messages = " ".join(r.message for r in caplog.records)
         assert "cert #3" in log_messages
+
+# ── JKS helpers ───────────────────────────────────────────────────────────────
+
+import hashlib
+import struct
+import time as _time
+
+
+def _make_jks_truststore(cert: x509.Certificate, password: str = 'changeit') -> bytes:
+    """
+    Build a minimal JKS truststore containing a single TrustedCertEntry.
+
+    Constructs the binary JKS format without needing keytool or a JDK.
+    Layout: magic(4) + version(4) + entry_count(4) + entry + SHA1_digest(20)
+
+    The integrity digest is:
+        SHA1(password_as_utf16be + b"Mighty Aphrodite" + preceding_bytes)
+    """
+    cert_der  = cert.public_bytes(serialization.Encoding.DER)
+    alias     = 'test-cert'
+    alias_enc = alias.encode('utf-16-be')
+    cert_type = b'X.509'
+    timestamp = int(_time.time() * 1000)
+
+    entry  = struct.pack('>I', 2)                                # tag = TrustedCertEntry
+    entry += struct.pack('>H', len(alias_enc)) + alias_enc       # alias
+    entry += struct.pack('>Q', timestamp)                        # creation date (ms)
+    entry += struct.pack('>H', len(cert_type)) + cert_type       # cert type
+    entry += struct.pack('>I', len(cert_der))  + cert_der        # cert DER bytes
+
+    body   = struct.pack('>III', 0xFEEDFEED, 2, 1) + entry      # header + 1 entry
+
+    pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
+    digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
+
+    return body + digest
+
+
+def _make_jks_truststore_multi(certs: list, password: str = 'changeit') -> bytes:
+    """
+    Build a JKS truststore containing multiple TrustedCertEntries.
+
+    Each certificate gets a unique alias ('test-cert-0', 'test-cert-1', ...).
+    Layout is identical to _make_jks_truststore but with entry_count > 1.
+    """
+    entries = b''
+    for i, cert in enumerate(certs):
+        cert_der  = cert.public_bytes(serialization.Encoding.DER)
+        alias     = f'test-cert-{i}'
+        alias_enc = alias.encode('utf-16-be')
+        cert_type = b'X.509'
+        timestamp = int(_time.time() * 1000)
+
+        entry  = struct.pack('>I', 2)
+        entry += struct.pack('>H', len(alias_enc)) + alias_enc
+        entry += struct.pack('>Q', timestamp)
+        entry += struct.pack('>H', len(cert_type)) + cert_type
+        entry += struct.pack('>I', len(cert_der))  + cert_der
+        entries += entry
+
+    body = struct.pack('>III', 0xFEEDFEED, 2, len(certs)) + entries
+
+    pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
+    digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
+
+    return body + digest
+
+
+try:
+    import jks as _jks_probe  # noqa: F401
+    _JKS_AVAILABLE = True
+except ImportError:
+    _JKS_AVAILABLE = False
+
+pytestmark_jks = pytest.mark.skipif(
+    not _JKS_AVAILABLE,
+    reason="pyjks not installed"
+)
+
+
+class TestJKSParsing:
+    """
+    Test parsing of JKS keystore files (.jks / .keystore / .truststore).
+
+    Mirrors TestPKCS12Parsing in structure. All tests are skipped when pyjks
+    is not installed so the suite still passes in environments where the
+    optional dependency is absent. The one exception is
+    test_jks_unavailable_returns_empty_and_increments_metric which patches
+    JKS_AVAILABLE directly and therefore runs everywhere.
+    """
+
+    @pytestmark_jks
+    def test_parse_valid_jks_truststore_returns_cert(self, analyzer, temp_dir):
+        """parse_jks_certificates extracts the certificate from a truststore."""
+        cert, _ = TestCertificateGeneration.generate_certificate("jks-leaf.example.com", 365)
+        jks_data = _make_jks_truststore(cert)
+
+        jks_path = os.path.join(temp_dir, "truststore.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        certs = analyzer.parse_jks_certificates(jks_path)
+
+        assert len(certs) == 1
+        cn = certs[0].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        assert cn == "jks-leaf.example.com"
+
+    @pytestmark_jks
+    def test_parse_expired_jks_cert_detected(self, analyzer, temp_dir):
+        """An expired certificate inside a JKS truststore is correctly identified."""
+        cert, _ = TestCertificateGeneration.generate_certificate("expired-jks.example.com", -30)
+        jks_data = _make_jks_truststore(cert)
+
+        jks_path = os.path.join(temp_dir, "expired.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        cert_infos = analyzer.analyze_certificate(jks_path, "java", 1234)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_expired
+        assert cert_infos[0].common_name == "expired-jks.example.com"
+
+    @pytestmark_jks
+    def test_parse_jks_custom_password_via_env(self, analyzer, temp_dir, monkeypatch):
+        """JKS_PASSWORD env var is tried before the default password list."""
+        cert, _ = TestCertificateGeneration.generate_certificate("pw-jks.example.com", 365)
+        jks_data = _make_jks_truststore(cert, password='mysecretpassword')
+
+        jks_path = os.path.join(temp_dir, "custom-pw.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        monkeypatch.setenv('JKS_PASSWORD', 'mysecretpassword')
+
+        certs = analyzer.parse_jks_certificates(jks_path)
+
+        assert len(certs) == 1
+        cn = certs[0].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        assert cn == "pw-jks.example.com"
+
+    @pytestmark_jks
+    def test_parse_jks_wrong_password_returns_empty(self, analyzer, temp_dir, monkeypatch):
+        """parse_jks_certificates returns [] when all passwords fail."""
+        cert, _ = TestCertificateGeneration.generate_certificate("secure-jks.example.com", 365)
+        jks_data = _make_jks_truststore(cert, password='supersecret')
+
+        jks_path = os.path.join(temp_dir, "secured.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        monkeypatch.delenv('JKS_PASSWORD', raising=False)
+
+        certs = analyzer.parse_jks_certificates(jks_path)
+        assert certs == []
+
+    @pytestmark_jks
+    def test_parse_jks_file_not_found_returns_empty(self, analyzer):
+        """parse_jks_certificates returns [] gracefully when the file does not exist."""
+        certs = analyzer.parse_jks_certificates("/nonexistent/path/truststore.jks")
+        assert certs == []
+
+    @pytestmark_jks
+    def test_parse_certificates_dispatches_jks(self, analyzer, temp_dir):
+        """parse_certificates routes .jks files to parse_jks_certificates."""
+        cert, _ = TestCertificateGeneration.generate_certificate("dispatch-jks.example.com", 365)
+        jks_data = _make_jks_truststore(cert)
+
+        jks_path = os.path.join(temp_dir, "dispatch.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        certs = analyzer.parse_certificates(jks_path)
+        assert len(certs) == 1
+
+    @pytestmark_jks
+    def test_parse_certificates_dispatches_keystore_extension(self, analyzer, temp_dir):
+        """.keystore extension is routed to parse_jks_certificates."""
+        cert, _ = TestCertificateGeneration.generate_certificate("keystore.example.com", 365)
+        jks_data = _make_jks_truststore(cert)
+
+        ks_path = os.path.join(temp_dir, "server.keystore")
+        with open(ks_path, 'wb') as f:
+            f.write(jks_data)
+
+        certs = analyzer.parse_certificates(ks_path)
+        assert len(certs) == 1
+
+    @pytestmark_jks
+    def test_parse_certificates_dispatches_truststore_extension(self, analyzer, temp_dir):
+        """.truststore extension is routed to parse_jks_certificates."""
+        cert, _ = TestCertificateGeneration.generate_certificate("truststore.example.com", 365)
+        jks_data = _make_jks_truststore(cert)
+
+        ts_path = os.path.join(temp_dir, "ca.truststore")
+        with open(ts_path, 'wb') as f:
+            f.write(jks_data)
+
+        certs = analyzer.parse_certificates(ts_path)
+        assert len(certs) == 1
+
+    @pytestmark_jks
+    def test_analyze_certificate_returns_cert_info_for_jks(self, analyzer, temp_dir):
+        """analyze_certificate returns populated CertificateInfo for .jks files."""
+        cert, _ = TestCertificateGeneration.generate_certificate("java-app-jks.example.com", 90)
+        jks_data = _make_jks_truststore(cert)
+
+        jks_path = os.path.join(temp_dir, "java-app.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        cert_infos = analyzer.analyze_certificate(jks_path, "/usr/bin/java", 4242)
+
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.common_name == "java-app-jks.example.com"
+        assert info.path        == jks_path
+        assert info.process     == "/usr/bin/java"
+        assert info.pid         == 4242
+        assert not info.is_expired
+        assert 89 < info.days_until_expiry <= 90
+
+    @pytestmark_jks
+    def test_parse_jks_truststore_with_multiple_certs(self, analyzer, temp_dir):
+        """A truststore with multiple TrustedCertEntries returns all certificates."""
+        cert1, _ = TestCertificateGeneration.generate_certificate("ca-root.example.com",   3650, is_ca=True)
+        cert2, _ = TestCertificateGeneration.generate_certificate("ca-inter.example.com",  1825, is_ca=True)
+        cert3, _ = TestCertificateGeneration.generate_certificate("leaf.example.com",        365)
+
+        jks_data = _make_jks_truststore_multi([cert1, cert2, cert3])
+
+        jks_path = os.path.join(temp_dir, "multi.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        certs = analyzer.parse_jks_certificates(jks_path)
+
+        assert len(certs) == 3
+        common_names = [
+            c.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            for c in certs
+        ]
+        assert "ca-root.example.com"  in common_names
+        assert "ca-inter.example.com" in common_names
+        assert "leaf.example.com"     in common_names
+
+    @pytestmark_jks
+    def test_parse_jks_multi_cert_mixed_expiry(self, analyzer, temp_dir):
+        """analyze_certificate correctly identifies expired certs within a multi-entry truststore."""
+        valid_cert,   _ = TestCertificateGeneration.generate_certificate("valid-jks.example.com",   365)
+        expired_cert, _ = TestCertificateGeneration.generate_certificate("expired-jks.example.com", -30)
+        soon_cert,    _ = TestCertificateGeneration.generate_certificate("soon-jks.example.com",      5)
+
+        jks_data = _make_jks_truststore_multi([valid_cert, expired_cert, soon_cert])
+
+        jks_path = os.path.join(temp_dir, "mixed-expiry.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        cert_infos = analyzer.analyze_certificate(jks_path, "/usr/bin/java", 1234)
+
+        assert len(cert_infos) == 3
+
+        by_cn = {info.common_name: info for info in cert_infos}
+        assert not by_cn["valid-jks.example.com"].is_expired
+        assert     by_cn["expired-jks.example.com"].is_expired
+        assert     by_cn["soon-jks.example.com"].expires_soon(days=7)
+
+    def test_jks_unavailable_returns_empty_and_increments_metric(self, analyzer, temp_dir, monkeypatch):
+        """
+        When pyjks is not installed parse_jks_certificates returns [] and
+        increments the jks_unavailable error metric.
+
+        Patches the module-level JKS_AVAILABLE flag so this test runs
+        regardless of whether pyjks is installed in the test environment.
+        """
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'JKS_AVAILABLE', False)
+
+        jks_path = os.path.join(temp_dir, "dummy.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(b'dummy')
+
+        certs = analyzer.parse_jks_certificates(jks_path)
+        assert certs == []
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
