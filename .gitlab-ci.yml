@@ -150,28 +150,20 @@ test:python3.12:
   before_script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
   script:
-    # Collect all tags into an array
+    # Build --tag flags as a plain string (POSIX sh compatible — no bash arrays)
     - |
-      TAGS=()
-      TAGS+=("$IMAGE_REPO:sha-$CI_COMMIT_SHORT_SHA-ubi${UBI_VERSION}")
+      TAGS="--tag $IMAGE_REPO:sha-$CI_COMMIT_SHORT_SHA-ubi${UBI_VERSION}"
       if [ -n "$CI_COMMIT_BRANCH" ]; then
-        TAGS+=("$IMAGE_REPO:${CI_COMMIT_BRANCH}-ubi${UBI_VERSION}")
+        TAGS="$TAGS --tag $IMAGE_REPO:${CI_COMMIT_BRANCH}-ubi${UBI_VERSION}"
       fi
       if [ "$CI_COMMIT_BRANCH" = "main" ]; then
-        TAGS+=("$IMAGE_REPO:latest-ubi${UBI_VERSION}")
+        TAGS="$TAGS --tag $IMAGE_REPO:latest-ubi${UBI_VERSION}"
       fi
       if [ -n "$CI_COMMIT_TAG" ]; then
-        TAGS+=("$IMAGE_REPO:${CI_COMMIT_TAG}-ubi${UBI_VERSION}")
+        TAGS="$TAGS --tag $IMAGE_REPO:${CI_COMMIT_TAG}-ubi${UBI_VERSION}"
       fi
 
-    # Build tag arguments for docker build
-    - |
-      TAG_ARGS=""
-      for TAG in "${TAGS[@]}"; do
-        TAG_ARGS="$TAG_ARGS --tag $TAG"
-      done
-
-    # Build
+    # Build — $TAGS expands to multiple --tag flags inline
     - |
       docker build \
         --file Containerfile \
@@ -179,13 +171,13 @@ test:python3.12:
         --build-arg PYTHON_VERSION=${PYTHON_VERSION} \
         --build-arg TETRAGON_VERSION=${TETRAGON_VERSION} \
         --cache-from $IMAGE_REPO:${CI_COMMIT_BRANCH}-ubi${UBI_VERSION} \
-        $TAG_ARGS \
+        $TAGS \
         .
 
-    # Push only on non-MR pipelines
+    # Push only on non-MR pipelines — extract image refs from the TAGS string
     - |
       if [ "$CI_PIPELINE_SOURCE" != "merge_request_event" ]; then
-        for TAG in "${TAGS[@]}"; do
+        for TAG in $(echo "$TAGS" | tr ' ' '\n' | grep "^$IMAGE_REPO"); do
           echo "Pushing $TAG"
           docker push "$TAG"
         done
