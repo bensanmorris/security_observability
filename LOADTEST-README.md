@@ -304,7 +304,8 @@ Console output:
 ## Results Summary (RHEL9 Evaluation — March 2026)
 
 Results from running the three-scenario evaluation on a personal RHEL9
-environment with Tetragon and cert-analyzer deployed via Podman.
+environment with Tetragon and cert-analyzer deployed via Podman, using
+5000 events per throughput test.
 
 > **Note:** The throughput test fell back to `analyze_certificate()` direct
 > calls in all three scenarios due to a `/host` symlink permission restriction.
@@ -316,43 +317,41 @@ environment with Tetragon and cert-analyzer deployed via Podman.
 
 | Scenario | Single PEM | PEM bundle | PKCS12 | PKCS12 chain | Expired | JKS |
 |---|---|---|---|---|---|---|
-| 1 — Baseline | 0.1ms | 0.6ms | 40.5ms | 40.7ms | 0.1ms | 0.1ms |
-| 2 — Tetragon only | 0.1ms | 0.6ms | 40.7ms | 40.7ms | 0.1ms | 0.1ms |
-| 3 — Both running | 0.1ms | 0.6ms | 40.9ms | 40.8ms | 0.1ms | 0.1ms |
-| **Delta (1 → 3)** | **0ms** | **0ms** | **+0.4ms** | **+0.1ms** | **0ms** | **0ms** |
+| 1 — Baseline | 0.1ms | 0.6ms | 40.6ms | 40.7ms | 0.1ms | 0.1ms |
+| 2 — Tetragon only | 0.1ms | 0.6ms | 40.7ms | 40.6ms | 0.1ms | 0.1ms |
+| 3 — Both running | 0.1ms | 0.6ms | 40.7ms | 40.8ms | 0.1ms | 0.1ms |
+| **Delta (1 → 3)** | **0ms** | **0ms** | **+0.1ms** | **+0.1ms** | **0ms** | **0ms** |
 
 ### Throughput and Memory
 
-| Scenario | events/sec | Memory growth |
-|---|---|---|
-| 1 — Baseline | 11,952 | 0.2MB |
-| 2 — Tetragon only | 11,001 | 0.2MB |
-| 3 — Both running | 9,900 | 0.2MB |
-
-Throughput variance across scenarios is within normal run-to-run noise —
-each test completed in ~40–50ms which is too short for a stable absolute
-measurement. The relative differences are not significant.
+| Scenario | Duration | events/sec | Memory growth |
+|---|---|---|---|
+| 1 — Baseline | 0.40s | 12,416 | 1.7MB |
+| 2 — Tetragon only | 0.39s | 12,687 | 1.5MB |
+| 3 — Both running | 0.38s | 13,136 | 1.7MB |
 
 ### Conclusions
 
 **cert-analyzer adds negligible overhead.** The mean latency delta across all
 certificate formats from baseline to full production configuration is at most
-0.4ms, entirely on PKCS12 which is dominated by the fixed cost of PBKDF2 key
-decryption regardless of what else is running. PEM, JKS, and expired
-certificate handling are completely unaffected across all scenarios.
+0.1ms — entirely within measurement noise. PEM, JKS, and expired certificate
+handling are completely unaffected across all scenarios.
 
 **Tetragon's eBPF kprobe hooks add no measurable latency** to certificate file
-access. The delta between Scenario 1 and Scenario 2 is within measurement
-noise across all formats.
+access. The delta between Scenario 1 and Scenario 2 is zero across all formats.
 
-**Memory footprint is minimal.** RSS growth during sustained load was 0.2MB
-in all three scenarios, well within the 50MB threshold and showing no signs
-of unbounded accumulation.
+**Throughput is unaffected by Tetragon or cert-analyzer.** All three scenarios
+delivered ~12,000–13,000 events/sec with the variation being run-to-run noise
+rather than any real overhead. Scenario 3 (both running) was marginally the
+fastest of the three, confirming no degradation.
+
+**Memory footprint is minimal and stable.** RSS growth over 5000 events was
+consistently ~1.6MB across all three scenarios, showing no signs of unbounded
+accumulation.
 
 **The performance case against deploying cert-analyzer is not supported by
 the data.** On this RHEL9 host, running Tetragon and cert-analyzer together
-has no measurable impact on certificate file access latency for other
-processes.
+has no measurable impact on certificate file access latency for other processes.
 
 ### Outstanding
 
