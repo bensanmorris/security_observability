@@ -24,6 +24,7 @@ Detect expired TLS certificates at runtime without modifying applications. Get r
 - [Demo - intercepting certificates in k8s with pod enrichment](POD-ENRICHMENT-DEMO-README.md)
 - [Testing guide](TEST-README.md)
 - [Deployment guide](DEPLOYMENT-README.md)
+- [Performan test guide + results](LOADTEST-README.md)
 
 ## Overview
 
