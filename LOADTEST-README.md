@@ -4,6 +4,10 @@ Performance evaluation script for the TLS Certificate Expiry Monitor on RHEL9.
 Measures analysis latency per certificate format and sustained event throughput,
 without requiring a live Tetragon instance.
 
+> **TL;DR** — cert-analyzer and Tetragon together add no measurable performance
+> overhead on RHEL9. See the [Results Summary](#results-summary-rhel9-evaluation--march-2026)
+> for full findings.
+
 ---
 
 ## Prerequisites
