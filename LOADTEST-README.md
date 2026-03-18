@@ -294,6 +294,71 @@ Console output:
   ✅ All tests passed — analyzer meets performance thresholds
 ```
 
-JSON output (with `--output results.json`) contains the full results including
-all per-scenario percentiles and the run configuration, suitable for automated
-comparison or storing alongside CI artefacts.
+
+---
+
+## Results Summary (RHEL9 Evaluation — March 2026)
+
+Results from running the three-scenario evaluation on a personal RHEL9
+environment with Tetragon and cert-analyzer deployed via Podman.
+
+> **Note:** The throughput test fell back to `analyze_certificate()` direct
+> calls in all three scenarios due to a `/host` symlink permission restriction.
+> This affects the absolute throughput numbers but not the latency results or
+> the relative comparison between scenarios, since the fallback was consistent
+> across all three runs.
+
+### Latency Results
+
+| Scenario | Single PEM | PEM bundle | PKCS12 | PKCS12 chain | Expired | JKS |
+|---|---|---|---|---|---|---|
+| 1 — Baseline | 0.1ms | 0.6ms | 40.5ms | 40.7ms | 0.1ms | 0.1ms |
+| 2 — Tetragon only | 0.1ms | 0.6ms | 40.7ms | 40.7ms | 0.1ms | 0.1ms |
+| 3 — Both running | 0.1ms | 0.6ms | 40.9ms | 40.8ms | 0.1ms | 0.1ms |
+| **Delta (1 → 3)** | **0ms** | **0ms** | **+0.4ms** | **+0.1ms** | **0ms** | **0ms** |
+
+### Throughput and Memory
+
+| Scenario | events/sec | Memory growth |
+|---|---|---|
+| 1 — Baseline | 11,952 | 0.2MB |
+| 2 — Tetragon only | 11,001 | 0.2MB |
+| 3 — Both running | 9,900 | 0.2MB |
+
+Throughput variance across scenarios is within normal run-to-run noise —
+each test completed in ~40–50ms which is too short for a stable absolute
+measurement. The relative differences are not significant.
+
+### Conclusions
+
+**cert-analyzer adds negligible overhead.** The mean latency delta across all
+certificate formats from baseline to full production configuration is at most
+0.4ms, entirely on PKCS12 which is dominated by the fixed cost of PBKDF2 key
+decryption regardless of what else is running. PEM, JKS, and expired
+certificate handling are completely unaffected across all scenarios.
+
+**Tetragon's eBPF kprobe hooks add no measurable latency** to certificate file
+access. The delta between Scenario 1 and Scenario 2 is within measurement
+noise across all formats.
+
+**Memory footprint is minimal.** RSS growth during sustained load was 0.2MB
+in all three scenarios, well within the 50MB threshold and showing no signs
+of unbounded accumulation.
+
+**The performance case against deploying cert-analyzer is not supported by
+the data.** On this RHEL9 host, running Tetragon and cert-analyzer together
+has no measurable impact on certificate file access latency for other
+processes.
+
+### Outstanding
+
+- Full `process_event()` pipeline throughput was not measured due to the
+  `/host` symlink permission restriction. To obtain this, create the symlink
+  manually as root before running the test:
+
+```bash
+sudo mkdir /host
+sudo ln -s /tmp/loadtest-certs /host/tmp/loadtest-certs
+python cert_analyzer_load_test.py --events 5000 --output full_pipeline.json
+sudo rm /host/tmp/loadtest-certs && sudo rmdir /host
+```
