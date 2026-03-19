@@ -1288,6 +1288,8 @@ class TestTetragonVersionCheck:
 
 import threading as _threading
 import time as _time
+import grpc
+from tetragon import sensors_pb2_grpc
 
 
 class _StreamingStub:
