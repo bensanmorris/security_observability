@@ -1157,3 +1157,411 @@ class TestJKSParsing:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# ── Tetragon version check helpers ───────────────────────────────────────────
+
+class _MockGetVersionResponse:
+    """Minimal mock of the GetVersionResponse proto."""
+    def __init__(self, version: str):
+        self.version = version
+
+
+class _MockVersionStub:
+    """Mock gRPC stub whose GetVersion returns a configurable version string."""
+    def __init__(self, version: str = 'v1.1.0', raise_exc=None):
+        self._version   = version
+        self._raise_exc = raise_exc
+
+    def GetVersion(self, request, timeout=None):
+        if self._raise_exc:
+            raise self._raise_exc
+        return _MockGetVersionResponse(self._version)
+
+
+class TestTetragonVersionCheck:
+    """
+    Tests for get_runtime_tetragon_version() and check_tetragon_version().
+
+    All tests use mock stubs so no live Tetragon connection is needed.
+    Prometheus metric state is verified via the analyzer fixture which
+    provides a clean registry per test.
+    """
+
+    def test_get_runtime_version_returns_version_string(self, analyzer):
+        """Happy path — stub returns a version string."""
+        stub = _MockVersionStub(version='v1.1.0')
+        result = analyzer.get_runtime_tetragon_version(stub)
+        assert result == 'v1.1.0'
+
+    def test_get_runtime_version_returns_unknown_on_grpc_error(self, analyzer):
+        """gRPC failure returns 'unknown' without raising."""
+        stub = _MockVersionStub(raise_exc=Exception("connection refused"))
+        result = analyzer.get_runtime_tetragon_version(stub)
+        assert result == 'unknown'
+
+    def test_get_runtime_version_returns_unknown_when_field_empty(self, analyzer):
+        """Empty version string in response returns 'unknown'."""
+        stub = _MockVersionStub(version='')
+        result = analyzer.get_runtime_tetragon_version(stub)
+        assert result == 'unknown'
+
+    def test_check_version_match_sets_metric_to_1(self, analyzer, monkeypatch):
+        """Matching build and runtime versions set the match gauge to 1."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        stub = _MockVersionStub(version='v1.1.0')
+        analyzer.check_tetragon_version(stub)
+        assert analyzer.metrics.tetragon_version_match._value.get() == 1.0
+
+    def test_check_version_mismatch_sets_metric_to_0(self, analyzer, monkeypatch):
+        """Differing build and runtime versions set the match gauge to 0."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        stub = _MockVersionStub(version='v1.2.0')
+        analyzer.check_tetragon_version(stub)
+        assert analyzer.metrics.tetragon_version_match._value.get() == 0.0
+
+    def test_check_version_unknown_build_sets_metric_to_0(self, analyzer, monkeypatch):
+        """Unknown build version (env var not set) sets match gauge to 0."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'unknown')
+        stub = _MockVersionStub(version='v1.1.0')
+        analyzer.check_tetragon_version(stub)
+        assert analyzer.metrics.tetragon_version_match._value.get() == 0.0
+
+    def test_check_version_unknown_runtime_sets_metric_to_0(self, analyzer, monkeypatch):
+        """Unreachable Tetragon daemon (unknown runtime) sets match gauge to 0."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        stub = _MockVersionStub(raise_exc=Exception("timeout"))
+        analyzer.check_tetragon_version(stub)
+        assert analyzer.metrics.tetragon_version_match._value.get() == 0.0
+
+    def test_check_version_sets_info_metric(self, analyzer, monkeypatch):
+        """Version info metric carries both build and runtime version labels."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        stub = _MockVersionStub(version='v1.2.0')
+        analyzer.check_tetragon_version(stub)
+        labels = analyzer.metrics.tetragon_version_info._labelnames
+        assert 'build_version'   in labels
+        assert 'runtime_version' in labels
+
+    def test_check_version_mismatch_logs_warning(self, analyzer, monkeypatch, caplog):
+        """A version mismatch produces a WARNING log containing both versions."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        stub = _MockVersionStub(version='v1.2.0')
+
+        with caplog.at_level(logging.WARNING, logger='cert_analyzer'):
+            analyzer.check_tetragon_version(stub)
+
+        messages = ' '.join(r.message for r in caplog.records)
+        assert 'v1.1.0'   in messages
+        assert 'v1.2.0'   in messages
+        assert 'MISMATCH' in messages
+
+    def test_check_version_match_logs_info(self, analyzer, monkeypatch, caplog):
+        """Matching versions produce an INFO log confirming the version."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        stub = _MockVersionStub(version='v1.1.0')
+
+        with caplog.at_level(logging.INFO, logger='cert_analyzer'):
+            analyzer.check_tetragon_version(stub)
+
+        messages = ' '.join(r.message for r in caplog.records)
+        assert 'v1.1.0' in messages
+        assert 'OK'      in messages
+
+    def test_get_runtime_version_never_raises(self, analyzer):
+        """get_runtime_tetragon_version must never propagate exceptions."""
+        stub = _MockVersionStub(raise_exc=RuntimeError("unexpected failure"))
+        try:
+            result = analyzer.get_runtime_tetragon_version(stub)
+            assert result == 'unknown'
+        except Exception as exc:
+            pytest.fail(f"get_runtime_tetragon_version raised unexpectedly: {exc}")
+
+
+# ── Reconnection and version monitor tests ────────────────────────────────────
+
+import threading as _threading
+import time as _time
+
+
+class _StreamingStub:
+    """
+    Mock stub that simulates the full GetEvents streaming lifecycle.
+
+    Yields a configurable sequence of events then raises an exception to
+    simulate a Tetragon disconnect, allowing reconnection logic to be tested
+    without a live gRPC connection.
+    """
+    def __init__(self, events=None, fail_after=0, exception=None):
+        """
+        events     : list of mock event objects to yield per call
+        fail_after : number of events to yield before raising (0 = raise immediately)
+        exception  : exception to raise (default: grpc.RpcError via _MockRpcError)
+        """
+        self._events    = events or []
+        self._fail_after = fail_after
+        self._exception  = exception or _MockRpcError()
+        self._call_count = 0
+
+    def GetEvents(self, request, **kwargs):
+        self._call_count += 1
+        for i, event in enumerate(self._events):
+            if i >= self._fail_after:
+                raise self._exception
+            yield event
+        raise self._exception
+
+    def GetVersion(self, request, timeout=None):
+        return _MockGetVersionResponse('v1.1.0')
+
+
+class _MockRpcError(grpc.RpcError):
+    """Minimal grpc.RpcError subclass with a controllable status code."""
+    def __init__(self, code=grpc.StatusCode.UNAVAILABLE):
+        self._code = code
+
+    def code(self):
+        return self._code
+
+
+class TestReconnection:
+    """
+    Tests for the reconnection loop in start().
+
+    Uses threads and Events to drive the analyzer for a bounded number of
+    reconnect cycles without blocking the test indefinitely.
+    """
+
+    def _run_start_briefly(self, analyzer, stub_factory, stop_after_s=0.3):
+        """
+        Run analyzer.start() in a thread, interrupt it after stop_after_s
+        seconds by sending KeyboardInterrupt to the thread, and return.
+
+        Patches the stub creation inside start() so we can inject our mock.
+        """
+        import signal
+
+        exc_holder = []
+
+        def _target():
+            try:
+                analyzer.start()
+            except Exception as e:
+                exc_holder.append(e)
+
+        t = _threading.Thread(target=_target, daemon=True)
+        t.start()
+        _time.sleep(stop_after_s)
+        # The reconnect loop exits cleanly on KeyboardInterrupt
+        # We can't send it to a thread directly so we just let it run
+        # and check state rather than joining
+        return exc_holder
+
+    def test_healthy_metric_set_on_connection(self, analyzer, monkeypatch):
+        """
+        analyzer_healthy gauge is set to 1 when the event stream is active.
+        We verify this by checking immediately after a stream starts.
+        """
+        connected = _threading.Event()
+        stopped   = _threading.Event()
+
+        original_get_events_called = []
+
+        class _ConnectingStub:
+            def GetEvents(self_, request, **kwargs):
+                connected.set()
+                stopped.wait(timeout=1.0)
+                raise _MockRpcError()
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        stub = _ConnectingStub()
+
+        # Patch channel creation to return our stub
+        import cert_analyzer as _ca
+
+        def _mock_insecure_channel(*a, **kw):
+            return None
+
+        monkeypatch.setattr(grpc, 'insecure_channel', _mock_insecure_channel)
+        monkeypatch.setattr(
+            sensors_pb2_grpc, 'FineGuidanceSensorsStub',
+            lambda ch: stub,
+        )
+
+        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t.start()
+        connected.wait(timeout=2.0)
+
+        assert analyzer.metrics.analyzer_healthy._value.get() == 1.0
+        stopped.set()
+
+    def test_healthy_metric_set_to_0_on_disconnect(self, analyzer, monkeypatch):
+        """
+        analyzer_healthy drops to 0 when the gRPC stream raises RpcError.
+        """
+        disconnected = _threading.Event()
+        allow_retry  = _threading.Event()
+        call_count   = [0]
+
+        class _DisconnectingStub:
+            def GetEvents(self_, request, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    raise _MockRpcError()
+                # Block subsequent calls until test is done
+                disconnected.set()
+                allow_retry.wait(timeout=2.0)
+                raise _MockRpcError()
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        stub = _DisconnectingStub()
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: None)
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', lambda ch: stub)
+        # Shorten retry delay so test doesn't wait 5s
+        monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '9999')
+
+        # Patch time.sleep to not actually wait during reconnect backoff
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+
+        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t.start()
+        disconnected.wait(timeout=2.0)
+
+        assert analyzer.metrics.analyzer_healthy._value.get() == 0.0
+        allow_retry.set()
+
+    def test_reconnect_reissues_get_events(self, analyzer, monkeypatch):
+        """
+        After a disconnect, GetEvents is called again (reconnect attempt).
+        """
+        call_count  = [0]
+        second_call = _threading.Event()
+
+        class _ReconnectingStub:
+            def GetEvents(self_, request, **kwargs):
+                call_count[0] += 1
+                if call_count[0] >= 2:
+                    second_call.set()
+                    _time.sleep(10)  # block so test can assert
+                raise _MockRpcError()
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: None)
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
+                            lambda ch: _ReconnectingStub())
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+
+        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t.start()
+
+        assert second_call.wait(timeout=3.0), "GetEvents was not called a second time"
+        assert call_count[0] >= 2
+
+
+class TestVersionMonitor:
+    """Tests for _start_version_monitor background thread."""
+
+    def test_version_monitor_thread_is_daemon(self, analyzer, monkeypatch):
+        """The version monitor thread must be a daemon so it doesn't block shutdown."""
+        threads_started = []
+
+        original_thread = _threading.Thread
+
+        def _capture_thread(*args, **kwargs):
+            t = original_thread(*args, **kwargs)
+            threads_started.append(t)
+            return t
+
+        monkeypatch.setattr(_threading, 'Thread', _capture_thread)
+        monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '9999')
+
+        stub = _MockVersionStub(version='v1.1.0')
+        analyzer._start_version_monitor(stub)
+
+        version_threads = [t for t in threads_started
+                           if getattr(t, 'name', '') == 'tetragon-version-monitor']
+        assert len(version_threads) == 1
+        assert version_threads[0].daemon is True
+
+    def test_version_monitor_calls_check_periodically(self, analyzer, monkeypatch):
+        """Version monitor invokes check_tetragon_version at least twice."""
+        call_count   = [0]
+        second_check = _threading.Event()
+
+        def _mock_check(stub):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                second_check.set()
+
+        monkeypatch.setattr(analyzer, 'check_tetragon_version', _mock_check)
+        monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '0')
+
+        stub = _MockVersionStub(version='v1.1.0')
+        analyzer._start_version_monitor(stub)
+
+        assert second_check.wait(timeout=2.0), \
+            "check_tetragon_version was not called a second time within 2s"
+
+    def test_version_monitor_survives_check_exception(self, analyzer, monkeypatch):
+        """An exception in check_tetragon_version must not kill the monitor thread."""
+        call_count   = [0]
+        second_check = _threading.Event()
+
+        def _failing_then_succeeding_check(stub):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated transient failure")
+            second_check.set()
+
+        monkeypatch.setattr(analyzer, 'check_tetragon_version',
+                            _failing_then_succeeding_check)
+        monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '0')
+
+        stub = _MockVersionStub(version='v1.1.0')
+        analyzer._start_version_monitor(stub)
+
+        assert second_check.wait(timeout=2.0), \
+            "Monitor thread did not survive the exception"
+
+    def test_version_monitor_detects_upgrade(self, analyzer, monkeypatch):
+        """
+        If Tetragon is upgraded while the analyzer is running the mismatch
+        metric updates to reflect the new version.
+        """
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
+        monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '0')
+
+        versions    = ['v1.1.0', 'v1.2.0']  # simulates an upgrade
+        call_index  = [0]
+        mismatch_detected = _threading.Event()
+
+        def _mock_check(stub):
+            v = versions[min(call_index[0], len(versions) - 1)]
+            call_index[0] += 1
+            # Directly invoke the real check logic with a stub returning v
+            real_stub = _MockVersionStub(version=v)
+            # Call the real implementation bypassing the monkeypatch
+            CertificateAnalyzer.check_tetragon_version(analyzer, real_stub)
+            if analyzer.metrics.tetragon_version_match._value.get() == 0.0:
+                mismatch_detected.set()
+
+        monkeypatch.setattr(analyzer, 'check_tetragon_version', _mock_check)
+
+        stub = _MockVersionStub(version='v1.1.0')
+        analyzer._start_version_monitor(stub)
+
+        assert mismatch_detected.wait(timeout=3.0), \
+            "Mismatch metric was not set after simulated Tetragon upgrade"

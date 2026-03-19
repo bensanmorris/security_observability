@@ -17,11 +17,12 @@ from dataclasses import dataclass, field
 from concurrent import futures
 import time
 import re
+import threading
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
-from prometheus_client import Gauge, Counter, start_http_server
+from prometheus_client import Gauge, Counter, Info, start_http_server
 
 # Import generated Tetragon protos
 try:
@@ -44,6 +45,12 @@ try:
     JKS_AVAILABLE = True
 except ImportError:
     JKS_AVAILABLE = False
+
+# The Tetragon version this build was compiled against.
+# Must be kept in lockstep with the version used in the Containerfile build arg.
+# Set by the CI build process via the TETRAGON_BUILD_VERSION environment variable
+# which is injected at image build time; falls back to 'unknown' if not set.
+TETRAGON_BUILD_VERSION: str = os.getenv('TETRAGON_BUILD_VERSION', 'unknown')
 
 # Configure logging
 logging.basicConfig(
@@ -176,6 +183,17 @@ class PrometheusMetrics:
         self.last_event_timestamp = Gauge(
             'cert_analyzer_last_event_timestamp',
             'Timestamp of last processed event'
+        )
+
+        # Tetragon version tracking — detects build/runtime version mismatch
+        self.tetragon_version_info = Info(
+            'cert_analyzer_tetragon_version',
+            'Tetragon version information for build and runtime',
+        )
+
+        self.tetragon_version_match = Gauge(
+            'cert_analyzer_tetragon_version_match',
+            'Whether the build and runtime Tetragon versions match (1=match, 0=mismatch)',
         )
 
     def update_certificate_metrics(self, info: CertificateInfo):
@@ -757,8 +775,103 @@ class CertificateAnalyzer:
 
         self.metrics.last_event_timestamp.set(time.time())
 
+    def get_runtime_tetragon_version(self, stub) -> str:
+        """
+        Query the running Tetragon daemon for its version via GetVersion RPC.
+
+        Returns the version string (e.g. 'v1.1.0') on success, or 'unknown'
+        if the call fails or the version field is absent. Failures are logged
+        as warnings and never propagate — a version mismatch should alert but
+        must never prevent the analyzer from starting.
+        """
+        try:
+            response = stub.GetVersion(
+                tetragon_pb2.GetVersionRequest(),
+                timeout=5.0,
+            )
+            version = getattr(response, 'version', '').strip()
+            return version if version else 'unknown'
+        except Exception as e:
+            logger.warning(f"Could not retrieve runtime Tetragon version: {e}")
+            return 'unknown'
+
+    def check_tetragon_version(self, stub) -> None:
+        """
+        Compare the build-time and runtime Tetragon versions, update Prometheus
+        metrics, and log a clear warning if they differ.
+
+        Called once at startup after the gRPC channel is established.
+        """
+        runtime_version = self.get_runtime_tetragon_version(stub)
+        build_version   = TETRAGON_BUILD_VERSION
+
+        self.metrics.tetragon_version_info.info({
+            'build_version':   build_version,
+            'runtime_version': runtime_version,
+        })
+
+        versions_match = (
+            build_version   != 'unknown'
+            and runtime_version != 'unknown'
+            and build_version   == runtime_version
+        )
+        self.metrics.tetragon_version_match.set(1 if versions_match else 0)
+
+        if build_version == 'unknown' or runtime_version == 'unknown':
+            logger.warning(
+                f"Tetragon version check incomplete — "
+                f"build: {build_version}, runtime: {runtime_version}"
+            )
+        elif versions_match:
+            logger.info(
+                f"Tetragon version OK — build and runtime both at {build_version}"
+            )
+        else:
+            logger.warning(
+                f"⚠️  Tetragon version MISMATCH — "
+                f"built against {build_version}, runtime is {runtime_version}. "
+                f"Proto incompatibilities may cause silent failures. "
+                f"Rebuild the cert-analyzer image against {runtime_version}."
+            )
+
+    def _start_version_monitor(self, stub) -> None:
+        """
+        Start a background daemon thread that periodically re-checks the
+        runtime Tetragon version and updates Prometheus metrics.
+
+        This detects Tetragon upgrades or downgrades that occur while the
+        analyzer is running without requiring an analyzer restart.
+
+        Interval is configurable via TETRAGON_VERSION_CHECK_INTERVAL env var
+        (default: 300 seconds / 5 minutes).
+        """
+        interval = int(os.getenv('TETRAGON_VERSION_CHECK_INTERVAL', '300'))
+
+        def _monitor():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.check_tetragon_version(stub)
+                except Exception as e:
+                    logger.warning(f"Version monitor error: {e}")
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.name = 'tetragon-version-monitor'
+        thread.start()
+        logger.info(f"Started Tetragon version monitor (interval: {interval}s)")
+
     def start(self):
-        """Start listening to Tetragon events"""
+        """
+        Start listening to Tetragon events with automatic reconnection.
+
+        Establishes the gRPC channel once and re-issues GetEvents after any
+        stream failure, using exponential backoff. This handles Tetragon
+        restarts and upgrades transparently.
+
+        The version monitor thread is started once and reuses the same channel —
+        gRPC handles transport reconnection automatically so the stub remains
+        valid across Tetragon restarts.
+        """
         logger.info(f"Connecting to Tetragon at {self.tetragon_address}")
 
         if self.tetragon_address.startswith('unix://'):
@@ -768,6 +881,10 @@ class CertificateAnalyzer:
             channel = grpc.insecure_channel(self.tetragon_address)
 
         stub = sensors_pb2_grpc.FineGuidanceSensorsStub(channel)
+
+        # Version check on startup, then periodically in background
+        self.check_tetragon_version(stub)
+        self._start_version_monitor(stub)
 
         request = events_pb2.GetEventsRequest(
             allow_list=[
@@ -780,26 +897,50 @@ class CertificateAnalyzer:
             ]
         )
 
-        logger.info("Connected to Tetragon, listening for certificate events...")
-        self.metrics.analyzer_healthy.set(1)
+        retry_delay = 5
+        max_delay   = 60
 
         try:
-            for response in stub.GetEvents(request):
+            while True:
                 try:
-                    self.process_event(response)
+                    logger.info("Listening for Tetragon certificate events...")
+                    self.metrics.analyzer_healthy.set(1)
+
+                    for response in stub.GetEvents(request):
+                        try:
+                            self.process_event(response)
+                        except Exception as e:
+                            logger.error(f"Error processing event: {e}", exc_info=True)
+                            self.metrics.cert_events_total.labels(
+                                event_type='processing', status='error'
+                            ).inc()
+
+                    # Stream ended without error — Tetragon closed it cleanly
+                    logger.warning("Tetragon event stream ended, reconnecting...")
+                    retry_delay = 5
+
+                except grpc.RpcError as e:
+                    self.metrics.analyzer_healthy.set(0)
+                    logger.warning(
+                        f"Tetragon connection lost ({e.code().name}), "
+                        f"retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, max_delay)
+
                 except Exception as e:
-                    logger.error(f"Error processing event: {e}", exc_info=True)
-                    self.metrics.cert_events_total.labels(
-                        event_type='processing', status='error'
-                    ).inc()
+                    self.metrics.analyzer_healthy.set(0)
+                    logger.error(
+                        f"Unexpected error in event stream: {e} — "
+                        f"retrying in {retry_delay}s",
+                        exc_info=True,
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, max_delay)
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             self.metrics.analyzer_healthy.set(0)
-        except Exception as e:
-            logger.error(f"Error in event stream: {e}", exc_info=True)
-            self.metrics.analyzer_healthy.set(0)
-            raise
         finally:
             channel.close()
 
@@ -853,6 +994,7 @@ def main():
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
     logger.info("="*60)
     logger.info(f"Tetragon address:  {tetragon_addr}")
+    logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
     logger.info(f"Scan paths:        {scan_paths}")
@@ -867,8 +1009,6 @@ def main():
                                    filter_self_events=filter_self)
 
     if scan_paths and scan_paths[0]:
-        import threading
-
         def periodic_scanner():
             while True:
                 try:
