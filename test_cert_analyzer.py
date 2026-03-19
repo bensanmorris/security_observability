@@ -1243,13 +1243,14 @@ class TestTetragonVersionCheck:
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.2.0')
         analyzer.check_tetragon_version(stub)
-        # Info metric stores its labels as a child metric — retrieve via _metrics
-        stored = list(analyzer.metrics.tetragon_version_info._metrics.keys())
-        # stored is a tuple of label values; check via the sample output instead
+        # Collect samples and verify both version label keys and values are present
         samples = list(analyzer.metrics.tetragon_version_info.collect()[0].samples)
-        label_keys = samples[0].labels.keys() if samples else []
+        assert len(samples) > 0, "No samples emitted from tetragon_version_info"
+        label_keys = samples[0].labels.keys()
         assert 'build_version'   in label_keys
         assert 'runtime_version' in label_keys
+        assert samples[0].labels['build_version']   == 'v1.1.0'
+        assert samples[0].labels['runtime_version'] == 'v1.2.0'
 
     def test_check_version_mismatch_logs_warning(self, analyzer, monkeypatch, caplog):
         """A version mismatch produces a WARNING log containing both versions."""
