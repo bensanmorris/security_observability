@@ -1243,9 +1243,13 @@ class TestTetragonVersionCheck:
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.2.0')
         analyzer.check_tetragon_version(stub)
-        labels = analyzer.metrics.tetragon_version_info._labelnames
-        assert 'build_version'   in labels
-        assert 'runtime_version' in labels
+        # Info metric stores its labels as a child metric — retrieve via _metrics
+        stored = list(analyzer.metrics.tetragon_version_info._metrics.keys())
+        # stored is a tuple of label values; check via the sample output instead
+        samples = list(analyzer.metrics.tetragon_version_info.collect()[0].samples)
+        label_keys = samples[0].labels.keys() if samples else []
+        assert 'build_version'   in label_keys
+        assert 'runtime_version' in label_keys
 
     def test_check_version_mismatch_logs_warning(self, analyzer, monkeypatch, caplog):
         """A version mismatch produces a WARNING log containing both versions."""
@@ -1409,38 +1413,36 @@ class TestReconnection:
         """
         analyzer_healthy drops to 0 when the gRPC stream raises RpcError.
         """
-        disconnected = _threading.Event()
-        allow_retry  = _threading.Event()
-        call_count   = [0]
+        metric_set_to_zero = _threading.Event()
+        original_set = analyzer.metrics.analyzer_healthy.set
+
+        def _watched_set(value):
+            original_set(value)
+            if value == 0:
+                metric_set_to_zero.set()
+
+        analyzer.metrics.analyzer_healthy.set = _watched_set
 
         class _DisconnectingStub:
             def GetEvents(self_, request, **kwargs):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    raise _MockRpcError()
-                # Block subsequent calls until test is done
-                disconnected.set()
-                allow_retry.wait(timeout=2.0)
                 raise _MockRpcError()
 
             def GetVersion(self_, request, timeout=None):
                 return _MockGetVersionResponse('v1.1.0')
 
-        stub = _DisconnectingStub()
         monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: None)
-        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', lambda ch: stub)
-        # Shorten retry delay so test doesn't wait 5s
-        monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '9999')
-
-        # Patch time.sleep to not actually wait during reconnect backoff
-        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
+                            lambda ch: _DisconnectingStub())
+        # Patch sleep on the cert_analyzer module so the retry backoff is instant
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca.time, 'sleep', lambda s: None)
 
         t = _threading.Thread(target=analyzer.start, daemon=True)
         t.start()
-        disconnected.wait(timeout=2.0)
 
+        assert metric_set_to_zero.wait(timeout=3.0), \
+            "analyzer_healthy was never set to 0 after disconnect"
         assert analyzer.metrics.analyzer_healthy._value.get() == 0.0
-        allow_retry.set()
 
     def test_reconnect_reissues_get_events(self, analyzer, monkeypatch):
         """
