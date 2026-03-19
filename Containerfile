@@ -62,6 +62,12 @@ FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:lates
 
 ARG PIP_INDEX_URL=https://pypi.org/simple/
 ARG PIP_TRUSTED_HOST=pypi.org
+# Re-declare so it's available in this stage (top-level ARGs don't cross stages)
+ARG TETRAGON_VERSION=v1.1.0
+
+# Stamp the Tetragon version into the image as an environment variable so
+# cert_analyzer.py can read it at runtime via os.getenv('TETRAGON_BUILD_VERSION')
+ENV TETRAGON_BUILD_VERSION=${TETRAGON_VERSION}
 
 USER 0
 
