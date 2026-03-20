@@ -78,6 +78,16 @@ podman tag cert-analyzer:latest your-registry.internal/security/cert-analyzer:1.
 podman push your-registry.internal/security/cert-analyzer:1.0.0
 ```
 
+> **Tetragon version lockstep** — the cert-analyzer image is built against a
+> specific Tetragon version (set via the `TETRAGON_VERSION` build arg in the
+> Containerfile). The build version is stamped into the image as the
+> `TETRAGON_BUILD_VERSION` environment variable and checked against the running
+> Tetragon daemon at startup and periodically at runtime. Always rebuild the
+> cert-analyzer image when upgrading Tetragon. A mismatch will log a `WARNING`
+> and set the `cert_analyzer_tetragon_version_match` Prometheus gauge to `0`,
+> which fires the `TetragonVersionMismatch` alert. See the Production
+> Considerations section for the recommended alert rule.
+
 ### 3. Configure Node Registry Access
 
 Ensure all nodes can pull from your internal registry. On each node:
@@ -215,6 +225,29 @@ Configure `alertmanager.yml` to route notifications to your chosen channel (Slac
 ## Production Considerations
 
 **Metrics endpoint security** — the cert-analyzer metrics endpoint is plain HTTP on port 9090 and unauthenticated. Place a reverse proxy in front of it if the endpoint is exposed on a shared network.
+
+**Tetragon version monitoring** — the analyzer checks its build version against the running Tetragon daemon at startup and every 5 minutes thereafter (configurable via `TETRAGON_VERSION_CHECK_INTERVAL`). If Tetragon is upgraded without a corresponding cert-analyzer rebuild, proto incompatibilities may cause silent event processing failures. Add the following alert rule to catch this:
+
+```yaml
+- alert: TetragonVersionMismatch
+  expr: cert_analyzer_tetragon_version_match == 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "cert-analyzer built against wrong Tetragon version"
+    description: >
+      The cert-analyzer was built against a different Tetragon version than
+      the one currently running. Check the cert_analyzer_tetragon_version
+      metric for build_version and runtime_version labels, then rebuild the
+      cert-analyzer image against the runtime version.
+```
+
+The `cert_analyzer_tetragon_version` Info metric carries both `build_version` and `runtime_version` labels and can be inspected directly:
+
+```bash
+curl -s http://localhost:9090/metrics | grep tetragon_version
+```
 
 **Prometheus storage** — configure Prometheus with sufficient retention for certificate expiry trending. 90 days is a reasonable minimum given the alerting thresholds in use.
 
