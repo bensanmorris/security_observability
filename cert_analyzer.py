@@ -489,11 +489,51 @@ class CertificateAnalyzer:
         pid: int,
         namespace: str = "",
         cert_index: int = 0
-    ) -> CertificateInfo:
-        """Extract relevant information from an X.509 certificate"""
+    ) -> Optional[CertificateInfo]:
+        """
+        Extract relevant information from an X.509 certificate.
 
-        subject = cert.subject.rfc4514_string()
-        issuer = cert.issuer.rfc4514_string()
+        Returns None if any mandatory field cannot be extracted, rather than
+        raising — the caller in analyze_certificate() handles None gracefully.
+        This covers malformed certs, encrypted fields, and future cryptography
+        library API changes.
+        """
+        try:
+            subject = cert.subject.rfc4514_string()
+        except Exception as e:
+            logger.warning(f"Could not extract subject from cert {cert_index} in {cert_path}: {e}")
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            return None
+
+        try:
+            issuer = cert.issuer.rfc4514_string()
+        except Exception as e:
+            logger.warning(f"Could not extract issuer from cert {cert_index} in {cert_path}: {e}")
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            return None
+
+        try:
+            serial_number = str(cert.serial_number)
+        except Exception as e:
+            logger.warning(f"Could not extract serial number from cert {cert_index} in {cert_path}: {e}")
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            return None
+
+        # Use the UTC-aware property where available, fall back to the naive
+        # deprecated property for older cryptography library versions
+        try:
+            not_before = getattr(cert, 'not_valid_before_utc', None) or cert.not_valid_before
+            not_after  = getattr(cert, 'not_valid_after_utc',  None) or cert.not_valid_after
+            # Strip timezone info to keep datetime arithmetic consistent with
+            # the rest of the codebase which uses datetime.utcnow()
+            if not_before and not_before.tzinfo is not None:
+                not_before = not_before.replace(tzinfo=None)
+            if not_after and not_after.tzinfo is not None:
+                not_after = not_after.replace(tzinfo=None)
+        except Exception as e:
+            logger.warning(f"Could not extract validity dates from cert {cert_index} in {cert_path}: {e}")
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            return None
 
         try:
             common_name_attrs = cert.subject.get_attributes_for_oid(
@@ -518,9 +558,9 @@ class CertificateAnalyzer:
             path=cert_path,
             subject=subject,
             issuer=issuer,
-            serial_number=str(cert.serial_number),
-            not_before=cert.not_valid_before,
-            not_after=cert.not_valid_after,
+            serial_number=serial_number,
+            not_before=not_before,
+            not_after=not_after,
             process=process,
             pid=pid,
             namespace=namespace,
@@ -538,7 +578,14 @@ class CertificateAnalyzer:
     ) -> List[CertificateInfo]:
         """Analyze a certificate file and return list of CertificateInfo (supports multi-cert files)"""
 
-        certs = self.parse_certificates(cert_path)
+        try:
+            certs = self.parse_certificates(cert_path)
+        except Exception as e:
+            logger.error(f"Unexpected error parsing certificates from {cert_path}: {e}",
+                         exc_info=True)
+            self.metrics.cert_analysis_errors.labels(error_type='parse_error').inc()
+            return []
+
         if not certs:
             return []
 
@@ -548,6 +595,10 @@ class CertificateAnalyzer:
                 cert_info = self.extract_certificate_info(
                     cert, cert_path, process, pid, namespace, cert_index=idx
                 )
+                if cert_info is None:
+                    # extract_certificate_info already logged and incremented
+                    # the error metric — skip this cert and continue with others
+                    continue
                 cert_infos.append(cert_info)
                 self.metrics.cert_events_total.labels(event_type='analysis', status='success').inc()
             except Exception as e:

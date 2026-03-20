@@ -1570,3 +1570,212 @@ class TestVersionMonitor:
 
         assert mismatch_detected.wait(timeout=3.0), \
             "Mismatch metric was not set after simulated Tetragon upgrade"
+
+
+# ── Certificate parsing exception handling tests ──────────────────────────────
+
+class _BrokenCert:
+    """
+    A mock x509.Certificate whose attributes raise exceptions on access,
+    simulating malformed or encrypted certificates that cannot be parsed.
+    Allows selective breakage of individual fields.
+    """
+    def __init__(
+        self,
+        break_subject=False,
+        break_issuer=False,
+        break_serial=False,
+        break_dates=False,
+    ):
+        self._break_subject = break_subject
+        self._break_issuer  = break_issuer
+        self._break_serial  = break_serial
+        self._break_dates   = break_dates
+
+        # Provide working defaults for fields not being broken
+        self._subject = type('S', (), {
+            'rfc4514_string': lambda s: 'CN=test',
+            'get_attributes_for_oid': lambda s, oid: [],
+        })()
+        self._issuer = type('I', (), {
+            'rfc4514_string': lambda s: 'CN=ca',
+        })()
+
+    @property
+    def subject(self):
+        if self._break_subject:
+            raise ValueError("Simulated subject parse failure")
+        return self._subject
+
+    @property
+    def issuer(self):
+        if self._break_issuer:
+            raise ValueError("Simulated issuer parse failure")
+        return self._issuer
+
+    @property
+    def serial_number(self):
+        if self._break_serial:
+            raise ValueError("Simulated serial number parse failure")
+        return 12345
+
+    @property
+    def not_valid_before(self):
+        if self._break_dates:
+            raise ValueError("Simulated date parse failure")
+        return datetime.utcnow() - timedelta(days=1)
+
+    @property
+    def not_valid_after(self):
+        if self._break_dates:
+            raise ValueError("Simulated date parse failure")
+        return datetime.utcnow() + timedelta(days=365)
+
+    # not_valid_before_utc / not_valid_after_utc intentionally absent so
+    # extract_certificate_info falls back to the naive properties above
+
+    @property
+    def extensions(self):
+        raise x509.ExtensionNotFound(
+            "No extensions", x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        )
+
+
+class TestCertificateParsingExceptions:
+    """
+    Tests that verify the analyzer degrades gracefully when certificate
+    parsing raises exceptions — returning [] or None rather than crashing,
+    and incrementing the appropriate error metrics.
+    """
+
+    def test_extract_info_returns_none_when_subject_raises(self, analyzer, temp_dir):
+        """A cert whose subject raises returns None from extract_certificate_info."""
+        cert = _BrokenCert(break_subject=True)
+        result = analyzer.extract_certificate_info(cert, "/tmp/bad.pem", "test", 1)
+        assert result is None
+
+    def test_extract_info_returns_none_when_issuer_raises(self, analyzer, temp_dir):
+        """A cert whose issuer raises returns None from extract_certificate_info."""
+        cert = _BrokenCert(break_issuer=True)
+        result = analyzer.extract_certificate_info(cert, "/tmp/bad.pem", "test", 1)
+        assert result is None
+
+    def test_extract_info_returns_none_when_serial_raises(self, analyzer, temp_dir):
+        """A cert whose serial number raises returns None from extract_certificate_info."""
+        cert = _BrokenCert(break_serial=True)
+        result = analyzer.extract_certificate_info(cert, "/tmp/bad.pem", "test", 1)
+        assert result is None
+
+    def test_extract_info_returns_none_when_dates_raise(self, analyzer, temp_dir):
+        """A cert whose validity dates raise returns None from extract_certificate_info."""
+        cert = _BrokenCert(break_dates=True)
+        result = analyzer.extract_certificate_info(cert, "/tmp/bad.pem", "test", 1)
+        assert result is None
+
+    def test_extract_info_increments_error_metric_on_failure(self, analyzer):
+        """extract_certificate_info increments extraction_error metric when it returns None."""
+        cert = _BrokenCert(break_subject=True)
+        before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='extraction_error'
+        )._value.get()
+        analyzer.extract_certificate_info(cert, "/tmp/bad.pem", "test", 1)
+        after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='extraction_error'
+        )._value.get()
+        assert after == before + 1
+
+    def test_analyze_certificate_skips_broken_cert_in_bundle(self, analyzer, temp_dir):
+        """
+        In a multi-cert bundle, a broken cert is skipped and valid certs
+        are still returned — the analyzer does not crash or return empty.
+        """
+        # Write a valid 2-cert bundle
+        cert1, _ = TestCertificateGeneration.generate_certificate("valid1.example.com", 365)
+        cert2, _ = TestCertificateGeneration.generate_certificate("valid2.example.com", 180)
+        bundle_path = os.path.join(temp_dir, "bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem([cert1, cert2], bundle_path)
+
+        # Patch parse_certificates to inject a broken cert between the two valid ones
+        original_parse = analyzer.parse_certificates
+
+        def _inject_broken(path):
+            certs = original_parse(path)
+            return [certs[0], _BrokenCert(break_subject=True), certs[1]]
+
+        analyzer.parse_certificates = _inject_broken
+
+        cert_infos = analyzer.analyze_certificate(bundle_path, "test", 1)
+
+        # Two valid certs should come through; broken one silently skipped
+        assert len(cert_infos) == 2
+        common_names = [c.common_name for c in cert_infos]
+        assert "valid1.example.com" in common_names
+        assert "valid2.example.com" in common_names
+
+    def test_analyze_certificate_returns_empty_when_all_certs_broken(self, analyzer, temp_dir):
+        """If every cert in a file is broken, analyze_certificate returns []."""
+        cert, _ = TestCertificateGeneration.generate_certificate("test.example.com", 365)
+        path = os.path.join(temp_dir, "single.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer.parse_certificates = lambda p: [_BrokenCert(break_dates=True)]
+
+        result = analyzer.analyze_certificate(path, "test", 1)
+        assert result == []
+
+    def test_analyze_certificate_does_not_crash_on_parse_exception(self, analyzer, temp_dir):
+        """
+        If parse_certificates itself raises, analyze_certificate returns []
+        rather than propagating the exception.
+        """
+        cert, _ = TestCertificateGeneration.generate_certificate("test.example.com", 365)
+        path = os.path.join(temp_dir, "single.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("Simulated catastrophic parse failure")
+
+        analyzer.parse_certificates = _raise
+
+        try:
+            result = analyzer.analyze_certificate(path, "test", 1)
+            assert result == []
+        except Exception as exc:
+            pytest.fail(f"analyze_certificate propagated exception: {exc}")
+
+    def test_extract_info_handles_valid_cert_with_utc_dates(self, analyzer, temp_dir):
+        """
+        extract_certificate_info correctly handles certs that return
+        timezone-aware datetimes from not_valid_after_utc (cryptography >= 42).
+        The returned CertificateInfo should have naive datetimes.
+        """
+        from datetime import timezone
+
+        cert, _ = TestCertificateGeneration.generate_certificate("utc.example.com", 365)
+        path = os.path.join(temp_dir, "utc.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        # Wrap the cert to return tz-aware datetimes from the _utc properties
+        class _UTCAwareCert:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            @property
+            def not_valid_before_utc(self):
+                return self._inner.not_valid_before.replace(tzinfo=timezone.utc)
+
+            @property
+            def not_valid_after_utc(self):
+                return self._inner.not_valid_after.replace(tzinfo=timezone.utc)
+
+        certs = analyzer.parse_certificates(path)
+        wrapped = _UTCAwareCert(certs[0])
+        info = analyzer.extract_certificate_info(wrapped, path, "test", 1)
+
+        assert info is not None
+        assert info.not_before.tzinfo is None, "not_before should be naive datetime"
+        assert info.not_after.tzinfo  is None, "not_after should be naive datetime"
+        assert info.common_name == "utc.example.com"
