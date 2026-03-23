@@ -458,6 +458,64 @@ class TestPKCS12Parsing:
         certs = analyzer.parse_pkcs12_certificates(p12_path)
         assert certs == []
 
+    def test_parse_p12_failed_path_cached(self, analyzer, temp_dir, monkeypatch):
+        """A PKCS12 file that fails password attempts is cached and skipped on retry."""
+        cert, key = TestCertificateGeneration.generate_certificate("cached.example.com", 365)
+        p12_data = _make_pkcs12(cert, key, password=b'supersecret')
+
+        p12_path = os.path.join(temp_dir, "cached.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+
+        monkeypatch.delenv('PKCS12_PASSWORD', raising=False)
+
+        # First call — should attempt passwords and fail
+        analyzer.parse_pkcs12_certificates(p12_path)
+        assert p12_path in analyzer.password_failed_paths
+
+        # Second call — should return immediately without attempting passwords
+        # We verify by checking the error counter does not increment again
+        before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='pkcs12_password_failed'
+        )._value.get()
+        analyzer.parse_pkcs12_certificates(p12_path)
+        after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='pkcs12_password_failed'
+        )._value.get()
+        assert after == before  # no additional error increment on second call
+
+    def test_parse_p12_password_list_does_not_include_changeme_or_password(
+        self, analyzer, temp_dir, monkeypatch
+    ):
+        """
+        The PKCS12 password list only tries env var, 'changeit', and empty string.
+        'changeme' and 'password' are not attempted.
+        """
+        tried = []
+        original_load = __import__(
+            'cryptography.hazmat.primitives.serialization.pkcs12',
+            fromlist=['load_pkcs12']
+        ).load_pkcs12
+
+        def _capturing_load(data, password):
+            tried.append(password)
+            raise ValueError("wrong password")
+
+        import cryptography.hazmat.primitives.serialization.pkcs12 as _p12mod
+        monkeypatch.setattr(_p12mod, 'load_pkcs12', _capturing_load)
+        monkeypatch.delenv('PKCS12_PASSWORD', raising=False)
+
+        cert, key = TestCertificateGeneration.generate_certificate("pw-list.example.com", 365)
+        p12_path = os.path.join(temp_dir, "pw-list.p12")
+        # Write any bytes — the mock intercepts before real parsing
+        with open(p12_path, 'wb') as f:
+            f.write(b'dummy')
+
+        analyzer.parse_pkcs12_certificates(p12_path)
+
+        assert b'changeme' not in tried
+        assert b'password' not in tried
+
     def test_parse_p12_custom_password_via_env(self, analyzer, temp_dir, monkeypatch):
         """PKCS12_PASSWORD env var is used before the default password list"""
         cert, key = TestCertificateGeneration.generate_certificate("env-pw.example.com", 365)
@@ -1025,6 +1083,63 @@ class TestJKSParsing:
         assert certs == []
 
     @pytestmark_jks
+    def test_parse_jks_failed_path_cached(self, analyzer, temp_dir, monkeypatch):
+        """A JKS file that fails password attempts is cached and skipped on retry."""
+        cert, _ = TestCertificateGeneration.generate_certificate("cached-jks.example.com", 365)
+        jks_data = _make_jks_truststore(cert, password='supersecret')
+
+        jks_path = os.path.join(temp_dir, "cached.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(jks_data)
+
+        monkeypatch.delenv('JKS_PASSWORD', raising=False)
+
+        # First call — should attempt passwords and fail
+        analyzer.parse_jks_certificates(jks_path)
+        assert jks_path in analyzer.password_failed_paths
+
+        # Second call — error counter must not increment again
+        before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='jks_password_failed'
+        )._value.get()
+        analyzer.parse_jks_certificates(jks_path)
+        after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='jks_password_failed'
+        )._value.get()
+        assert after == before
+
+    def test_parse_jks_password_list_does_not_include_changeme_or_password(
+        self, analyzer, temp_dir, monkeypatch
+    ):
+        """
+        The JKS password list only tries env var, 'changeit', and empty string.
+        'changeme' and 'password' are not attempted.
+        """
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'JKS_AVAILABLE', True)
+        monkeypatch.delenv('JKS_PASSWORD', raising=False)
+
+        tried = []
+
+        class _CapturingKeyStore:
+            @staticmethod
+            def load(path, password):
+                tried.append(password)
+                raise Exception("wrong password")
+
+        import jks as _jks_mod
+        monkeypatch.setattr(_jks_mod, 'KeyStore', _CapturingKeyStore)
+
+        jks_path = os.path.join(temp_dir, "pw-list.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(b'dummy')
+
+        analyzer.parse_jks_certificates(jks_path)
+
+        assert 'changeme' not in tried
+        assert 'password'  not in tried
+
+    @pytestmark_jks
     def test_parse_jks_file_not_found_returns_empty(self, analyzer):
         """parse_jks_certificates returns [] gracefully when the file does not exist."""
         certs = analyzer.parse_jks_certificates("/nonexistent/path/truststore.jks")
@@ -1153,6 +1268,104 @@ class TestJKSParsing:
 
         certs = analyzer.parse_jks_certificates(jks_path)
         assert certs == []
+
+
+class TestProcessEventTimestamp:
+    """
+    Tests that last_event_timestamp is updated correctly in process_event,
+    including when cert files are skipped due to password failure caching.
+    """
+
+    def _make_mock_event(self, cert_path):
+        """Build a minimal mock Tetragon kprobe event for the given path."""
+        class _MockArg:
+            def __init__(self, path):
+                self.string_arg = path
+            def HasField(self, name):
+                return name == 'string_arg'
+
+        class _MockProcess:
+            binary    = '/usr/bin/java'
+            pid       = 1234
+            arguments = ''
+            def HasField(self, name):
+                return False
+
+        class _MockKprobe:
+            def __init__(self, path):
+                self.process = _MockProcess()
+                self.args    = [_MockArg(path)]
+
+        class _MockEvent:
+            def __init__(self_, path):
+                self_._kprobe = _MockKprobe(path)
+            def HasField(self_, name):
+                return name == 'process_kprobe'
+            @property
+            def process_kprobe(self_):
+                return self_._kprobe
+
+        return _MockEvent(cert_path)
+
+    def test_timestamp_updated_when_cert_file_skipped_due_to_password_failure(
+        self, analyzer, temp_dir
+    ):
+        """
+        last_event_timestamp must be updated even when analyze_certificate
+        returns [] because the file is in password_failed_paths.
+
+        The mock event carries the bare path (no /host prefix). The analyzer
+        prepends /host internally, so we register that prefixed path in
+        password_failed_paths. No actual /host directory is needed.
+        """
+        disk_path = os.path.join(temp_dir, "pw-skip.p12")
+        cert, key = TestCertificateGeneration.generate_certificate("pw-skip.example.com", 365)
+        p12_data  = _make_pkcs12(cert, key, password=b'supersecret')
+        with open(disk_path, 'wb') as f:
+            f.write(p12_data)
+
+        # The analyzer prepends /host to paths from events — register that
+        # prefixed path so the file is recognised as previously failed
+        host_path = '/host' + disk_path
+        analyzer.password_failed_paths.add(host_path)
+        analyzer.metrics.last_event_timestamp._value.set(0)
+
+        # Event carries the bare (non-/host) path; analyzer adds /host
+        analyzer.process_event(self._make_mock_event(disk_path))
+
+        assert analyzer.metrics.last_event_timestamp._value.get() > 0, \
+            "last_event_timestamp was not updated for a skipped password-failed file"
+
+    def test_timestamp_updated_when_cert_file_successfully_parsed(
+        self, analyzer, temp_dir
+    ):
+        """
+        last_event_timestamp is updated when a cert is successfully parsed.
+
+        Pre-seeds known_certs so process_event takes the re-detection branch,
+        which avoids needing the /host symlink to exist on the runner.
+        """
+        disk_path = os.path.join(temp_dir, "ts-test.pem")
+        cert, _   = TestCertificateGeneration.generate_certificate("ts-test.example.com", 365)
+        TestCertificateGeneration.save_certificate_pem(cert, disk_path)
+
+        # Pre-seed known_certs with the /host-prefixed path so process_event
+        # hits the re-detection branch and updates the timestamp without
+        # needing to read from /host on the filesystem
+        host_path = '/host' + disk_path
+        dummy = CertificateInfo(
+            path=host_path, subject='CN=ts-test', issuer='CN=ca',
+            serial_number='1',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        analyzer.known_certs[dummy.unique_key] = dummy
+        analyzer.metrics.last_event_timestamp._value.set(0)
+
+        analyzer.process_event(self._make_mock_event(disk_path))
+
+        assert analyzer.metrics.last_event_timestamp._value.get() > 0
 
 
 if __name__ == "__main__":

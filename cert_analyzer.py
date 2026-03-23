@@ -427,6 +427,9 @@ class CertificateAnalyzer:
         self.metrics = PrometheusMetrics()
         self.known_certs: Dict[str, CertificateInfo] = {}
         self.processed_paths: Set[str] = set()
+        # Paths that failed password attempts — cached to avoid repeating expensive
+        # crypto operations on every subsequent Tetragon event for the same file
+        self.password_failed_paths: Set[str] = set()
         self.health_server = health_server
 
         # Kubernetes enricher - enabled when running in-cluster or locally with kubeconfig
@@ -459,6 +462,12 @@ class CertificateAnalyzer:
 
         Requires the 'pyjks' package. Falls back gracefully if not installed.
         Set the JKS_PASSWORD env var if the keystore uses a non-default password.
+
+        Password strategy: tries JKS_PASSWORD env var (if set), then 'changeit'
+        (Java ecosystem default), then empty string (unprotected truststores).
+        Files that fail all attempts are cached in password_failed_paths so
+        subsequent Tetragon events for the same file skip the expensive crypto
+        operations rather than retrying on every access.
         """
         if not JKS_AVAILABLE:
             logger.warning(
@@ -468,11 +477,20 @@ class CertificateAnalyzer:
             self.metrics.cert_analysis_errors.labels(error_type='jks_unavailable').inc()
             return []
 
-        # Try the configured password first, then common defaults
+        # Skip files that have already failed — avoids repeating crypto work on
+        # every subsequent Tetragon event for the same keystore
+        if cert_path in self.password_failed_paths:
+            logger.debug(
+                f"Skipping previously password-failed JKS: {cert_path} "
+                f"(set JKS_PASSWORD env var to enable monitoring of this file)"
+            )
+            return []
+
         configured = os.getenv('JKS_PASSWORD', '')
-        passwords_to_try = list(dict.fromkeys(
-            [configured, 'changeit', 'changeme', 'password', '']
-        ))
+        # Option B: env var → changeit → empty string only
+        # 'changeit' is retained as it is the Java ecosystem default and present
+        # in many managed environments on legacy or CA bundle keystores.
+        passwords_to_try = list(dict.fromkeys([configured, 'changeit', '']))
 
         ks = None
         for password in passwords_to_try:
@@ -495,6 +513,7 @@ class CertificateAnalyzer:
                 "Set JKS_PASSWORD env var if the keystore uses a custom password."
             )
             self.metrics.cert_analysis_errors.labels(error_type='jks_password_failed').inc()
+            self.password_failed_paths.add(cert_path)
             return []
 
         certificates = []
@@ -538,9 +557,16 @@ class CertificateAnalyzer:
         from cryptography.hazmat.primitives.serialization.pkcs12 import load_pkcs12
 
         configured = os.getenv('PKCS12_PASSWORD', '')
-        passwords_to_try = list(dict.fromkeys(
-            [configured, 'changeit', 'changeme', 'password', '']
-        ))
+        # Option B: env var → changeit → empty string only
+        passwords_to_try = list(dict.fromkeys([configured, 'changeit', '']))
+
+        # Skip files that have already failed password attempts
+        if cert_path in self.password_failed_paths:
+            logger.debug(
+                f"Skipping previously password-failed PKCS12: {cert_path} "
+                f"(set PKCS12_PASSWORD env var to enable monitoring of this file)"
+            )
+            return []
 
         try:
             with open(cert_path, 'rb') as f:
@@ -573,6 +599,7 @@ class CertificateAnalyzer:
                 "Set PKCS12_PASSWORD env var if the file uses a custom password."
             )
             self.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed').inc()
+            self.password_failed_paths.add(cert_path)
             return []
 
         certificates = []
@@ -966,6 +993,11 @@ class CertificateAnalyzer:
 
         logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
 
+        # Update the event timestamp now — we have confirmed a cert-file access event
+        # regardless of whether we can parse it. This keeps the readiness probe alive
+        # even when all active keystores are password-protected and being skipped.
+        self.metrics.last_event_timestamp.set(time.time())
+
         # Check if we've already analyzed this file
         if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
             logger.info(f"Re-detected known certificate file: {cert_path}")
@@ -978,7 +1010,6 @@ class CertificateAnalyzer:
                         self._apply_pod_context(cert_info, tetragon_pod)
                     self.log_certificate_status(cert_info)
                     self.metrics.update_certificate_metrics(cert_info)
-            self.metrics.last_event_timestamp.set(time.time())
             return
 
         # Analyze new certificate file (may contain multiple certs)
@@ -995,8 +1026,6 @@ class CertificateAnalyzer:
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)
             self.known_certs[cert_info.unique_key] = cert_info
-
-        self.metrics.last_event_timestamp.set(time.time())
 
     def get_runtime_tetragon_version(self, stub) -> str:
         """

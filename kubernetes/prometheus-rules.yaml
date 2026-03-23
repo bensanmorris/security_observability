@@ -90,3 +90,19 @@ spec:
           either the Tetragon event stream has stalled or no events have been
           seen within the staleness window. Check the pod logs and the
           cert_analyzer_healthy metric.
+
+    - alert: KeystorePasswordFailed
+      expr: increase(tls_certificate_analysis_errors_total{error_type=~"jks_password_failed|pkcs12_password_failed"}[1h]) > 0
+      for: 0m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer cannot open one or more keystores"
+        description: >
+          One or more JKS or PKCS12 keystore files could not be opened because
+          all passwords failed. Affected keystores are being skipped and their
+          certificates are not being monitored. Set the JKS_PASSWORD or
+          PKCS12_PASSWORD environment variable to the correct password, or use
+          a password map file for multiple keystores. Check the analyzer logs
+          for the specific file paths that failed.
