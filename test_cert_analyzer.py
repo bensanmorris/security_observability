@@ -1872,9 +1872,11 @@ def _get(port, path):
     """Make a GET request to the health server, return (status_code, body_dict)."""
     try:
         with urllib.request.urlopen(f'http://localhost:{port}{path}', timeout=2) as r:
-            return r.status, _json.loads(r.read())
+            raw = r.read()
+            return r.status, _json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        return e.code, _json.loads(e.read())
+        raw = e.read()
+        return e.code, _json.loads(raw) if raw else {}
 
 
 class TestHealthServerLiveness:
@@ -1983,7 +1985,7 @@ class TestHealthServerReadiness:
     def test_readiness_returns_200_when_recent_event(self, analyzer):
         """Readiness is 200 when the last event was recent."""
         hs = _make_health_server(analyzer, grace=0, staleness=300)
-        analyzer.metrics.last_event_timestamp._value.set(time.time())
+        analyzer.metrics.last_event_timestamp._value.set(_time.time())
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -1993,7 +1995,7 @@ class TestHealthServerReadiness:
         """Readiness is 503 when the last event is older than the staleness window."""
         hs = _make_health_server(analyzer, grace=0, staleness=10)
         # Set last event to 60 seconds ago — well past the 10s staleness window
-        analyzer.metrics.last_event_timestamp._value.set(time.time() - 60)
+        analyzer.metrics.last_event_timestamp._value.set(_time.time() - 60)
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -2019,7 +2021,7 @@ class TestHealthServerReadiness:
     def test_is_ready_false_when_stale(self, analyzer):
         """is_ready() returns False when last_event_timestamp is too old."""
         hs = _make_health_server(analyzer, grace=0, staleness=10)
-        analyzer.metrics.last_event_timestamp._value.set(time.time() - 60)
+        analyzer.metrics.last_event_timestamp._value.set(_time.time() - 60)
         ok, reason = hs.is_ready()
         assert ok is False
         assert 'stale' in reason
