@@ -1276,31 +1276,8 @@ class TestProcessEventTimestamp:
     including when cert files are skipped due to password failure caching.
     """
 
-    def test_timestamp_updated_when_cert_file_skipped_due_to_password_failure(
-        self, analyzer, temp_dir, monkeypatch
-    ):
-        """
-        last_event_timestamp must be updated even when analyze_certificate
-        returns [] because the file is in password_failed_paths.
-
-        This prevents the readiness probe from going stale on a node where
-        all active keystores are password-protected and being skipped.
-        """
-        cert, key = TestCertificateGeneration.generate_certificate("pw-skip.example.com", 365)
-        p12_data = _make_pkcs12(cert, key, password=b'supersecret')
-
-        p12_path = '/host' + os.path.join(temp_dir, "pw-skip.p12")
-        os.makedirs(os.path.dirname(p12_path), exist_ok=True)
-        with open(p12_path, 'wb') as f:
-            f.write(p12_data)
-
-        # Pre-populate password_failed_paths so the file is skipped immediately
-        analyzer.password_failed_paths.add(p12_path)
-
-        # Set timestamp to 0 so we can verify it changes
-        analyzer.metrics.last_event_timestamp._value.set(0)
-
-        # Build a mock event pointing at the password-failed file
+    def _make_mock_event(self, cert_path):
+        """Build a minimal mock Tetragon kprobe event for the given path."""
         class _MockArg:
             def __init__(self, path):
                 self.string_arg = path
@@ -1315,18 +1292,46 @@ class TestProcessEventTimestamp:
                 return False
 
         class _MockKprobe:
-            def __init__(self):
+            def __init__(self, path):
                 self.process = _MockProcess()
-                self.args    = [_MockArg(p12_path)]
+                self.args    = [_MockArg(path)]
 
         class _MockEvent:
-            def HasField(self, name):
+            def __init__(self_, path):
+                self_._kprobe = _MockKprobe(path)
+            def HasField(self_, name):
                 return name == 'process_kprobe'
             @property
-            def process_kprobe(self):
-                return _MockKprobe()
+            def process_kprobe(self_):
+                return self_._kprobe
 
-        analyzer.process_event(_MockEvent())
+        return _MockEvent(cert_path)
+
+    def test_timestamp_updated_when_cert_file_skipped_due_to_password_failure(
+        self, analyzer, temp_dir
+    ):
+        """
+        last_event_timestamp must be updated even when analyze_certificate
+        returns [] because the file is in password_failed_paths.
+
+        The mock event carries the bare path (no /host prefix). The analyzer
+        prepends /host internally, so we register that prefixed path in
+        password_failed_paths. No actual /host directory is needed.
+        """
+        disk_path = os.path.join(temp_dir, "pw-skip.p12")
+        cert, key = TestCertificateGeneration.generate_certificate("pw-skip.example.com", 365)
+        p12_data  = _make_pkcs12(cert, key, password=b'supersecret')
+        with open(disk_path, 'wb') as f:
+            f.write(p12_data)
+
+        # The analyzer prepends /host to paths from events — register that
+        # prefixed path so the file is recognised as previously failed
+        host_path = '/host' + disk_path
+        analyzer.password_failed_paths.add(host_path)
+        analyzer.metrics.last_event_timestamp._value.set(0)
+
+        # Event carries the bare (non-/host) path; analyzer adds /host
+        analyzer.process_event(self._make_mock_event(disk_path))
 
         assert analyzer.metrics.last_event_timestamp._value.get() > 0, \
             "last_event_timestamp was not updated for a skipped password-failed file"
@@ -1334,40 +1339,31 @@ class TestProcessEventTimestamp:
     def test_timestamp_updated_when_cert_file_successfully_parsed(
         self, analyzer, temp_dir
     ):
-        """last_event_timestamp is updated when a cert is successfully parsed."""
-        cert, _ = TestCertificateGeneration.generate_certificate("ts-test.example.com", 365)
-        cert_path = '/host' + os.path.join(temp_dir, "ts-test.pem")
-        os.makedirs(os.path.dirname(cert_path), exist_ok=True)
-        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+        """
+        last_event_timestamp is updated when a cert is successfully parsed.
 
+        Pre-seeds known_certs so process_event takes the re-detection branch,
+        which avoids needing the /host symlink to exist on the runner.
+        """
+        disk_path = os.path.join(temp_dir, "ts-test.pem")
+        cert, _   = TestCertificateGeneration.generate_certificate("ts-test.example.com", 365)
+        TestCertificateGeneration.save_certificate_pem(cert, disk_path)
+
+        # Pre-seed known_certs with the /host-prefixed path so process_event
+        # hits the re-detection branch and updates the timestamp without
+        # needing to read from /host on the filesystem
+        host_path = '/host' + disk_path
+        dummy = CertificateInfo(
+            path=host_path, subject='CN=ts-test', issuer='CN=ca',
+            serial_number='1',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        analyzer.known_certs[dummy.unique_key] = dummy
         analyzer.metrics.last_event_timestamp._value.set(0)
 
-        class _MockArg:
-            def __init__(self, path):
-                self.string_arg = path
-            def HasField(self, name):
-                return name == 'string_arg'
-
-        class _MockProcess:
-            binary    = '/usr/bin/openssl'
-            pid       = 5678
-            arguments = ''
-            def HasField(self, name):
-                return False
-
-        class _MockKprobe:
-            def __init__(self):
-                self.process = _MockProcess()
-                self.args    = [_MockArg(cert_path)]
-
-        class _MockEvent:
-            def HasField(self, name):
-                return name == 'process_kprobe'
-            @property
-            def process_kprobe(self):
-                return _MockKprobe()
-
-        analyzer.process_event(_MockEvent())
+        analyzer.process_event(self._make_mock_event(disk_path))
 
         assert analyzer.metrics.last_event_timestamp._value.get() > 0
 
