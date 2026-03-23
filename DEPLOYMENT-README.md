@@ -210,6 +210,13 @@ The following env vars control probe behaviour and can be overridden in `deploym
 | `READINESS_GRACE_PERIOD_SECONDS` | `60` | Seconds after startup before readiness checking begins |
 | `READINESS_STALENESS_SECONDS` | `300` | Max age of last event before pod is marked not-ready |
 
+The following env vars control keystore password handling and should be set via Kubernetes Secrets (see Production Considerations):
+
+| Env var | Default | Description |
+|---|---|---|
+| `JKS_PASSWORD` | _(none)_ | Password for JKS keystores. Tried first, before `changeit` and empty string |
+| `PKCS12_PASSWORD` | _(none)_ | Password for PKCS12 keystores. Tried first, before `changeit` and empty string |
+
 ### 8. Deploy Prometheus and Alertmanager
 
 The repository does not provision Prometheus or Alertmanager. The recommended approach for Kubernetes is the kube-prometheus-stack Helm chart, which bundles Prometheus, Alertmanager, and Grafana together:
@@ -309,6 +316,41 @@ curl -s http://localhost:9090/metrics | grep tetragon_version
 **Scan interval** — the default `SCAN_INTERVAL_SECONDS` is 3600 (1 hour). After a process restart there will be a gap before metrics are repopulated. Lower this value if a faster recovery time is required.
 
 **Log aggregation** — the analyzer logs to stdout. Ensure your existing log shipping setup (Fluentd, Filebeat, etc.) is configured to collect from the cert-analyzer pods.
+
+**Keystore password management** — the cert-analyzer attempts to open JKS and PKCS12 keystores using `JKS_PASSWORD`/`PKCS12_PASSWORD` env vars first, then falls back to `changeit` (the Java ecosystem default), then empty string. If all attempts fail, the file is skipped, a `KeystorePasswordFailed` alert fires, and the path is cached so subsequent Tetragon events for the same file do not repeat the expensive crypto operations.
+
+Passwords must be provided via Kubernetes Secrets — never hardcoded in `deployment.yaml`. Create the Secret and reference it in the DaemonSet:
+
+```bash
+kubectl create secret generic cert-analyzer-keystore-passwords \
+  --from-literal=jks-password=your-jks-password \
+  --from-literal=pkcs12-password=your-pkcs12-password \
+  -n kube-system
+```
+
+Then reference in `deployment.yaml`:
+
+```yaml
+env:
+  - name: JKS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: cert-analyzer-keystore-passwords
+        key: jks-password
+  - name: PKCS12_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: cert-analyzer-keystore-passwords
+        key: pkcs12-password
+```
+
+If the `KeystorePasswordFailed` alert fires after deployment, check the pod logs at `DEBUG` level to identify the specific file paths that could not be opened:
+
+```bash
+kubectl logs -n kube-system -l app=cert-expiry-monitor | grep "password-failed"
+```
+
+Note that a single password env var applies to all keystores of that format. If your environment has multiple keystores with different passwords, contact the security team to discuss a password map file approach backed by a mounted Secret.
 
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
