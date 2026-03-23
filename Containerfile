@@ -64,10 +64,13 @@ ARG PIP_INDEX_URL=https://pypi.org/simple/
 ARG PIP_TRUSTED_HOST=pypi.org
 # Re-declare so it's available in this stage (top-level ARGs don't cross stages)
 ARG TETRAGON_VERSION=v1.1.0
+# Version of the cert-analyzer itself — set from git tag or commit SHA by CI
+ARG VERSION=dev
 
-# Stamp the Tetragon version into the image as an environment variable so
-# cert_analyzer.py can read it at runtime via os.getenv('TETRAGON_BUILD_VERSION')
+# Stamp both versions into the image as environment variables so cert_analyzer.py
+# can read them at runtime via os.getenv()
 ENV TETRAGON_BUILD_VERSION=${TETRAGON_VERSION}
+ENV CERT_ANALYZER_VERSION=${VERSION}
 
 USER 0
 
