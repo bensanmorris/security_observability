@@ -78,6 +78,23 @@ podman tag cert-analyzer:latest your-registry.internal/security/cert-analyzer:1.
 podman push your-registry.internal/security/cert-analyzer:1.0.0
 ```
 
+> **cert-analyzer version** — the image is stamped at build time with a version
+> string derived from the git tag (for releases) or the full commit SHA (for
+> branch builds). This is stored as the `CERT_ANALYZER_VERSION` environment
+> variable inside the container and exposed via the `cert_analyzer_build` Info
+> metric alongside the Tetragon build version. To inspect the version of a
+> running container:
+> ```bash
+> # From the Prometheus metrics endpoint
+> curl -s http://localhost:9090/metrics | grep cert_analyzer_build
+>
+> # From the container environment directly
+> podman exec cert-analyzer env | grep CERT_ANALYZER_VERSION
+>
+> # From the image labels
+> podman inspect cert-analyzer | grep -i version
+> ```
+
 > **Tetragon version lockstep** — the cert-analyzer image is built against a
 > specific Tetragon version (set via the `TETRAGON_VERSION` build arg in the
 > Containerfile). The build version is stamped into the image as the
@@ -225,6 +242,18 @@ Configure `alertmanager.yml` to route notifications to your chosen channel (Slac
 ## Production Considerations
 
 **Metrics endpoint security** — the cert-analyzer metrics endpoint is plain HTTP on port 9090 and unauthenticated. Place a reverse proxy in front of it if the endpoint is exposed on a shared network.
+
+**Version diagnostics** — the `cert_analyzer_build` Info metric is the primary tool for diagnosing version-related issues in production. It carries both the cert-analyzer version and the Tetragon build version as labels, so a single query tells you exactly what is running and what it was built against:
+
+```promql
+cert_analyzer_build_info
+```
+
+The cert-analyzer version also appears on the first line of the startup log. When raising a support issue or bug report, always include the output of:
+
+```bash
+curl -s http://localhost:9090/metrics | grep cert_analyzer_build
+```
 
 **Tetragon version monitoring** — the analyzer checks its build version against the running Tetragon daemon at startup and every 5 minutes thereafter (configurable via `TETRAGON_VERSION_CHECK_INTERVAL`). If Tetragon is upgraded without a corresponding cert-analyzer rebuild, proto incompatibilities may cause silent event processing failures. Add the following alert rule to catch this:
 

@@ -48,6 +48,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          # Tagged release — use the tag name (e.g. v1.2.3)
+          echo "value=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        else
+          # Branch build — use the full commit SHA for precise traceability
+          echo "value=${{ github.sha }}" >> $GITHUB_OUTPUT
+        fi
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -75,6 +86,7 @@ jobs:
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
         labels: |
           org.opencontainers.image.tetragon-version=${{ env.TETRAGON_VERSION }}
+          org.opencontainers.image.version=${{ steps.version.outputs.value }}
 
     - name: Build (and push on merge)
       uses: docker/build-push-action@v5
@@ -88,6 +100,7 @@ jobs:
           UBI_VERSION=${{ matrix.ubi-version }}
           PYTHON_VERSION=${{ matrix.python-version }}
           TETRAGON_VERSION=${{ env.TETRAGON_VERSION }}
+          VERSION=${{ steps.version.outputs.value }}
         cache-from: type=gha,scope=ubi${{ matrix.ubi-version }}
         cache-to: type=gha,scope=ubi${{ matrix.ubi-version }},mode=max
         platforms: linux/amd64
@@ -98,6 +111,7 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Event:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Pushed:** \`${{ github.event_name != 'pull_request' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Tags:**" >> $GITHUB_STEP_SUMMARY

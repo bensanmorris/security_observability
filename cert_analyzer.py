@@ -52,6 +52,11 @@ except ImportError:
 # which is injected at image build time; falls back to 'unknown' if not set.
 TETRAGON_BUILD_VERSION: str = os.getenv('TETRAGON_BUILD_VERSION', 'unknown')
 
+# The cert-analyzer version — set at image build time from the git tag or
+# commit SHA via the VERSION build arg in the Containerfile.
+# Falls back to 'dev' when running outside of a built container.
+CERT_ANALYZER_VERSION: str = os.getenv('CERT_ANALYZER_VERSION', 'dev')
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -195,6 +200,18 @@ class PrometheusMetrics:
             'cert_analyzer_tetragon_version_match',
             'Whether the build and runtime Tetragon versions match (1=match, 0=mismatch)',
         )
+
+        # Build info — single source of truth for version diagnostics.
+        # Combines cert-analyzer version and Tetragon build version so a single
+        # Prometheus query shows exactly what was built together.
+        self.build_info = Info(
+            'cert_analyzer_build',
+            'Build information for the cert-analyzer',
+        )
+        self.build_info.info({
+            'version':                 CERT_ANALYZER_VERSION,
+            'tetragon_build_version':  TETRAGON_BUILD_VERSION,
+        })
 
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
@@ -1044,6 +1061,7 @@ def main():
     logger.info("="*60)
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
     logger.info("="*60)
+    logger.info(f"Version:           {CERT_ANALYZER_VERSION}")
     logger.info(f"Tetragon address:  {tetragon_addr}")
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Metrics port:      {metrics_port}")
