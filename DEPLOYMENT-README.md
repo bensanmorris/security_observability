@@ -186,6 +186,30 @@ kubectl get pods -n kube-system -l app=cert-expiry-monitor -o wide
 kubectl logs -n kube-system -l app=cert-expiry-monitor -f
 ```
 
+Once pods are running, verify the health endpoints are responding correctly on each node:
+
+```bash
+# Liveness probe — should return 200 with {"status": "ok"}
+curl -s http://<node-ip>:8086/healthz
+
+# Readiness probe — should return 200 with {"status": "ok"}
+# Note: during the 60s grace period this will always return ready
+curl -s http://<node-ip>:8086/readyz
+```
+
+The probes are configured in `deployment.yaml` with the following behaviour:
+
+- **Liveness** (`/healthz`) — checks the gRPC channel is not in a terminal shutdown state. Temporary Tetragon unavailability (e.g. during an upgrade) does not fail liveness — the reconnection loop handles that transparently. Only an explicit channel shutdown triggers a pod restart.
+- **Readiness** (`/readyz`) — returns ready during the startup grace period (default 60s). After the grace period, returns ready if no events have ever been seen (silence is valid) or if at least one event has been processed within the staleness window (default 300s). Returns not-ready only if events were seen previously but the stream has since gone stale.
+
+The following env vars control probe behaviour and can be overridden in `deployment.yaml`:
+
+| Env var | Default | Description |
+|---|---|---|
+| `HEALTH_PORT` | `8086` | Port for `/healthz` and `/readyz` |
+| `READINESS_GRACE_PERIOD_SECONDS` | `60` | Seconds after startup before readiness checking begins |
+| `READINESS_STALENESS_SECONDS` | `300` | Max age of last event before pod is marked not-ready |
+
 ### 8. Deploy Prometheus and Alertmanager
 
 The repository does not provision Prometheus or Alertmanager. The recommended approach for Kubernetes is the kube-prometheus-stack Helm chart, which bundles Prometheus, Alertmanager, and Grafana together:
@@ -242,6 +266,8 @@ Configure `alertmanager.yml` to route notifications to your chosen channel (Slac
 ## Production Considerations
 
 **Metrics endpoint security** — the cert-analyzer metrics endpoint is plain HTTP on port 9090 and unauthenticated. Place a reverse proxy in front of it if the endpoint is exposed on a shared network.
+
+**Liveness and readiness probes** — the health server runs on port 8086 (configurable via `HEALTH_PORT`) and serves two endpoints. `/healthz` is the liveness probe — it only fails if the gRPC channel has been explicitly shut down, meaning OpenShift will not restart the pod during normal Tetragon maintenance windows. `/readyz` is the readiness probe — it uses a startup grace period to avoid false failures on initial deployment, then monitors event stream freshness. If the readiness probe fires the `CertAnalyzerNotReady` alert in Prometheus, check the pod logs for gRPC errors and verify the Tetragon socket is accessible. Tune `READINESS_STALENESS_SECONDS` to match your environment's expected event frequency — on a quiet node with infrequent cert access, increase this value to avoid spurious not-ready states.
 
 **Version diagnostics** — the `cert_analyzer_build` Info metric is the primary tool for diagnosing version-related issues in production. It carries both the cert-analyzer version and the Tetragon build version as labels, so a single query tells you exactly what is running and what it was built against:
 

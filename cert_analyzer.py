@@ -18,6 +18,7 @@ from concurrent import futures
 import time
 import re
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -209,8 +210,8 @@ class PrometheusMetrics:
             'Build information for the cert-analyzer',
         )
         self.build_info.info({
-            'version':                 CERT_ANALYZER_VERSION,
-            'tetragon_build_version':  TETRAGON_BUILD_VERSION,
+            'version':                CERT_ANALYZER_VERSION,
+            'tetragon_build_version': TETRAGON_BUILD_VERSION,
         })
 
     def update_certificate_metrics(self, info: CertificateInfo):
@@ -258,6 +259,158 @@ class PrometheusMetrics:
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
 
 
+class HealthServer:
+    """
+    Lightweight HTTP server exposing liveness and readiness probes for
+    OpenShift / Kubernetes.
+
+    Endpoints
+    ---------
+    GET /healthz  — liveness probe.
+        Returns 200 if the analyzer process is alive and the gRPC channel
+        is not in a terminal failure state.  Returns 503 only if the channel
+        has been explicitly shut down.  Temporary Tetragon unavailability
+        (e.g. during an upgrade) never causes a liveness failure — the
+        reconnection loop handles that transparently.
+
+    GET /readyz   — readiness probe.
+        Returns 200 while the startup grace period has not expired.  After
+        the grace period, returns 200 only if at least one event has been
+        processed within the staleness window.  Returns 503 if events were
+        expected but the last event timestamp is too old, indicating the
+        analyzer has fallen behind or lost its event stream without recovery.
+
+    Configuration (env vars)
+    ------------------------
+    HEALTH_PORT                    — port for this server (default: 8086)
+    READINESS_GRACE_PERIOD_SECONDS — seconds after startup before readiness
+                                     checking begins (default: 60)
+    READINESS_STALENESS_SECONDS    — max age of last event before unready
+                                     (default: 300 — 5 minutes)
+    """
+
+    def __init__(
+        self,
+        analyzer: 'CertificateAnalyzer',
+        port: int = 8086,
+        grace_period_seconds: int = 60,
+        staleness_seconds: int = 300,
+    ):
+        self.analyzer            = analyzer
+        self.port                = port
+        self.grace_period        = grace_period_seconds
+        self.staleness_seconds   = staleness_seconds
+        self._start_time         = time.time()
+        self._channel            = None   # set by CertificateAnalyzer.start()
+        self._server: Optional[HTTPServer] = None
+
+    def set_channel(self, channel) -> None:
+        """Called by CertificateAnalyzer.start() once the gRPC channel exists."""
+        self._channel = channel
+
+    # ── Probe logic ───────────────────────────────────────────────────────────
+
+    def is_live(self) -> tuple:
+        """
+        Returns (True, reason) if alive, (False, reason) if not.
+
+        Liveness fails only if the gRPC channel has been explicitly shut down
+        (SHUTDOWN state).  All other states — including IDLE and TRANSIENT_FAILURE
+        — are treated as live because the reconnection loop is handling them.
+        """
+        if self._channel is None:
+            # Channel not yet created — process is still starting up, consider live
+            return True, "starting"
+
+        try:
+            state = self._channel._channel.check_connectivity_state(False)
+            # grpc.ChannelConnectivity values: IDLE=0, CONNECTING=1,
+            # READY=2, TRANSIENT_FAILURE=3, SHUTDOWN=4
+            if state == grpc.ChannelConnectivity.SHUTDOWN:
+                return False, "channel_shutdown"
+            return True, grpc.ChannelConnectivity(state).name.lower()
+        except Exception as e:
+            # If we can't check the state at all the process is still running
+            logger.debug(f"Health check channel state error: {e}")
+            return True, "unknown"
+
+    def is_ready(self) -> tuple:
+        """
+        Returns (True, reason) if ready, (False, reason) if not.
+
+        During the grace period always returns ready.  After the grace period,
+        checks that last_event_timestamp is within the staleness window.
+        """
+        uptime = time.time() - self._start_time
+
+        if uptime < self.grace_period:
+            return True, f"grace_period ({int(self.grace_period - uptime)}s remaining)"
+
+        last_event = self.analyzer.metrics.last_event_timestamp._value.get()
+
+        if last_event == 0:
+            # No events ever seen — if we're past the grace period but the node
+            # has had no cert activity, that is a valid state, not a failure
+            return True, "no_events_seen"
+
+        age = time.time() - last_event
+        if age > self.staleness_seconds:
+            return False, f"last_event_stale ({int(age)}s ago, limit {self.staleness_seconds}s)"
+
+        return True, f"last_event {int(age)}s ago"
+
+    # ── HTTP server ───────────────────────────────────────────────────────────
+
+    def _make_handler(self):
+        """Return a request handler class closed over this HealthServer instance."""
+        health_server = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/healthz':
+                    ok, reason = health_server.is_live()
+                elif self.path == '/readyz':
+                    ok, reason = health_server.is_ready()
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+
+                status = 200 if ok else 503
+                body   = f'{{"status": "{"ok" if ok else "fail"}", "reason": "{reason}"}}\n'
+                body_bytes = body.encode()
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+
+            def log_message(self, fmt, *args):
+                # Suppress per-request access logs to avoid filling stdout
+                # with probe traffic — errors are still logged
+                if args and str(args[1]) not in ('200', '503'):
+                    logger.debug(f"Health probe: {fmt % args}")
+
+        return _Handler
+
+    def start(self) -> None:
+        """Start the health server in a background daemon thread."""
+        self._server = HTTPServer(('', self.port), self._make_handler())
+
+        thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        thread.name = 'health-server'
+        thread.start()
+        logger.info(
+            f"Health server started on port {self.port} "
+            f"(grace={self.grace_period}s, staleness={self.staleness_seconds}s)"
+        )
+
+    def stop(self) -> None:
+        """Shut down the health server cleanly."""
+        if self._server:
+            self._server.shutdown()
+
+
 class CertificateAnalyzer:
     """Main analyzer that processes Tetragon events and extracts certificate info"""
 
@@ -266,13 +419,15 @@ class CertificateAnalyzer:
     PKCS12_EXTENSIONS = {'.p12', '.pfx'}
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
-                 filter_self_events: bool = True):
+                 filter_self_events: bool = True,
+                 health_server: Optional['HealthServer'] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
         self.metrics = PrometheusMetrics()
         self.known_certs: Dict[str, CertificateInfo] = {}
         self.processed_paths: Set[str] = set()
+        self.health_server = health_server
 
         # Kubernetes enricher - enabled when running in-cluster or locally with kubeconfig
         if K8S_ENRICHER_AVAILABLE:
@@ -950,6 +1105,11 @@ class CertificateAnalyzer:
 
         stub = sensors_pb2_grpc.FineGuidanceSensorsStub(channel)
 
+        # Give the health server a reference to the channel so liveness
+        # checks can inspect its connectivity state
+        if self.health_server:
+            self.health_server.set_channel(channel)
+
         # Version check on startup, then periodically in background
         self.check_tetragon_version(stub)
         self._start_version_monitor(stub)
@@ -1047,11 +1207,14 @@ def main():
     """Main entry point"""
     tetragon_addr    = os.getenv('TETRAGON_ADDR', 'localhost:54321')
     metrics_port     = int(os.getenv('METRICS_PORT', '9090'))
+    health_port      = int(os.getenv('HEALTH_PORT', '8086'))
     alert_threshold  = int(os.getenv('ALERT_THRESHOLD_DAYS', '30'))
     log_level        = os.getenv('LOG_LEVEL', 'INFO')
     scan_paths_str   = os.getenv('CERT_SCAN_PATHS', '/etc/ssl,/etc/pki')
     scan_paths       = [p.strip() for p in scan_paths_str.split(',') if p.strip()]
     scan_interval    = int(os.getenv('SCAN_INTERVAL_SECONDS', '3600'))
+    grace_period     = int(os.getenv('READINESS_GRACE_PERIOD_SECONDS', '60'))
+    staleness        = int(os.getenv('READINESS_STALENESS_SECONDS', '300'))
     # Set to 'false' to allow the cert-analyzer to observe its own certificate
     # accesses - useful for demos showing self-pod enrichment
     filter_self      = os.getenv('FILTER_SELF_EVENTS', 'true').lower() != 'false'
@@ -1065,6 +1228,7 @@ def main():
     logger.info(f"Tetragon address:  {tetragon_addr}")
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Metrics port:      {metrics_port}")
+    logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
     logger.info(f"Scan paths:        {scan_paths}")
     logger.info(f"Scan interval:     {scan_interval} seconds")
@@ -1076,6 +1240,18 @@ def main():
 
     analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
                                    filter_self_events=filter_self)
+
+    health = HealthServer(
+        analyzer=analyzer,
+        port=health_port,
+        grace_period_seconds=grace_period,
+        staleness_seconds=staleness,
+    )
+    health.start()
+
+    analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
+                                   filter_self_events=filter_self,
+                                   health_server=health)
 
     if scan_paths and scan_paths[0]:
         def periodic_scanner():
@@ -1094,9 +1270,11 @@ def main():
         analyzer.start()
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
+        health.stop()
         sys.exit(0)
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
+        health.stop()
         sys.exit(1)
 
 
