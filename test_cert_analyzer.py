@@ -1293,46 +1293,48 @@ class TestBuildInfo:
     """
     Tests for the cert_analyzer_build Info metric which exposes the
     cert-analyzer version and Tetragon build version as Prometheus labels.
+
+    The build_info metric is populated at PrometheusMetrics.__init__ time
+    from the module-level constants, so we read labels from the already-
+    initialised metric on the analyzer fixture rather than creating a new
+    PrometheusMetrics instance (which would clash with the registry).
     """
 
-    def test_build_info_metric_contains_version(self, analyzer, monkeypatch):
-        """cert_analyzer_build metric carries the cert-analyzer version label."""
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'CERT_ANALYZER_VERSION', 'abc1234')
-        # Re-create metrics so the monkeypatched value is picked up
-        from cert_analyzer import PrometheusMetrics
-        metrics = PrometheusMetrics()
-        samples = list(metrics.build_info.collect()[0].samples)
+    def test_build_info_metric_exposes_version_label(self, analyzer):
+        """cert_analyzer_build metric exposes a 'version' label."""
+        samples = list(analyzer.metrics.build_info.collect()[0].samples)
         assert len(samples) > 0
-        assert samples[0].labels.get('version') == 'abc1234'
+        assert 'version' in samples[0].labels
 
-    def test_build_info_metric_contains_tetragon_version(self, analyzer, monkeypatch):
-        """cert_analyzer_build metric carries the Tetragon build version label."""
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
-        from cert_analyzer import PrometheusMetrics
-        metrics = PrometheusMetrics()
-        samples = list(metrics.build_info.collect()[0].samples)
+    def test_build_info_metric_exposes_tetragon_build_version_label(self, analyzer):
+        """cert_analyzer_build metric exposes a 'tetragon_build_version' label."""
+        samples = list(analyzer.metrics.build_info.collect()[0].samples)
         assert len(samples) > 0
-        assert samples[0].labels.get('tetragon_build_version') == 'v1.1.0'
+        assert 'tetragon_build_version' in samples[0].labels
 
-    def test_build_info_defaults_when_env_not_set(self, analyzer, monkeypatch):
-        """cert_analyzer_build metric uses 'dev' when VERSION env var is absent."""
+    def test_build_info_version_matches_module_constant(self, analyzer):
+        """The 'version' label value matches CERT_ANALYZER_VERSION at init time."""
         import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'CERT_ANALYZER_VERSION', 'dev')
-        from cert_analyzer import PrometheusMetrics
-        metrics = PrometheusMetrics()
-        samples = list(metrics.build_info.collect()[0].samples)
-        assert samples[0].labels.get('version') == 'dev'
+        samples = list(analyzer.metrics.build_info.collect()[0].samples)
+        assert samples[0].labels['version'] == _ca.CERT_ANALYZER_VERSION
+
+    def test_build_info_tetragon_version_matches_module_constant(self, analyzer):
+        """The 'tetragon_build_version' label matches TETRAGON_BUILD_VERSION at init time."""
+        import cert_analyzer as _ca
+        samples = list(analyzer.metrics.build_info.collect()[0].samples)
+        assert samples[0].labels['tetragon_build_version'] == _ca.TETRAGON_BUILD_VERSION
 
     def test_cert_analyzer_version_constant_reads_env(self, monkeypatch):
-        """CERT_ANALYZER_VERSION reads from CERT_ANALYZER_VERSION env var."""
-        import importlib
-        import cert_analyzer as _ca
+        """CERT_ANALYZER_VERSION env var is read correctly by os.getenv."""
         monkeypatch.setenv('CERT_ANALYZER_VERSION', 'v2.0.0-test')
-        # Re-read the env var as the module would on import
         value = os.getenv('CERT_ANALYZER_VERSION', 'dev')
         assert value == 'v2.0.0-test'
+
+    def test_cert_analyzer_version_defaults_to_dev(self, monkeypatch):
+        """CERT_ANALYZER_VERSION defaults to 'dev' when env var is absent."""
+        monkeypatch.delenv('CERT_ANALYZER_VERSION', raising=False)
+        value = os.getenv('CERT_ANALYZER_VERSION', 'dev')
+        assert value == 'dev'
 
 
 # ── Reconnection and version monitor tests ────────────────────────────────────
