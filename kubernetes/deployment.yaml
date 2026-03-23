@@ -35,6 +35,8 @@ spec:
           value: "unix:///var/run/cilium/tetragon/tetragon.sock"
         - name: METRICS_PORT
           value: "9090"
+        - name: HEALTH_PORT
+          value: "8086"
         - name: ALERT_THRESHOLD_DAYS
           value: "30"
         - name: LOG_LEVEL
@@ -43,6 +45,10 @@ spec:
           value: "/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki"
         - name: SCAN_INTERVAL_SECONDS
           value: "3600"
+        - name: READINESS_GRACE_PERIOD_SECONDS
+          value: "60"
+        - name: READINESS_STALENESS_SECONDS
+          value: "300"
         volumeMounts:
         - name: tetragon-sock
           mountPath: /var/run/cilium/tetragon
@@ -60,18 +66,25 @@ spec:
         - containerPort: 9090
           name: metrics
           protocol: TCP
+        - containerPort: 8086
+          name: health
+          protocol: TCP
         livenessProbe:
           httpGet:
-            path: /
-            port: 9090
-          initialDelaySeconds: 30
-          periodSeconds: 10
+            path: /healthz
+            port: 8086
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
-            path: /
-            port: 9090
+            path: /readyz
+            port: 8086
           initialDelaySeconds: 5
-          periodSeconds: 5
+          periodSeconds: 15
+          failureThreshold: 2
+          timeoutSeconds: 5
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -110,6 +123,10 @@ spec:
   - name: metrics
     port: 9090
     targetPort: 9090
+    protocol: TCP
+  - name: health
+    port: 8086
+    targetPort: 8086
     protocol: TCP
   type: ClusterIP
 ---

@@ -1827,3 +1827,220 @@ class TestCertificateParsingExceptions:
         assert info.not_before.tzinfo is None, "not_before should be naive datetime"
         assert info.not_after.tzinfo  is None, "not_after should be naive datetime"
         assert info.common_name == "utc.example.com"
+
+
+# ── Health server tests ───────────────────────────────────────────────────────
+
+import urllib.request
+import urllib.error
+import json as _json
+
+from cert_analyzer import HealthServer
+
+
+class _MockChannel:
+    """Mock gRPC channel with controllable connectivity state."""
+    def __init__(self, state=grpc.ChannelConnectivity.READY):
+        self._state = state
+        self._channel = self
+
+    def check_connectivity_state(self, try_to_connect):
+        return self._state
+
+
+def _make_health_server(analyzer, grace=0, staleness=300, port=None):
+    """
+    Create a HealthServer for testing.
+    Uses grace=0 so readiness checks are immediate unless overridden.
+    Port is auto-assigned if not specified.
+    """
+    import socket
+    if port is None:
+        # Find a free port
+        with socket.socket() as s:
+            s.bind(('', 0))
+            port = s.getsockname()[1]
+    return HealthServer(
+        analyzer=analyzer,
+        port=port,
+        grace_period_seconds=grace,
+        staleness_seconds=staleness,
+    )
+
+
+def _get(port, path):
+    """Make a GET request to the health server, return (status_code, body_dict)."""
+    try:
+        with urllib.request.urlopen(f'http://localhost:{port}{path}', timeout=2) as r:
+            raw = r.read()
+            return r.status, _json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        return e.code, _json.loads(raw) if raw else {}
+
+
+class TestHealthServerLiveness:
+    """Tests for GET /healthz (liveness probe)."""
+
+    def test_liveness_returns_200_when_no_channel_yet(self, analyzer):
+        """Liveness is 200 before the gRPC channel is created (starting up)."""
+        hs = _make_health_server(analyzer)
+        hs.start()
+        status, body = _get(hs.port, '/healthz')
+        hs.stop()
+        assert status == 200
+        assert body['status'] == 'ok'
+
+    def test_liveness_returns_200_when_channel_ready(self, analyzer):
+        """Liveness is 200 when the gRPC channel is in READY state."""
+        hs = _make_health_server(analyzer)
+        hs.set_channel(_MockChannel(grpc.ChannelConnectivity.READY))
+        hs.start()
+        status, body = _get(hs.port, '/healthz')
+        hs.stop()
+        assert status == 200
+
+    def test_liveness_returns_200_when_channel_transient_failure(self, analyzer):
+        """
+        Liveness is 200 when Tetragon is temporarily unavailable
+        (TRANSIENT_FAILURE) — the reconnect loop handles this, not the probe.
+        """
+        hs = _make_health_server(analyzer)
+        hs.set_channel(_MockChannel(grpc.ChannelConnectivity.TRANSIENT_FAILURE))
+        hs.start()
+        status, body = _get(hs.port, '/healthz')
+        hs.stop()
+        assert status == 200
+
+    def test_liveness_returns_200_when_channel_idle(self, analyzer):
+        """Liveness is 200 when channel is IDLE (not yet connected)."""
+        hs = _make_health_server(analyzer)
+        hs.set_channel(_MockChannel(grpc.ChannelConnectivity.IDLE))
+        hs.start()
+        status, body = _get(hs.port, '/healthz')
+        hs.stop()
+        assert status == 200
+
+    def test_liveness_returns_503_when_channel_shutdown(self, analyzer):
+        """Liveness is 503 only when the channel has been explicitly shut down."""
+        hs = _make_health_server(analyzer)
+        hs.set_channel(_MockChannel(grpc.ChannelConnectivity.SHUTDOWN))
+        hs.start()
+        status, body = _get(hs.port, '/healthz')
+        hs.stop()
+        assert status == 503
+        assert body['status'] == 'fail'
+
+    def test_liveness_returns_404_for_unknown_path(self, analyzer):
+        """Unknown paths return 404."""
+        hs = _make_health_server(analyzer)
+        hs.start()
+        status, _ = _get(hs.port, '/unknown')
+        hs.stop()
+        assert status == 404
+
+    def test_is_live_returns_true_without_channel(self, analyzer):
+        """is_live() returns True when no channel has been set yet."""
+        hs = _make_health_server(analyzer)
+        ok, reason = hs.is_live()
+        assert ok is True
+        assert reason == 'starting'
+
+    def test_is_live_returns_false_on_shutdown(self, analyzer):
+        """is_live() returns False when channel is SHUTDOWN."""
+        hs = _make_health_server(analyzer)
+        hs.set_channel(_MockChannel(grpc.ChannelConnectivity.SHUTDOWN))
+        ok, reason = hs.is_live()
+        assert ok is False
+        assert reason == 'channel_shutdown'
+
+
+class TestHealthServerReadiness:
+    """Tests for GET /readyz (readiness probe)."""
+
+    def test_readiness_returns_200_during_grace_period(self, analyzer):
+        """Readiness is 200 during the startup grace period."""
+        hs = _make_health_server(analyzer, grace=9999)
+        hs.start()
+        status, body = _get(hs.port, '/readyz')
+        hs.stop()
+        assert status == 200
+        assert body['status'] == 'ok'
+        assert 'grace_period' in body['reason']
+
+    def test_readiness_returns_200_when_no_events_seen(self, analyzer):
+        """
+        Readiness is 200 after the grace period when no events have been seen —
+        a node with no cert activity is a valid state, not a failure.
+        """
+        hs = _make_health_server(analyzer, grace=0)
+        # Ensure last_event_timestamp is 0 (never set)
+        analyzer.metrics.last_event_timestamp._value.set(0)
+        hs.start()
+        status, body = _get(hs.port, '/readyz')
+        hs.stop()
+        assert status == 200
+        assert 'no_events_seen' in body['reason']
+
+    def test_readiness_returns_200_when_recent_event(self, analyzer):
+        """Readiness is 200 when the last event was recent."""
+        hs = _make_health_server(analyzer, grace=0, staleness=300)
+        analyzer.metrics.last_event_timestamp._value.set(_time.time())
+        hs.start()
+        status, body = _get(hs.port, '/readyz')
+        hs.stop()
+        assert status == 200
+
+    def test_readiness_returns_503_when_events_stale(self, analyzer):
+        """Readiness is 503 when the last event is older than the staleness window."""
+        hs = _make_health_server(analyzer, grace=0, staleness=10)
+        # Set last event to 60 seconds ago — well past the 10s staleness window
+        analyzer.metrics.last_event_timestamp._value.set(_time.time() - 60)
+        hs.start()
+        status, body = _get(hs.port, '/readyz')
+        hs.stop()
+        assert status == 503
+        assert body['status'] == 'fail'
+        assert 'stale' in body['reason']
+
+    def test_is_ready_true_during_grace_period(self, analyzer):
+        """is_ready() returns True during the grace period regardless of event state."""
+        hs = _make_health_server(analyzer, grace=9999)
+        ok, reason = hs.is_ready()
+        assert ok is True
+        assert 'grace_period' in reason
+
+    def test_is_ready_true_with_no_events_after_grace(self, analyzer):
+        """is_ready() returns True with no events seen after grace period."""
+        hs = _make_health_server(analyzer, grace=0)
+        analyzer.metrics.last_event_timestamp._value.set(0)
+        ok, reason = hs.is_ready()
+        assert ok is True
+        assert reason == 'no_events_seen'
+
+    def test_is_ready_false_when_stale(self, analyzer):
+        """is_ready() returns False when last_event_timestamp is too old."""
+        hs = _make_health_server(analyzer, grace=0, staleness=10)
+        analyzer.metrics.last_event_timestamp._value.set(_time.time() - 60)
+        ok, reason = hs.is_ready()
+        assert ok is False
+        assert 'stale' in reason
+
+    def test_health_server_response_is_valid_json(self, analyzer):
+        """Both endpoints return valid JSON bodies."""
+        hs = _make_health_server(analyzer, grace=0)
+        hs.start()
+        for path in ('/healthz', '/readyz'):
+            status, body = _get(hs.port, path)
+            assert 'status' in body
+            assert 'reason' in body
+        hs.stop()
+
+    def test_health_server_port_configurable(self, analyzer):
+        """HealthServer respects the port passed at construction."""
+        import socket
+        with socket.socket() as s:
+            s.bind(('', 0))
+            port = s.getsockname()[1]
+        hs = HealthServer(analyzer=analyzer, port=port)
+        assert hs.port == port

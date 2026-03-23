@@ -60,3 +60,33 @@ spec:
       annotations:
         summary: "High rate of certificate analysis errors"
         description: "Certificate analyzer is experiencing {{ $value }} errors per second analyzing certificates"
+
+    - alert: TetragonVersionMismatch
+      expr: cert_analyzer_tetragon_version_match == 0
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer built against wrong Tetragon version"
+        description: >
+          The cert-analyzer was built against a different Tetragon version than
+          the one currently running. Proto incompatibilities may cause silent
+          event processing failures. Check the cert_analyzer_tetragon_version
+          metric for build_version and runtime_version labels, then rebuild the
+          cert-analyzer image against the runtime version.
+
+    - alert: CertAnalyzerNotReady
+      expr: kube_pod_container_status_ready{container="analyzer"} == 0
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer pod is not ready on {{ $labels.node }}"
+        description: >
+          The cert-analyzer container has been reporting not-ready for more than
+          5 minutes. This means the readiness probe (/readyz) is failing —
+          either the Tetragon event stream has stalled or no events have been
+          seen within the staleness window. Check the pod logs and the
+          cert_analyzer_healthy metric.
