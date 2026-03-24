@@ -106,3 +106,19 @@ spec:
           PKCS12_PASSWORD environment variable to the correct password, or use
           a password map file for multiple keystores. Check the analyzer logs
           for the specific file paths that failed.
+
+    - alert: CertAnalyzerCacheNearCapacity
+      expr: cert_analyzer_cache_known_certs_size / cert_analyzer_cache_max_size > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer known_certs cache is over 90% full"
+        description: >
+          The known_certs LRU cache is approaching its cap. Entries are being
+          evicted and certificates will be re-analyzed on next access, adding
+          CPU overhead. Consider increasing CACHE_MAX_SIZE and the container
+          memory limit proportionally. Current size can be checked via the
+          cert_analyzer_cache_known_certs_size and cert_analyzer_cache_max_size
+          metrics.

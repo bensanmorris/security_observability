@@ -217,6 +217,12 @@ The following env vars control keystore password handling and should be set via 
 | `JKS_PASSWORD` | _(none)_ | Password for JKS keystores. Tried first, before `changeit` and empty string |
 | `PKCS12_PASSWORD` | _(none)_ | Password for PKCS12 keystores. Tried first, before `changeit` and empty string |
 
+The following env var controls internal cache sizing:
+
+| Env var | Default | Minimum | Description |
+|---|---|---|---|
+| `CACHE_MAX_SIZE` | `10000` | `10000` | Maximum entries in each of the three LRU caches (known certs, processed paths, password-failed paths). Cannot be set below 10,000. |
+
 ### 8. Deploy Prometheus and Alertmanager
 
 The repository does not provision Prometheus or Alertmanager. The recommended approach for Kubernetes is the kube-prometheus-stack Helm chart, which bundles Prometheus, Alertmanager, and Grafana together:
@@ -242,11 +248,17 @@ Apply the pre-built alerting rules:
 kubectl apply -f kubernetes/prometheus-rules.yaml
 ```
 
-This creates three alerts:
+This creates the following alerts:
 
 - `CertificateExpiringSoon` — certificate expires in fewer than 30 days
 - `CertificateExpiringCritical` — certificate expires in fewer than 7 days
 - `CertificateExpired` — certificate has already expired
+- `CertificateAnalyzerDown` — metrics endpoint unreachable for 5 minutes
+- `CertificateAnalysisErrors` — high rate of cert parsing errors
+- `TetragonVersionMismatch` — build and runtime Tetragon versions differ
+- `CertAnalyzerNotReady` — readiness probe failing for 5 minutes
+- `KeystorePasswordFailed` — JKS or PKCS12 keystore cannot be opened
+- `CertAnalyzerCacheNearCapacity` — known_certs cache over 90% full
 
 ### 9. Configure Alertmanager
 
@@ -355,6 +367,27 @@ Note that a single password env var applies to all keystores of that format. If 
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
 **Resource limits** — set CPU and memory limits on the cert-analyzer container. Expected memory usage is 50–150MB depending on the number of certificates being tracked.
+
+**LRU cache sizing** — the cert-analyzer maintains three internal LRU caches, each capped at `CACHE_MAX_SIZE` entries (default and minimum: 10,000):
+
+- `known_certs` — parsed certificate metadata, keyed by path + index + serial number
+- `processed_paths` — file paths that have been successfully analyzed
+- `password_failed_paths` — keystore paths that failed all password attempts
+
+When a cache reaches its cap the least-recently-used entry is evicted. For `known_certs` and `processed_paths` this means an evicted cert will be re-analyzed the next time its file is accessed — correct behaviour for a long-running analyzer. For `password_failed_paths` eviction gives previously-failed keystores a second chance, which is desirable if `JKS_PASSWORD` or `PKCS12_PASSWORD` has since been set.
+
+Each `CertificateInfo` entry in `known_certs` is approximately 500 bytes–1KB depending on label lengths. At the default cap of 10,000 entries this is roughly 5–10MB — well within the container memory limit. On nodes with very large numbers of distinct certificate files, increase `CACHE_MAX_SIZE` and the container memory limit proportionally.
+
+Monitor cache occupancy via Prometheus before hitting the cap:
+
+```promql
+cert_analyzer_cache_known_certs_size
+cert_analyzer_cache_processed_paths_size
+cert_analyzer_cache_password_failed_size
+cert_analyzer_cache_max_size
+```
+
+The `CertAnalyzerCacheNearCapacity` alert in `kubernetes/prometheus-rules.yaml` fires when `known_certs` exceeds 90% of its cap for more than 10 minutes. If this alert fires, increase `CACHE_MAX_SIZE` in `deployment.yaml` and raise the container memory limit proportionally.
 
 ---
 
