@@ -12,7 +12,8 @@ import logging
 import grpc
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple, List
+from typing import Dict, Optional, Set, Tuple, List, OrderedDict as OrderedDictType
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from concurrent import futures
 import time
@@ -214,6 +215,26 @@ class PrometheusMetrics:
             'tetragon_build_version': TETRAGON_BUILD_VERSION,
         })
 
+        # Cache size metrics — track LRU cache occupancy for capacity planning
+        # and to alert before caches approach their cap
+        self.cache_known_certs_size = Gauge(
+            'cert_analyzer_cache_known_certs_size',
+            'Number of entries in the known_certs LRU cache',
+        )
+        self.cache_processed_paths_size = Gauge(
+            'cert_analyzer_cache_processed_paths_size',
+            'Number of entries in the processed_paths LRU cache',
+        )
+        self.cache_password_failed_size = Gauge(
+            'cert_analyzer_cache_password_failed_size',
+            'Number of entries in the password_failed_paths LRU cache',
+        )
+        self.cache_max_size = Gauge(
+            'cert_analyzer_cache_max_size',
+            'Configured maximum size for all LRU caches',
+        )
+        self.cache_max_size.set(CACHE_MAX_SIZE)
+
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
         labels = {
@@ -257,6 +278,93 @@ class PrometheusMetrics:
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
+
+
+CACHE_MIN_SIZE: int = 10_000
+CACHE_MAX_SIZE: int = max(CACHE_MIN_SIZE, int(os.getenv('CACHE_MAX_SIZE', str(CACHE_MIN_SIZE))))
+
+
+class LRUCache:
+    """
+    A dict-like LRU cache backed by OrderedDict.
+
+    On every get/set the accessed key is moved to the end (most-recently-used).
+    When the cap is reached the front entry (least-recently-used) is evicted.
+
+    Used for all three caches in CertificateAnalyzer:
+      - known_certs         (path:index:serial → CertificateInfo)
+      - processed_paths     (path → True)
+      - password_failed_paths (path → True)
+
+    Evicting from known_certs / processed_paths gives evicted certs a chance
+    to be re-analysed if they become active again.  Evicting from
+    password_failed_paths gives previously-failed keystores a second chance,
+    which is desirable if the operator has since set JKS_PASSWORD.
+    """
+
+    def __init__(self, maxsize: int = CACHE_MAX_SIZE):
+        if maxsize < CACHE_MIN_SIZE:
+            logger.warning(
+                f"CACHE_MAX_SIZE {maxsize} is below minimum {CACHE_MIN_SIZE}; "
+                f"using {CACHE_MIN_SIZE}."
+            )
+            maxsize = CACHE_MIN_SIZE
+        self.maxsize = maxsize
+        self._store: OrderedDict = OrderedDict()
+
+    # ── dict-like interface ───────────────────────────────────────────────────
+
+    def __contains__(self, key) -> bool:
+        return key in self._store
+
+    def __getitem__(self, key):
+        self._store.move_to_end(key)
+        return self._store[key]
+
+    def __setitem__(self, key, value) -> None:
+        if key in self._store:
+            self._store.move_to_end(key)
+            self._store[key] = value
+        else:
+            if len(self._store) >= self.maxsize:
+                evicted_key, _ = self._store.popitem(last=False)
+                logger.debug(f"LRU eviction: {evicted_key}")
+            self._store[key] = value
+
+    def __delitem__(self, key) -> None:
+        del self._store[key]
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    def __iter__(self):
+        return iter(self._store)
+
+    def get(self, key, default=None):
+        if key in self._store:
+            return self[key]
+        return default
+
+    def items(self):
+        return self._store.items()
+
+    def keys(self):
+        return self._store.keys()
+
+    def values(self):
+        return self._store.values()
+
+    def add(self, key) -> None:
+        """Set-like interface for password_failed_paths."""
+        self[key] = True
+
+    def discard(self, key) -> None:
+        """Set-like discard — no error if key absent."""
+        if key in self._store:
+            del self._store[key]
+
+    def clear(self) -> None:
+        self._store.clear()
 
 
 class HealthServer:
@@ -425,11 +533,13 @@ class CertificateAnalyzer:
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
         self.metrics = PrometheusMetrics()
-        self.known_certs: Dict[str, CertificateInfo] = {}
-        self.processed_paths: Set[str] = set()
+        self.known_certs: LRUCache = LRUCache()
+        self.processed_paths: LRUCache = LRUCache()
         # Paths that failed password attempts — cached to avoid repeating expensive
-        # crypto operations on every subsequent Tetragon event for the same file
-        self.password_failed_paths: Set[str] = set()
+        # crypto operations on every subsequent Tetragon event for the same file.
+        # LRU eviction gives previously-failed paths a second chance after enough
+        # other activity, which is desirable if JKS_PASSWORD has since been set.
+        self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
 
         # Kubernetes enricher - enabled when running in-cluster or locally with kubeconfig
@@ -442,6 +552,12 @@ class CertificateAnalyzer:
         else:
             self.enricher = None
             logger.info("Kubernetes pod enrichment disabled - k8s_enricher not found")
+
+    def _update_cache_metrics(self) -> None:
+        """Update Prometheus gauges reflecting current LRU cache occupancy."""
+        self.metrics.cache_known_certs_size.set(len(self.known_certs))
+        self.metrics.cache_processed_paths_size.set(len(self.processed_paths))
+        self.metrics.cache_password_failed_size.set(len(self.password_failed_paths))
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -514,6 +630,7 @@ class CertificateAnalyzer:
             )
             self.metrics.cert_analysis_errors.labels(error_type='jks_password_failed').inc()
             self.password_failed_paths.add(cert_path)
+            self._update_cache_metrics()
             return []
 
         certificates = []
@@ -600,6 +717,7 @@ class CertificateAnalyzer:
             )
             self.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed').inc()
             self.password_failed_paths.add(cert_path)
+            self._update_cache_metrics()
             return []
 
         certificates = []
@@ -806,6 +924,7 @@ class CertificateAnalyzer:
                 self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
 
         self.processed_paths.add(cert_path)
+        self._update_cache_metrics()
         return cert_infos
 
     def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
@@ -1001,15 +1120,15 @@ class CertificateAnalyzer:
         # Check if we've already analyzed this file
         if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
             logger.info(f"Re-detected known certificate file: {cert_path}")
-            for key, cert_info in self.known_certs.items():
-                if key.startswith(cert_path + ":"):
-                    # If this event carries pod context that the cached entry lacks,
-                    # apply it now so log lines and metrics reflect the correct workload.
-                    if tetragon_pod is not None and not cert_info.pod_name:
-                        logger.debug(f"Applying pod context to cached entry for {cert_path}")
-                        self._apply_pod_context(cert_info, tetragon_pod)
-                    self.log_certificate_status(cert_info)
-                    self.metrics.update_certificate_metrics(cert_info)
+            matching_keys = [k for k in self.known_certs.keys()
+                             if k.startswith(cert_path + ":")]
+            for key in matching_keys:
+                cert_info = self.known_certs[key]  # touches entry — moves to MRU end
+                if tetragon_pod is not None and not cert_info.pod_name:
+                    logger.debug(f"Applying pod context to cached entry for {cert_path}")
+                    self._apply_pod_context(cert_info, tetragon_pod)
+                self.log_certificate_status(cert_info)
+                self.metrics.update_certificate_metrics(cert_info)
             return
 
         # Analyze new certificate file (may contain multiple certs)
@@ -1026,6 +1145,8 @@ class CertificateAnalyzer:
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)
             self.known_certs[cert_info.unique_key] = cert_info
+
+        self._update_cache_metrics()
 
     def get_runtime_tetragon_version(self, stub) -> str:
         """
@@ -1256,6 +1377,7 @@ def main():
     logger.info(f"Version:           {CERT_ANALYZER_VERSION}")
     logger.info(f"Tetragon address:  {tetragon_addr}")
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
+    logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
