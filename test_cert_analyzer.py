@@ -20,7 +20,7 @@ from prometheus_client import REGISTRY
 # Import the analyzer (adjust path as needed)
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from cert_analyzer import CertificateAnalyzer, CertificateInfo
+from cert_analyzer import CertificateAnalyzer, CertificateInfo, LRUCache
 
 
 class TestCertificateGeneration:
@@ -1366,6 +1366,183 @@ class TestProcessEventTimestamp:
         analyzer.process_event(self._make_mock_event(disk_path))
 
         assert analyzer.metrics.last_event_timestamp._value.get() > 0
+
+
+class TestLRUCache:
+    """
+    Tests for the LRUCache class — eviction, LRU ordering, minimum size
+    enforcement, set-like interface, and dict-like interface.
+    """
+
+    def test_basic_get_set(self):
+        """Values can be stored and retrieved."""
+        cache = LRUCache(maxsize=10_000)
+        cache['a'] = 1
+        assert cache['a'] == 1
+
+    def test_contains(self):
+        """'in' operator works correctly."""
+        cache = LRUCache(maxsize=10_000)
+        cache['x'] = True
+        assert 'x' in cache
+        assert 'y' not in cache
+
+    def test_len(self):
+        """len() reflects current entry count."""
+        cache = LRUCache(maxsize=10_000)
+        for i in range(5):
+            cache[str(i)] = i
+        assert len(cache) == 5
+
+    def test_evicts_lru_entry_when_full(self):
+        """When at capacity, the least-recently-used entry is evicted."""
+        cache = LRUCache(maxsize=10_000)
+        # Fill to capacity using internal store directly for speed
+        for i in range(10_000):
+            cache._store[str(i)] = i
+        # 'str(0)' is the LRU entry — adding one more should evict it
+        cache['new'] = 'new'
+        assert '0' not in cache
+        assert 'new' in cache
+        assert len(cache) == 10_000
+
+    def test_access_promotes_to_mru(self):
+        """Accessing an entry moves it to the MRU end, protecting it from eviction."""
+        cache = LRUCache(maxsize=10_000)
+        for i in range(10_000):
+            cache._store[str(i)] = i
+        # Access '0' — it should move to MRU end
+        _ = cache['0']
+        # Add a new entry — '1' (now LRU) should be evicted, not '0'
+        cache['new'] = 'new'
+        assert '0' in cache
+        assert '1' not in cache
+
+    def test_update_existing_key_does_not_grow(self):
+        """Updating an existing key does not add a new entry."""
+        cache = LRUCache(maxsize=10_000)
+        cache['a'] = 1
+        cache['a'] = 2
+        assert len(cache) == 1
+        assert cache['a'] == 2
+
+    def test_delete(self):
+        """Entries can be deleted."""
+        cache = LRUCache(maxsize=10_000)
+        cache['a'] = 1
+        del cache['a']
+        assert 'a' not in cache
+        assert len(cache) == 0
+
+    def test_add_and_discard_set_interface(self):
+        """add() and discard() provide a Set-like interface."""
+        cache = LRUCache(maxsize=10_000)
+        cache.add('path/to/keystore.jks')
+        assert 'path/to/keystore.jks' in cache
+        cache.discard('path/to/keystore.jks')
+        assert 'path/to/keystore.jks' not in cache
+        # discard on absent key must not raise
+        cache.discard('nonexistent')
+
+    def test_minimum_size_floor_enforced(self):
+        """Requesting a size below CACHE_MIN_SIZE is silently raised to the minimum."""
+        import cert_analyzer as _ca
+        cache = LRUCache(maxsize=1)
+        assert cache.maxsize == _ca.CACHE_MIN_SIZE
+
+    def test_clear(self):
+        """clear() empties the cache."""
+        cache = LRUCache(maxsize=10_000)
+        for i in range(5):
+            cache[str(i)] = i
+        cache.clear()
+        assert len(cache) == 0
+
+    def test_get_with_default(self):
+        """get() returns default when key is absent."""
+        cache = LRUCache(maxsize=10_000)
+        assert cache.get('missing', 'default') == 'default'
+        cache['key'] = 'value'
+        assert cache.get('key', 'default') == 'value'
+
+    def test_items_keys_values(self):
+        """items(), keys(), values() expose the underlying store."""
+        cache = LRUCache(maxsize=10_000)
+        cache['a'] = 1
+        cache['b'] = 2
+        assert set(cache.keys()) == {'a', 'b'}
+        assert set(cache.values()) == {1, 2}
+        assert set(cache.items()) == {('a', 1), ('b', 2)}
+
+
+class TestCacheIntegration:
+    """
+    Integration tests verifying that known_certs, processed_paths, and
+    password_failed_paths are wired to LRUCache and that Prometheus
+    cache size metrics are updated correctly.
+    """
+
+    def test_analyzer_uses_lru_cache_for_known_certs(self, analyzer):
+        """known_certs is an LRUCache instance."""
+        assert isinstance(analyzer.known_certs, LRUCache)
+
+    def test_analyzer_uses_lru_cache_for_processed_paths(self, analyzer):
+        """processed_paths is an LRUCache instance."""
+        assert isinstance(analyzer.processed_paths, LRUCache)
+
+    def test_analyzer_uses_lru_cache_for_password_failed_paths(self, analyzer):
+        """password_failed_paths is an LRUCache instance."""
+        assert isinstance(analyzer.password_failed_paths, LRUCache)
+
+    def test_cache_max_size_metric_set_on_init(self, analyzer):
+        """cert_analyzer_cache_max_size gauge is set at startup."""
+        import cert_analyzer as _ca
+        val = analyzer.metrics.cache_max_size._value.get()
+        assert val == _ca.CACHE_MAX_SIZE
+
+    def test_cache_size_metrics_updated_after_analyze(self, analyzer, temp_dir):
+        """Cache size metrics update after a certificate is analyzed."""
+        cert, _ = TestCertificateGeneration.generate_certificate("metrics.example.com", 365)
+        path = os.path.join(temp_dir, "metrics.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer.analyze_certificate(path, "test", 1)
+
+        assert analyzer.metrics.cache_processed_paths_size._value.get() == 1
+
+    def test_cache_size_metrics_updated_after_password_failure(
+        self, analyzer, temp_dir, monkeypatch
+    ):
+        """cache_password_failed_size metric updates after a password failure."""
+        cert, key = TestCertificateGeneration.generate_certificate("fail.example.com", 365)
+        p12_data  = _make_pkcs12(cert, key, password=b'supersecret')
+        path      = os.path.join(temp_dir, "fail.p12")
+        with open(path, 'wb') as f:
+            f.write(p12_data)
+        monkeypatch.delenv('PKCS12_PASSWORD', raising=False)
+
+        analyzer.parse_pkcs12_certificates(path)
+
+        assert analyzer.metrics.cache_password_failed_size._value.get() == 1
+
+    def test_known_certs_evicts_lru_when_full(self, analyzer, temp_dir):
+        """
+        When known_certs reaches CACHE_MAX_SIZE the LRU entry is evicted
+        rather than the cache growing beyond the cap.
+        """
+        import cert_analyzer as _ca
+
+        # Directly fill known_certs to capacity using internal store
+        for i in range(_ca.CACHE_MAX_SIZE):
+            analyzer.known_certs._store[f"path:{i}:serial"] = None
+
+        assert len(analyzer.known_certs) == _ca.CACHE_MAX_SIZE
+
+        # Add one more — should evict the oldest, not grow
+        analyzer.known_certs[f"path:{_ca.CACHE_MAX_SIZE}:serial"] = None
+
+        assert len(analyzer.known_certs) == _ca.CACHE_MAX_SIZE
+        assert "path:0:serial" not in analyzer.known_certs
 
 
 if __name__ == "__main__":
