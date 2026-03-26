@@ -19,6 +19,7 @@ from concurrent import futures
 import time
 import re
 import threading
+import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from cryptography import x509
@@ -94,6 +95,9 @@ class CertificateInfo:
     app_label: str = ""
     container_name: str = ""
     container_image: str = ""
+    # SHA-256 of the DER-encoded certificate bytes. Empty string when
+    # CERT_CHECKSUM_ENABLED=false (the default).
+    checksum: str = ""
 
     @property
     def days_until_expiry(self) -> float:
@@ -282,6 +286,13 @@ class PrometheusMetrics:
 
 CACHE_MIN_SIZE: int = 10_000
 CACHE_MAX_SIZE: int = max(CACHE_MIN_SIZE, int(os.getenv('CACHE_MAX_SIZE', str(CACHE_MIN_SIZE))))
+
+# SHA-256 checksum computation on parsed certificates is disabled by default.
+# Enable via CERT_CHECKSUM_ENABLED=true. When enabled, the DER-encoded bytes
+# of each certificate are hashed and stored in CertificateInfo.checksum.
+# Useful for detecting silent cert rotation (same path, different cert) and
+# correlating the same cert appearing at multiple paths.
+CERT_CHECKSUM_ENABLED: bool = os.getenv('CERT_CHECKSUM_ENABLED', 'false').lower() == 'true'
 
 
 class LRUCache:
@@ -871,6 +882,17 @@ class CertificateAnalyzer:
         except Exception as e:
             logger.debug(f"Error extracting SAN: {e}")
 
+        # Compute SHA-256 of DER-encoded certificate when enabled.
+        # Uses public_bytes() which is always available for a parsed cert object.
+        checksum = ""
+        if CERT_CHECKSUM_ENABLED:
+            try:
+                from cryptography.hazmat.primitives.serialization import Encoding
+                der_bytes = cert.public_bytes(Encoding.DER)
+                checksum = hashlib.sha256(der_bytes).hexdigest()
+            except Exception as e:
+                logger.debug(f"Could not compute checksum for cert {cert_index} in {cert_path}: {e}")
+
         return CertificateInfo(
             path=cert_path,
             subject=subject,
@@ -883,7 +905,8 @@ class CertificateAnalyzer:
             namespace=namespace,
             common_name=common_name,
             san_dns_names=san_dns_names,
-            cert_index=cert_index
+            cert_index=cert_index,
+            checksum=checksum,
         )
 
     def analyze_certificate(
@@ -1017,6 +1040,8 @@ class CertificateAnalyzer:
         logger.debug(f"   Subject: {info.subject}")
         logger.debug(f"   Issuer: {info.issuer}")
         logger.debug(f"   Serial: {info.serial_number}")
+        if info.checksum:
+            logger.debug(f"   SHA-256: {info.checksum}")
         logger.debug(
             f"   Valid: {info.not_before.strftime('%Y-%m-%d')} -> "
             f"{info.not_after.strftime('%Y-%m-%d')}"
@@ -1378,6 +1403,7 @@ def main():
     logger.info(f"Tetragon address:  {tetragon_addr}")
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
+    logger.info(f"Cert checksums:    {'enabled' if CERT_CHECKSUM_ENABLED else 'disabled'}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -1389,6 +1415,11 @@ def main():
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
     start_http_server(metrics_port)
 
+    # HealthServer.is_ready() reads analyzer.metrics.last_event_timestamp, so
+    # it needs the analyzer reference. CertificateAnalyzer.start() calls
+    # health_server.set_channel() once the gRPC channel is established.
+    # Break the circular dependency by constructing the analyzer first, then
+    # passing it to HealthServer, then wiring the health server back in.
     analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
                                    filter_self_events=filter_self)
 
@@ -1400,9 +1431,7 @@ def main():
     )
     health.start()
 
-    analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
-                                   filter_self_events=filter_self,
-                                   health_server=health)
+    analyzer.health_server = health
 
     if scan_paths and scan_paths[0]:
         def periodic_scanner():

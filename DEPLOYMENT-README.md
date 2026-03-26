@@ -223,6 +223,12 @@ The following env var controls internal cache sizing:
 |---|---|---|---|
 | `CACHE_MAX_SIZE` | `10000` | `10000` | Maximum entries in each of the three LRU caches (known certs, processed paths, password-failed paths). Cannot be set below 10,000. |
 
+The following env var controls optional certificate checksum computation:
+
+| Env var | Default | Description |
+|---|---|---|
+| `CERT_CHECKSUM_ENABLED` | `false` | Set to `true` to compute a SHA-256 checksum of each certificate's DER-encoded bytes. Useful for detecting silent cert rotation and correlating the same cert at multiple paths. Disabled by default — see Production Considerations. |
+
 ### 8. Deploy Prometheus and Alertmanager
 
 The repository does not provision Prometheus or Alertmanager. The recommended approach for Kubernetes is the kube-prometheus-stack Helm chart, which bundles Prometheus, Alertmanager, and Grafana together:
@@ -363,6 +369,21 @@ kubectl logs -n kube-system -l app=cert-expiry-monitor | grep "password-failed"
 ```
 
 Note that a single password env var applies to all keystores of that format. If your environment has multiple keystores with different passwords, contact the security team to discuss a password map file approach backed by a mounted Secret.
+
+**Certificate checksums** — SHA-256 checksum computation is disabled by default (`CERT_CHECKSUM_ENABLED=false`). When enabled, the DER-encoded bytes of each parsed certificate are hashed and stored in the `CertificateInfo` object, appearing in debug logs alongside the subject and serial number. This has two practical uses:
+
+- **Rotation detection** — if a certificate at a known path is replaced (same path, new cert), the checksum changes while the path stays the same, making silent rotations visible in the logs
+- **Cross-path correlation** — the same certificate distributed to multiple paths (e.g. a CA bundle copied across namespaces) produces identical checksums, allowing deduplication
+
+The CPU cost is negligible — SHA-256 of a few KB of DER bytes takes microseconds. The feature is disabled by default because the serial number combined with issuer already provides a globally unique certificate identity per the X.509 spec, and most deployments don't need the additional signal. Enable it if you have specific rotation tracking or cross-path deduplication requirements:
+
+```yaml
+env:
+  - name: CERT_CHECKSUM_ENABLED
+    value: "true"
+```
+
+Note that checksums are not currently exposed as Prometheus labels — they are available in the debug logs only. If cross-path deduplication or rotation alerting via Prometheus is needed, contact the security team to discuss extending the metrics.
 
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
