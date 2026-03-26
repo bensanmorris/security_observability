@@ -370,9 +370,9 @@ kubectl logs -n kube-system -l app=cert-expiry-monitor | grep "password-failed"
 
 Note that a single password env var applies to all keystores of that format. If your environment has multiple keystores with different passwords, contact the security team to discuss a password map file approach backed by a mounted Secret.
 
-**Certificate checksums** — SHA-256 checksum computation is disabled by default (`CERT_CHECKSUM_ENABLED=false`). When enabled, the DER-encoded bytes of each parsed certificate are hashed and stored in the `CertificateInfo` object, appearing in debug logs alongside the subject and serial number. This has two practical uses:
+**Certificate checksums** — SHA-256 checksum computation is disabled by default (`CERT_CHECKSUM_ENABLED=false`). When enabled, the DER-encoded bytes of each parsed certificate are hashed and the result is stored in the `CertificateInfo` object. This has two practical uses:
 
-- **Rotation detection** — if a certificate at a known path is replaced (same path, new cert), the checksum changes while the path stays the same, making silent rotations visible in the logs
+- **Rotation detection** — if a certificate at a known path is replaced (same path, new cert), the checksum changes while the path stays the same, making silent rotations visible
 - **Cross-path correlation** — the same certificate distributed to multiple paths (e.g. a CA bundle copied across namespaces) produces identical checksums, allowing deduplication
 
 The CPU cost is negligible — SHA-256 of a few KB of DER bytes takes microseconds. The feature is disabled by default because the serial number combined with issuer already provides a globally unique certificate identity per the X.509 spec, and most deployments don't need the additional signal. Enable it if you have specific rotation tracking or cross-path deduplication requirements:
@@ -383,7 +383,13 @@ env:
     value: "true"
 ```
 
-Note that checksums are not currently exposed as Prometheus labels — they are available in the debug logs only. If cross-path deduplication or rotation alerting via Prometheus is needed, contact the security team to discuss extending the metrics.
+When enabled, checksums are surfaced in three places:
+
+- **Prometheus labels** — the `checksum` label is present on `tls_certificate_expiry_days`, `tls_certificate_expiry_timestamp`, and `tls_certificate_valid_from`, allowing PromQL queries to group or filter by certificate identity across paths
+- **Alert annotations** — the `CertificateExpiringSoon`, `CertificateExpiringCritical`, and `CertificateExpired` alerts include `sha256: <checksum>` in their description when the label is non-empty, making it straightforward to verify exactly which certificate instance triggered the alert
+- **Debug logs** — the SHA-256 is logged alongside the subject and serial number at DEBUG level
+
+When checksums are disabled (the default), the `checksum` label is present but empty on all metrics — existing queries and dashboards are unaffected.
 
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
