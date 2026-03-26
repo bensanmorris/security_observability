@@ -137,7 +137,7 @@ class PrometheusMetrics:
             'Days until TLS certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name']
+             'app_label', 'container_name', 'checksum']
         )
 
         self.cert_expiry_timestamp = Gauge(
@@ -145,7 +145,7 @@ class PrometheusMetrics:
             'Unix timestamp of certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name']
+             'app_label', 'container_name', 'checksum']
         )
 
         self.cert_valid_from = Gauge(
@@ -153,7 +153,7 @@ class PrometheusMetrics:
             'Unix timestamp of certificate valid from date',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name']
+             'app_label', 'container_name', 'checksum']
         )
 
         # Event counters
@@ -255,6 +255,10 @@ class PrometheusMetrics:
             'workload_name':  info.workload_name,
             'app_label':      info.app_label,
             'container_name': info.container_name,
+            # Empty string when CERT_CHECKSUM_ENABLED=false — Prometheus
+            # handles empty label values cleanly and the label is simply
+            # omitted from query results when filtering
+            'checksum':       info.checksum,
         }
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)

@@ -19,7 +19,7 @@ spec:
         component: certificate
       annotations:
         summary: "Certificate {{ $labels.cert_path }} expires soon"
-        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expires in {{ $value | humanizeDuration }} (path: {{ $labels.cert_path }})"
+        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expires in {{ $value | humanizeDuration }} (path: {{ $labels.cert_path }}{{ if $labels.checksum }}, sha256: {{ $labels.checksum }}{{ end }})"
     
     - alert: CertificateExpiringCritical
       expr: tls_certificate_expiry_days < 7 and tls_certificate_expiry_days > 0
@@ -29,7 +29,7 @@ spec:
         component: certificate
       annotations:
         summary: "Certificate {{ $labels.cert_path }} expires very soon!"
-        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expires in {{ $value | humanizeDuration }} (path: {{ $labels.cert_path }}). IMMEDIATE ACTION REQUIRED!"
+        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expires in {{ $value | humanizeDuration }} (path: {{ $labels.cert_path }}{{ if $labels.checksum }}, sha256: {{ $labels.checksum }}{{ end }}). IMMEDIATE ACTION REQUIRED!"
     
     - alert: CertificateExpired
       expr: tls_certificate_expiry_days < 0
@@ -39,7 +39,7 @@ spec:
         component: certificate
       annotations:
         summary: "Certificate {{ $labels.cert_path }} has EXPIRED"
-        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expired {{ $value | humanizeDuration }} ago (path: {{ $labels.cert_path }}). SERVICE MAY BE AFFECTED!"
+        description: "Certificate {{ $labels.common_name }} used by {{ $labels.process }} expired {{ $value | humanizeDuration }} ago (path: {{ $labels.cert_path }}{{ if $labels.checksum }}, sha256: {{ $labels.checksum }}{{ end }}). SERVICE MAY BE AFFECTED!"
     
     - alert: CertificateAnalyzerDown
       expr: up{job="cert-expiry-monitor"} == 0
