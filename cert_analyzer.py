@@ -20,6 +20,7 @@ import time
 import re
 import threading
 import hashlib
+import configparser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from cryptography import x509
@@ -1382,21 +1383,82 @@ class CertificateAnalyzer:
                 logger.error(f"Error scanning {base_path}: {e}")
 
 
+CONFIG_FILE_PATH = '/etc/cert-analyzer/cert-analyzer.conf'
+
+
+def load_config(path: str = CONFIG_FILE_PATH) -> configparser.ConfigParser:
+    """
+    Load the INI configuration file if it exists.
+
+    Returns an empty ConfigParser (all lookups fall through to env var
+    defaults) if the file is absent — this keeps the Kubernetes deployment
+    path working without any config file present.
+
+    The config file path can be overridden via the CERT_ANALYZER_CONFIG
+    env var, which is useful for testing or non-standard deployments.
+    """
+    config_path = os.getenv('CERT_ANALYZER_CONFIG', path)
+    cp = configparser.ConfigParser()
+
+    if os.path.exists(config_path):
+        try:
+            cp.read(config_path)
+            logger.info(f"Loaded configuration from {config_path}")
+        except configparser.Error as e:
+            logger.warning(
+                f"Could not parse config file {config_path}: {e} — "
+                f"falling back to environment variables and defaults"
+            )
+    else:
+        logger.debug(
+            f"Config file not found at {config_path} — "
+            f"using environment variables and defaults"
+        )
+
+    return cp
+
+
+def cfg(
+    cp: configparser.ConfigParser,
+    section: str,
+    key: str,
+    env_var: str,
+    default: str,
+) -> str:
+    """
+    Resolve a configuration value using the precedence chain:
+      config file → env var → hardcoded default
+
+    The config file takes precedence so that operators editing
+    /etc/cert-analyzer/cert-analyzer.conf always see their changes
+    reflected without needing to unset env vars.
+
+    Returns a string — callers are responsible for casting to int/bool.
+    """
+    # Config file takes highest precedence
+    if cp.has_option(section, key):
+        return cp.get(section, key)
+    # Env var is the fallback
+    return os.getenv(env_var, default)
+
+
 def main():
     """Main entry point"""
-    tetragon_addr    = os.getenv('TETRAGON_ADDR', 'localhost:54321')
-    metrics_port     = int(os.getenv('METRICS_PORT', '9090'))
-    health_port      = int(os.getenv('HEALTH_PORT', '8086'))
-    alert_threshold  = int(os.getenv('ALERT_THRESHOLD_DAYS', '30'))
-    log_level        = os.getenv('LOG_LEVEL', 'INFO')
-    scan_paths_str   = os.getenv('CERT_SCAN_PATHS', '/etc/ssl,/etc/pki')
-    scan_paths       = [p.strip() for p in scan_paths_str.split(',') if p.strip()]
-    scan_interval    = int(os.getenv('SCAN_INTERVAL_SECONDS', '3600'))
-    grace_period     = int(os.getenv('READINESS_GRACE_PERIOD_SECONDS', '60'))
-    staleness        = int(os.getenv('READINESS_STALENESS_SECONDS', '300'))
+    cp = load_config()
+
+    tetragon_addr   = cfg(cp, 'tetragon',  'addr',                        'TETRAGON_ADDR',                   'localhost:54321')
+    metrics_port    = int(cfg(cp, 'metrics',  'port',                     'METRICS_PORT',                    '9090'))
+    health_port     = int(cfg(cp, 'health',   'port',                     'HEALTH_PORT',                     '8086'))
+    alert_threshold = int(cfg(cp, 'alerting', 'threshold_days',           'ALERT_THRESHOLD_DAYS',            '30'))
+    log_level       = cfg(cp, 'logging',   'level',                       'LOG_LEVEL',                       'INFO')
+    scan_paths_str  = cfg(cp, 'scanning',  'paths',                       'CERT_SCAN_PATHS',                 '/etc/ssl,/etc/pki')
+    scan_paths      = [p.strip() for p in scan_paths_str.split(',') if p.strip()]
+    scan_interval   = int(cfg(cp, 'scanning',  'interval_seconds',        'SCAN_INTERVAL_SECONDS',           '3600'))
+    grace_period    = int(cfg(cp, 'health',    'readiness_grace_period_seconds', 'READINESS_GRACE_PERIOD_SECONDS', '60'))
+    staleness       = int(cfg(cp, 'health',    'readiness_staleness_seconds',    'READINESS_STALENESS_SECONDS',    '300'))
     # Set to 'false' to allow the cert-analyzer to observe its own certificate
     # accesses - useful for demos showing self-pod enrichment
-    filter_self      = os.getenv('FILTER_SELF_EVENTS', 'true').lower() != 'false'
+    filter_self     = cfg(cp, 'certificates', 'filter_self_events',       'FILTER_SELF_EVENTS',              'true').lower() != 'false'
 
     logging.getLogger().setLevel(getattr(logging, log_level.upper()))
 
@@ -1404,6 +1466,7 @@ def main():
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
     logger.info("="*60)
     logger.info(f"Version:           {CERT_ANALYZER_VERSION}")
+    logger.info(f"Config file:       {os.getenv('CERT_ANALYZER_CONFIG', CONFIG_FILE_PATH)}")
     logger.info(f"Tetragon address:  {tetragon_addr}")
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
