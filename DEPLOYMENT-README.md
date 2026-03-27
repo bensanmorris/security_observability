@@ -2,7 +2,10 @@
 
 ## Overview
 
-This document describes the steps and topology required to deploy the TLS Certificate Expiry Monitor into a production Kubernetes environment.
+This document describes the steps and topology required to deploy the TLS Certificate Expiry Monitor. Two deployment modes are supported:
+
+- **Kubernetes DaemonSet** — the primary mode, covered in the Deployment Steps section. Tetragon and cert-analyzer run as co-located DaemonSets on each node, with Prometheus, Alertmanager, and Grafana for observability.
+- **Standalone RHEL9 (RPM)** — for bare-metal or VM nodes not running Kubernetes. cert-analyzer runs as a systemd service installed from an RPM package. Covered in the Standalone RHEL9 Deployment section.
 
 ## Architecture
 
@@ -285,6 +288,160 @@ Configure `alertmanager.yml` to route notifications to your chosen channel (Slac
 2. Go to Dashboards → Import
 3. Upload `examples/grafana-dashboard.json`
 4. Select your Prometheus datasource
+
+---
+
+## Standalone RHEL9 Deployment (RPM)
+
+For environments where cert-analyzer runs as a systemd service on bare-metal or VM RHEL9 nodes rather than inside Kubernetes, an RPM package is available. The RPM bundles a self-contained Python virtualenv so no internet access or pip install is required at install time.
+
+### RPM Contents
+
+The RPM installs the following layout:
+
+```
+/opt/cert-analyzer/cert_analyzer.py     # main analyzer script
+/opt/cert-analyzer/tetragon/            # compiled Tetragon gRPC protos
+/opt/cert-analyzer/venv/                # bundled Python virtualenv
+/etc/cert-analyzer/cert-analyzer.conf   # operator configuration file
+/etc/systemd/system/cert-analyzer.service
+/var/log/cert-analyzer/
+/usr/share/licenses/cert-analyzer/LICENSE
+```
+
+A dedicated `cert-analyzer` system user and group are created during installation. The service runs as this user with `NoNewPrivileges` and a restricted filesystem view.
+
+### Building the RPM
+
+Prerequisites on the build machine:
+
+```bash
+sudo dnf install python3.11 python3.11-devel python3.11-pip rpm-build git gcc
+```
+
+Run the build script from the repository root:
+
+```bash
+# Build against the default Tetragon version (v1.1.0)
+./rpm/build-rpm.sh
+
+# Build against a specific Tetragon version
+./rpm/build-rpm.sh --tetragon-version v1.2.0
+
+# Build with an explicit version string
+./rpm/build-rpm.sh --version 1.0.0 --release 1
+```
+
+The version is auto-detected from the git tag if building from a tagged commit, or set to `0.0.0~git<sha>` for snapshot builds. The resulting RPM is written to `~/rpmbuild/RPMS/<arch>/`.
+
+### Installing the RPM
+
+Copy the RPM to each target node and install:
+
+```bash
+sudo dnf install ./cert-analyzer-<version>.<arch>.rpm
+```
+
+`dnf` is preferred over `rpm -i` as it handles dependency resolution automatically.
+
+### Configuration
+
+All runtime options are set in `/etc/cert-analyzer/cert-analyzer.conf`. This file is installed with secure permissions (`0640`, owned by `root:cert-analyzer`) and is marked `%config(noreplace)` in the RPM — upgrades will never overwrite your changes.
+
+The configuration file is INI format with named sections:
+
+```ini
+[tetragon]
+addr = unix:///var/run/cilium/tetragon/tetragon.sock
+
+[metrics]
+port = 9090
+
+[health]
+port = 8086
+readiness_grace_period_seconds = 60
+readiness_staleness_seconds = 300
+
+[alerting]
+threshold_days = 30
+
+[scanning]
+paths = /etc/ssl,/etc/pki
+interval_seconds = 3600
+
+[logging]
+level = INFO
+
+[cache]
+max_size = 10000
+
+[certificates]
+checksum_enabled = false
+filter_self_events = true
+
+[passwords]
+# jks_password =
+# pkcs12_password =
+```
+
+Values in the config file take precedence over environment variables, which in turn take precedence over built-in defaults. This means the Kubernetes deployment path (which uses environment variables and has no config file) continues to work unchanged.
+
+The config file path can be overridden via the `CERT_ANALYZER_CONFIG` environment variable, which is useful for testing or non-standard deployments:
+
+```bash
+CERT_ANALYZER_CONFIG=/tmp/test.conf /opt/cert-analyzer/venv/bin/python3 \
+    /opt/cert-analyzer/cert_analyzer.py
+```
+
+### Starting the Service
+
+```bash
+# Edit configuration before first start
+sudo vi /etc/cert-analyzer/cert-analyzer.conf
+
+# Enable and start
+sudo systemctl enable --now cert-analyzer
+
+# Verify
+sudo systemctl status cert-analyzer
+sudo journalctl -u cert-analyzer -f
+```
+
+### Verifying Operation
+
+```bash
+# Check the analyzer is producing metrics
+curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
+
+# Check liveness and readiness probes
+curl -s http://localhost:8086/healthz
+curl -s http://localhost:8086/readyz
+
+# Check the version that was installed
+curl -s http://localhost:9090/metrics | grep cert_analyzer_build
+```
+
+### Upgrading
+
+```bash
+sudo dnf upgrade ./cert-analyzer-<new-version>.<arch>.rpm
+```
+
+The `%config(noreplace)` flag ensures `/etc/cert-analyzer/cert-analyzer.conf` is preserved. If the new RPM ships a changed default config it will be installed as `cert-analyzer.conf.rpmnew` — review the diff and merge any new options manually:
+
+```bash
+diff /etc/cert-analyzer/cert-analyzer.conf \
+     /etc/cert-analyzer/cert-analyzer.conf.rpmnew
+```
+
+### Uninstalling
+
+```bash
+sudo systemctl stop cert-analyzer
+sudo dnf remove cert-analyzer
+# Configuration and logs are preserved — remove manually if desired:
+sudo rm -rf /etc/cert-analyzer /var/log/cert-analyzer
+```
 
 ---
 
