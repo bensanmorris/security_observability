@@ -202,7 +202,7 @@ sudo rm -rf /etc/cert-analyzer /var/log/cert-analyzer
 
 ---
 
-## Deployment Steps
+## Kubernetes DaemonSet Deployment
 
 ### 1. Verify Node Prerequisites
 
