@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-# build-rpm.sh — Build the cert-analyzer RPM on RHEL9
-#
-# Usage:
-#   ./build-rpm.sh [--version <version>] [--release <release>]
-#                  [--tetragon-version <version>]
-#
-# Defaults:
-#   version          — git tag if on a tag, otherwise short SHA
-#   release          — 1
-#   tetragon-version — v1.1.0
-#
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2024 Your Organisation
 
 set -euo pipefail
 

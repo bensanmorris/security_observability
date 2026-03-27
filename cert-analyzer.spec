@@ -3,9 +3,6 @@
 # RPM spec for the TLS Certificate Expiry Monitor.
 # Bundles a Python virtualenv so the package is fully self-contained
 # and requires no internet access at install time.
-#
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2024 Your Organisation
 
 Name:           cert-analyzer
 Version:        %{_version}
