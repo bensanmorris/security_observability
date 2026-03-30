@@ -109,7 +109,7 @@ The configuration file is INI format with named sections:
 
 ```ini
 [tetragon]
-addr = unix:///var/run/cilium/tetragon/tetragon.sock
+addr = unix:///run/tetragon/tetragon.sock
 
 [metrics]
 port = 9090
@@ -135,6 +135,8 @@ max_size = 10000
 [certificates]
 checksum_enabled = false
 filter_self_events = true
+# Leave empty for standalone deployment — set to /host for Kubernetes
+host_prefix =
 
 [passwords]
 # jks_password =
@@ -148,6 +150,52 @@ The config file path can be overridden via the `CERT_ANALYZER_CONFIG` environmen
 ```bash
 CERT_ANALYZER_CONFIG=/tmp/test.conf /opt/cert-analyzer/venv/bin/python3 \
     /opt/cert-analyzer/cert_analyzer.py
+```
+
+> **Note on upgrades and config changes** — `%config(noreplace)` preserves your
+> config file if it has been locally modified. However if the RPM ships a new
+> default config (e.g. with new options added), RPM will install the new version
+> as `cert-analyzer.conf.rpmnew` rather than overwriting your file. Always check
+> for this file after an upgrade and merge any new options — see the Upgrading
+> section below.
+
+### Tetragon Socket Permissions
+
+The cert-analyzer runs as the `cert-analyzer` system user and must be able to read the Tetragon gRPC socket. The socket is owned by `root:root` by default and the `cert-analyzer` user has no access to it.
+
+Grant access by changing the socket group:
+
+```bash
+sudo chgrp cert-analyzer /run/tetragon/tetragon.sock
+```
+
+Verify:
+
+```bash
+ls -la /run/tetragon/tetragon.sock
+# Expected: srw-rw----. 1 root cert-analyzer 0 ...
+```
+
+This change does not survive a Tetragon restart. To make it permanent add a systemd drop-in to the Tetragon service:
+
+```bash
+sudo systemctl edit tetragon
+```
+
+Add the following and save:
+
+```ini
+[Service]
+ExecStartPost=/bin/chgrp cert-analyzer /run/tetragon/tetragon.sock
+```
+
+Reload systemd and verify it takes effect on the next Tetragon restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart tetragon
+ls -la /run/tetragon/tetragon.sock
+# Group should now be cert-analyzer
 ```
 
 ### Starting the Service
@@ -176,20 +224,49 @@ curl -s http://localhost:8086/readyz
 
 # Check the version that was installed
 curl -s http://localhost:9090/metrics | grep cert_analyzer_build
+
+# Trigger a detection by reading a certificate file — check the logs
+cat /etc/pki/tls/certs/ca-bundle.crt
+sudo journalctl -u cert-analyzer -n 10
 ```
+
+You should see a `🔍 Detected certificate access` line in the logs within a second of the `cat` command.
+
+> **Periodic scan and feedback loop** — by default the periodic scan runs every
+> hour against `/etc/ssl,/etc/pki`. On a standalone node where Tetragon is
+> already delivering real-time fd_install events, the periodic scan is redundant
+> and can cause a feedback loop where the cert-analyzer's own file accesses
+> generate events back to itself. If you observe repeated detections with
+> `process=periodic_scan` or PID matching the cert-analyzer process, disable
+> the periodic scan:
+> ```ini
+> [scanning]
+> paths =
+> ```
 
 ### Upgrading
 
 ```bash
-sudo dnf upgrade ./cert-analyzer-<new-version>.<arch>.rpm
+sudo dnf upgrade ~/rpmbuild/RPMS/x86_64/cert-analyzer-<new-version>.<arch>.rpm
 ```
 
-The `%config(noreplace)` flag ensures `/etc/cert-analyzer/cert-analyzer.conf` is preserved. If the new RPM ships a changed default config it will be installed as `cert-analyzer.conf.rpmnew` — review the diff and merge any new options manually:
+If rebuilding without a new git commit (i.e. the version string is unchanged), increment the release number to ensure dnf recognises it as a newer package:
 
 ```bash
+./build-rpm.sh --release 2
+sudo dnf upgrade ~/rpmbuild/RPMS/x86_64/cert-analyzer-0.0.0~git<sha>-2.el9.x86_64.rpm
+```
+
+**Config file behaviour on upgrade** — if the packaged default `cert-analyzer.conf` has changed since your last install (e.g. new options added), RPM cannot silently overwrite your customised file. Instead it installs the new default as `cert-analyzer.conf.rpmnew` and leaves your file untouched. Always check for this after an upgrade and merge any new options:
+
+```bash
+# Check if a new default config was installed
+ls /etc/cert-analyzer/
 diff /etc/cert-analyzer/cert-analyzer.conf \
      /etc/cert-analyzer/cert-analyzer.conf.rpmnew
 ```
+
+If no `.rpmnew` file exists, your config was identical to the new default and no merge is needed.
 
 ### Uninstalling
 
