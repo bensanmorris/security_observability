@@ -544,10 +544,12 @@ class CertificateAnalyzer:
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
-                 health_server: Optional['HealthServer'] = None):
+                 health_server: Optional['HealthServer'] = None,
+                 host_prefix: str = ''):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
+        self.host_prefix = host_prefix
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -1115,9 +1117,12 @@ class CertificateAnalyzer:
                         logger.debug(f"Found cert path in uprobe string_arg: {cert_path}")
                         break
 
-        # Translate host paths to container paths
-        if cert_path and not cert_path.startswith("/host"):
-            cert_path = "/host" + cert_path
+        # Translate host paths — in Kubernetes the cert-analyzer runs in a
+        # container where /host is a bind mount of the node root filesystem.
+        # In standalone mode this prefix is empty so paths are used as-is.
+        if cert_path and self.host_prefix:
+            if not cert_path.startswith(self.host_prefix):
+                cert_path = self.host_prefix + cert_path
 
         return cert_path, process_name, pid, namespace, tetragon_pod
 
@@ -1138,6 +1143,11 @@ class CertificateAnalyzer:
         if self.filter_self_events:
             if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
                 logger.debug(f"Skipping self-generated event from {process_name}")
+                return
+            # Also filter by PID — Tetragon may report the process binary as '/'
+            # on some systems, so name-based filtering alone is insufficient
+            if pid == os.getpid():
+                logger.debug(f"Skipping self-generated event from PID {pid}")
                 return
 
         logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
@@ -1459,6 +1469,9 @@ def main():
     # Set to 'false' to allow the cert-analyzer to observe its own certificate
     # accesses - useful for demos showing self-pod enrichment
     filter_self     = cfg(cp, 'certificates', 'filter_self_events',       'FILTER_SELF_EVENTS',              'true').lower() != 'false'
+    # Empty by default for standalone RPM deployment — set to /host for
+    # Kubernetes where the node root filesystem is bind-mounted at /host
+    host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
 
     logging.getLogger().setLevel(getattr(logging, log_level.upper()))
 
@@ -1477,6 +1490,7 @@ def main():
     logger.info(f"Scan paths:        {scan_paths}")
     logger.info(f"Scan interval:     {scan_interval} seconds")
     logger.info(f"Filter self events: {filter_self}")
+    logger.info(f"Host prefix:       '{host_prefix}' (empty = standalone mode)")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -1488,7 +1502,8 @@ def main():
     # Break the circular dependency by constructing the analyzer first, then
     # passing it to HealthServer, then wiring the health server back in.
     analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
-                                   filter_self_events=filter_self)
+                                   filter_self_events=filter_self,
+                                   host_prefix=host_prefix)
 
     health = HealthServer(
         analyzer=analyzer,
