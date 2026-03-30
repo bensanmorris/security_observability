@@ -141,7 +141,6 @@ jobs:
         dnf install -y \
           python3.11 \
           python3.11-devel \
-          python3-pip \
           rpm-build \
           rpmdevtools \
           git \

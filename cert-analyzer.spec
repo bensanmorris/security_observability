@@ -44,7 +44,6 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  python3.11
 BuildRequires:  python3.11-devel
-BuildRequires:  python3.11-pip
 BuildRequires:  gcc
 BuildRequires:  git
 BuildRequires:  systemd-rpm-macros
@@ -82,6 +81,9 @@ rm -rf %{_builddir}/proto-venv \
        %{_builddir}/tetragon-src \
        %{_builddir}/generated \
        %{_builddir}/venv
+
+# ── Bootstrap pip (not available as a separate package on UBI9) ──────────────
+python3.11 -m ensurepip --upgrade
 
 # ── Generate Tetragon protobuf bindings ───────────────────────────────────────
 # Create a temporary venv just for proto generation.
