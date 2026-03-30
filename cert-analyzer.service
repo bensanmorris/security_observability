@@ -1,0 +1,50 @@
+[Unit]
+Description=TLS Certificate Expiry Monitor
+Documentation=https://github.com/your-org/cert-analyzer
+After=network.target tetragon.service
+Wants=tetragon.service
+
+[Service]
+Type=simple
+User=cert-analyzer
+Group=cert-analyzer
+
+# Configuration is read directly from /etc/cert-analyzer/cert-analyzer.conf
+# by the Python process — no EnvironmentFile needed.
+# Set CERT_ANALYZER_CONFIG here to override the config file path if required.
+#Environment=CERT_ANALYZER_CONFIG=/etc/cert-analyzer/cert-analyzer.conf
+
+# Main process
+ExecStart=/opt/cert-analyzer/venv/bin/python3 /opt/cert-analyzer/cert_analyzer.py
+
+# Restart policy — always restart except on clean exit (systemctl stop)
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging — stdout goes to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cert-analyzer
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+# Allow read-only access to host certificate directories and Tetragon socket
+ReadOnlyPaths=/etc/ssl /etc/pki /var/run/cilium
+# Allow read access to the configuration file
+ReadOnlyPaths=/etc/cert-analyzer
+# Allow write access only to the log directory
+ReadWritePaths=/var/log/cert-analyzer
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=256M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

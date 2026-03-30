@@ -49,6 +49,8 @@ spec:
           value: "60"
         - name: READINESS_STALENESS_SECONDS
           value: "300"
+        - name: HOST_PREFIX
+          value: "/host"
         volumeMounts:
         - name: tetragon-sock
           mountPath: /var/run/cilium/tetragon

@@ -7,6 +7,9 @@ on:
       - 'Containerfile'
       - 'cert_analyzer.py'
       - 'requirements.txt'
+      - 'cert-analyzer.spec'
+      - 'cert-analyzer.conf'
+      - 'cert-analyzer.service'
       - '.github/workflows/build.yml'
   pull_request:
     branches: [ main, develop ]
@@ -14,6 +17,9 @@ on:
       - 'Containerfile'
       - 'cert_analyzer.py'
       - 'requirements.txt'
+      - 'cert-analyzer.spec'
+      - 'cert-analyzer.conf'
+      - 'cert-analyzer.service'
       - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
@@ -118,3 +124,118 @@ jobs:
         echo '```' >> $GITHUB_STEP_SUMMARY
         echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
+
+  build-rpm:
+    name: Build RPM
+    runs-on: ubuntu-latest
+    # Run inside UBI9 to match the target platform — ensures rpmbuild,
+    # Python 3.11, and rpm macros behave identically to the target node
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:latest
+    permissions:
+      contents: write   # required for uploading to GitHub Releases
+
+    steps:
+    - name: Install build prerequisites
+      run: |
+        dnf install -y \
+          python3.11 \
+          python3.11-devel \
+          rpm-build \
+          rpmdevtools \
+          git \
+          gcc \
+          make \
+          findutils \
+          which
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        # Full history needed for git describe / SHA detection
+        fetch-depth: 0
+
+    - name: Fix git safe directory
+      run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          # Tagged release — strip leading 'v' for RPM version compatibility
+          VERSION="${{ github.ref_name }}"
+          echo "value=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        else
+          # Branch build — use short SHA in RPM-compatible tilde format
+          SHA=$(git rev-parse --short HEAD)
+          echo "value=0.0.0~git${SHA}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Set up rpmbuild tree
+      run: rpmdev-setuptree
+
+    - name: Create source tarball
+      run: |
+        VERSION="${{ steps.version.outputs.value }}"
+        TARNAME="cert-analyzer-${VERSION}"
+        TMPDIR=$(mktemp -d)
+
+        mkdir -p "${TMPDIR}/${TARNAME}"
+        cp cert_analyzer.py          "${TMPDIR}/${TARNAME}/"
+        cp LICENSE                   "${TMPDIR}/${TARNAME}/"
+        cp cert-analyzer.service     "${TMPDIR}/${TARNAME}/"
+        cp cert-analyzer.conf        "${TMPDIR}/${TARNAME}/"
+
+        tar -czf "${HOME}/rpmbuild/SOURCES/${TARNAME}.tar.gz" \
+            -C "${TMPDIR}" "${TARNAME}"
+
+        echo "Tarball: ${HOME}/rpmbuild/SOURCES/${TARNAME}.tar.gz"
+
+    - name: Copy spec file
+      run: cp cert-analyzer.spec "${HOME}/rpmbuild/SPECS/cert-analyzer.spec"
+
+    - name: Build RPM
+      run: |
+        rpmbuild -ba \
+          --define "_topdir ${HOME}/rpmbuild" \
+          --define "_version ${{ steps.version.outputs.value }}" \
+          --define "_release ${{ steps.version.outputs.release }}" \
+          --define "_tetragon_version ${{ env.TETRAGON_VERSION }}" \
+          --define "_grpcio_version 1.60.1" \
+          --define "_protobuf_version 4.25.3" \
+          "${HOME}/rpmbuild/SPECS/cert-analyzer.spec"
+
+    - name: Locate built RPM
+      id: rpm
+      run: |
+        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" | head -1)
+        RPM_NAME=$(basename "${RPM_PATH}")
+        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "name=${RPM_NAME}" >> $GITHUB_OUTPUT
+        echo "Built: ${RPM_PATH}"
+
+    - name: Upload RPM as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.name }}
+        path: ${{ steps.rpm.outputs.path }}
+        retention-days: 30
+
+    - name: Publish RPM to GitHub Release
+      if: github.ref_type == 'tag'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ${{ steps.rpm.outputs.path }}
+        fail_on_unmatched_files: true
+
+    - name: Build summary
+      run: |
+        echo "## 📦 RPM Build" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Published to release:** \`${{ github.ref_type == 'tag' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
