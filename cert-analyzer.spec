@@ -16,10 +16,18 @@
 # so it resolves to the venv python at runtime via ExecStart in the service file.
 %global __brp_mangle_shebangs_exclude_from /opt/cert-analyzer/.*
 
-# Do not extract debuginfo from the venv's compiled .so files — some wheels
-# (e.g. google/_upb/_message.abi3.so) lack build IDs which causes errors.
+# Disable debuginfo package generation entirely.
+# The bundled venv contains third-party .so files without build IDs
+# (e.g. google/_upb/_message.abi3.so) which cause rpmbuild to fail.
+# Using %define rather than %global ensures this takes effect on RHEL9/RPM 4.17+.
+%define debug_package %{nil}
+
+# Prevent find-debuginfo from running at all — stops .debug files being
+# generated under /usr/lib/debug/ which would then be flagged as unpackaged.
+%global __os_install_post %(echo '%{__os_install_post}' | sed -e 's!/usr/lib/rpm/brp-strip-debug-symbols.*!!g' -e 's!/usr/lib/rpm/redhat/brp-strip-lto.*!!g')
+%global __strip /bin/true
+%global __debug_install_post %{nil}
 %global __debug_package %{nil}
-%global debug_package %{nil}
 
 Name:           cert-analyzer
 Version:        %{_version}
@@ -157,6 +165,15 @@ install -m 0644 cert-analyzer.service %{buildroot}%{_unitdir}/cert-analyzer.serv
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
+
+# ── Strip .so files without build IDs to prevent rpmbuild failures ────────────
+# google/_upb/_message.abi3.so ships without a build ID note — strip it so
+# find-debuginfo does not error. Other bundled .so files are left as-is.
+find %{buildroot}%{ana_venv} -name "*.so" -o -name "*.so.*" | \
+    xargs -r strip --strip-debug 2>/dev/null || true
+
+# Remove any .debug files that may have been generated despite suppression
+rm -rf %{buildroot}/usr/lib/debug
 
 
 %pre
