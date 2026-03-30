@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# build-rpm.sh — Build the cert-analyzer RPM on RHEL9
+#
+# Usage:
+#   ./build-rpm.sh [--version <version>] [--release <release>]
+#                  [--tetragon-version <version>]
+#
+# Defaults:
+#   version          — git tag if on a tag, otherwise short SHA
+#   release          — 1
+#   tetragon-version — v1.1.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2024 Your Organisation
 
 set -euo pipefail
 
@@ -50,15 +63,28 @@ for dir in BUILD BUILDROOT RPMS SOURCES SPECS SRPMS; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ── Validate required source files exist ─────────────────────────────────────
-for f in cert_analyzer.py LICENSE; do
-    if [[ ! -f "$REPO_ROOT/$f" ]]; then
-        echo "ERROR: Required file not found: $REPO_ROOT/$f"
-        exit 1
-    fi
-done
+# Locate the repo root — works whether build-rpm.sh lives in the repo root
+# directly or in an rpm/ subdirectory
+if [[ -f "$SCRIPT_DIR/cert_analyzer.py" ]]; then
+    REPO_ROOT="$SCRIPT_DIR"
+elif [[ -f "$SCRIPT_DIR/../cert_analyzer.py" ]]; then
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+    echo "ERROR: Cannot locate cert_analyzer.py relative to $SCRIPT_DIR"
+    echo "Expected either:"
+    echo "  $SCRIPT_DIR/cert_analyzer.py  (script in repo root)"
+    echo "  $SCRIPT_DIR/../cert_analyzer.py  (script in rpm/ subdirectory)"
+    exit 1
+fi
+
+echo "Repo root: $REPO_ROOT"
+
+# ── Validate remaining required source files ─────────────────────────────────
+if [[ ! -f "$REPO_ROOT/LICENSE" ]]; then
+    echo "ERROR: Required file not found: $REPO_ROOT/LICENSE"
+    exit 1
+fi
 
 # ── Create source tarball ─────────────────────────────────────────────────────
 TARNAME="cert-analyzer-${VERSION}"

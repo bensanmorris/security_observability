@@ -3,6 +3,23 @@
 # RPM spec for the TLS Certificate Expiry Monitor.
 # Bundles a Python virtualenv so the package is fully self-contained
 # and requires no internet access at install time.
+#
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2024 Your Organisation
+
+# ── Suppress rpmbuild post-processing that breaks bundled venvs ───────────────
+
+# Do not mangle shebangs inside the bundled virtualenv — third-party packages
+# (e.g. protobuf) contain scripts with '#!/usr/bin/env python' which rpmbuild
+# treats as an error. The venv interpreter is already correctly set.
+# Also exclude cert_analyzer.py — it uses '#!/usr/bin/env python3' intentionally
+# so it resolves to the venv python at runtime via ExecStart in the service file.
+%global __brp_mangle_shebangs_exclude_from /opt/cert-analyzer/.*
+
+# Do not extract debuginfo from the venv's compiled .so files — some wheels
+# (e.g. google/_upb/_message.abi3.so) lack build IDs which causes errors.
+%global __debug_package %{nil}
+%global debug_package %{nil}
 
 Name:           cert-analyzer
 Version:        %{_version}
@@ -49,8 +66,15 @@ workload enrichment.
 
 
 %build
+# ── Clean any leftover artifacts from a previous build run ───────────────────
+rm -rf %{_builddir}/proto-venv \
+       %{_builddir}/tetragon-src \
+       %{_builddir}/generated \
+       %{_builddir}/venv
+
 # ── Generate Tetragon protobuf bindings ───────────────────────────────────────
-# Create a temporary venv just for proto generation
+# Create a temporary venv just for proto generation.
+# Use python3.11 explicitly — the venv will have python3.11 but not python3.
 python3.11 -m venv %{_builddir}/proto-venv
 %{_builddir}/proto-venv/bin/pip install --quiet grpcio-tools==%{_grpcio_version} protobuf==%{_protobuf_version}
 
@@ -63,7 +87,7 @@ git clone --depth 1 --filter=blob:none --sparse \
     --branch %{_tetragon_version}
 cd %{_builddir}/tetragon-src && git sparse-checkout set api/v1/tetragon
 
-%{_builddir}/proto-venv/bin/python3 -m grpc_tools.protoc \
+%{_builddir}/proto-venv/bin/python3.11 -m grpc_tools.protoc \
     -I %{_builddir}/tetragon-src/api/v1 \
     --python_out=%{_builddir}/generated \
     --grpc_python_out=%{_builddir}/generated \
