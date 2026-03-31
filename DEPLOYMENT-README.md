@@ -124,13 +124,38 @@ The version is auto-detected from the git tag if building from a tagged commit, 
 
 ### Installing the RPM
 
-Copy the RPM to each target node and install:
+Tetragon must be installed and reachable in `$PATH` before installing cert-analyzer. The RPM's pre-install scriptlet checks for the `tetragon` binary and aborts with a clear message if it is absent — this is intentional since cert-analyzer is non-functional without Tetragon regardless of installation path:
+
+```
+ERROR: tetragon binary not found in PATH.
+       Install Tetragon before installing cert-analyzer.
+       See https://tetragon.io/docs/installation/
+```
+
+Once Tetragon is installed, verify it is visible before proceeding:
+
+```bash
+command -v tetragon
+tetragon version
+```
+
+Then copy the RPM to each target node and install:
 
 ```bash
 sudo dnf install ./cert-analyzer-<version>.<arch>.rpm
 ```
 
 `dnf` is preferred over `rpm -i` as it handles dependency resolution automatically.
+
+To verify the RPM's declared dependencies and pre-install scriptlet:
+
+```bash
+# Show declared package dependencies
+rpm -qp --requires cert-analyzer-<version>.<arch>.rpm
+
+# Show the pre-install scriptlet including the Tetragon check
+rpm -qp --scripts cert-analyzer-<version>.<arch>.rpm
+```
 
 ### Configuration
 

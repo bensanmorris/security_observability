@@ -51,8 +51,10 @@ BuildRequires:  systemd-rpm-macros
 Requires:       python3.11
 Requires:       systemd
 
-# Tetragon must be installed and running for the analyzer to function
-Recommends:     tetragon
+# Tetragon is a runtime dependency but is installed manually rather than via
+# an RPM repository. Its installation path varies by environment so we cannot
+# use a file-based Requires. Instead the %pre scriptlet checks for the
+# tetragon binary in $PATH and fails the install with a clear message if absent.
 
 # The analyzer runs as a dedicated non-privileged user
 %global ana_user  cert-analyzer
@@ -184,6 +186,16 @@ install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
 
 
 %pre
+# Verify Tetragon is installed — it is a required runtime dependency but is
+# not available as an RPM so cannot be expressed as a package Requires.
+# Search PATH for the tetragon binary and abort with a clear message if absent.
+if ! command -v tetragon >/dev/null 2>&1; then
+    echo "ERROR: tetragon binary not found in PATH." >&2
+    echo "       Install Tetragon before installing cert-analyzer." >&2
+    echo "       See https://tetragon.io/docs/installation/" >&2
+    exit 1
+fi
+
 # Create service user and group if they don't exist
 getent group %{ana_group} > /dev/null || \
     groupadd --system %{ana_group}
