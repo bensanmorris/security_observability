@@ -55,7 +55,7 @@ jobs:
     
     - name: Install security tools
       run: |
-        pip install bandit safety
+        pip install bandit pip-audit
     
     - name: Run Bandit security scan
       run: |
@@ -64,8 +64,11 @@ jobs:
     
     - name: Check dependencies for vulnerabilities
       run: |
+        # pip-audit uses the OSV/PyPI advisory database — no API key required.
+        # Scans requirements.txt and fails the build if vulnerabilities are found.
         pip install -r test-requirements.txt
-        safety check || true
+        pip-audit -r requirements.txt
+        pip-audit -r test-requirements.txt
 
   test:
     name: Test (Python ${{ matrix.python-version }})
