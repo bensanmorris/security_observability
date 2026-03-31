@@ -10,6 +10,29 @@ Detect expired TLS certificates at runtime without modifying applications. Get r
 
 ![Realtime certificate expiry checking](demo.gif)
 
+---
+
+### ✅ What CertSight does today
+
+| | |
+|---|---|
+| 🔬 **eBPF runtime detection** | Hooks Tetragon's `fd_install` kprobe to detect certificate file access the moment any process opens it — no agents, no application changes |
+| 📦 **Multi-format parsing** | PEM, DER, JKS (`.jks` / `.keystore` / `.truststore`), and PKCS12 (`.p12` / `.pfx`) — including multi-cert bundles and certificate chains |
+| ☸️ **Kubernetes workload enrichment** | Every certificate event carries pod name, namespace, workload kind/name, container name, and app labels sourced directly from Tetragon and the Kubernetes API |
+| 📊 **Prometheus-native observability** | Rich label set on `tls_certificate_expiry_days` including cert path, subject, issuer, serial, process, and full Kubernetes context |
+| 🚨 **Production-ready alerting** | Nine pre-built Prometheus alert rules covering expiry (7 / 30 day thresholds), expired certs, Tetragon version mismatch, keystore password failures, cache pressure, and pod readiness |
+| 🔄 **Automatic reconnection** | Exponential backoff reconnect loop — survives Tetragon restarts and upgrades without restarting the analyzer |
+| 🏥 **Health and readiness probes** | Dedicated `/healthz` (liveness) and `/readyz` (readiness) HTTP endpoints on port 8086 — designed for OpenShift/Kubernetes probe semantics |
+| 🔐 **Keystore password handling** | Configurable password strategy for encrypted JKS and PKCS12 keystores with failed-path caching to avoid repeated crypto overhead |
+| 🔢 **Build version tracking** | Both cert-analyzer and Tetragon build versions stamped at build time and exposed via Prometheus `Info` metric — detects proto-incompatible Tetragon upgrades at runtime |
+| 🔑 **Optional SHA-256 checksums** | Per-certificate SHA-256 fingerprints for rotation detection and cross-path correlation, surfaced as a Prometheus label when enabled |
+| 📦 **Self-contained RPM** | Installable RPM for standalone RHEL8/9 deployment — bundles Python virtualenv, systemd unit, and INI config file; no internet access required at install time |
+| 🐳 **UBI8 and UBI9 containers** | Multi-arch container images for Kubernetes DaemonSet deployment, published to GHCR on every tagged release |
+| 🔁 **CI/CD pipeline** | GitHub Actions pipeline builds both container images and the RPM, runs tests across Python 3.9–3.12, and publishes all artifacts to a GitHub Release on tag push |
+| 🛡️ **No eBPF privileges required** | CertSight holds zero kernel capabilities — all eBPF hooking is delegated to the Tetragon daemon |
+
+---
+
 ## Video Presentations
 
 1. [The Problem - the elevator pitch](https://github.com/bensanmorris/security_observability/raw/refs/heads/main/presentation/1_The_Problem.mp4)
@@ -56,16 +79,6 @@ This tool monitors TLS certificate usage and expiry in real-time by:
 │ Observability Stack (Prometheus/Grafana)        │
 └─────────────────────────────────────────────────┘
 ```
-
-## Features
-
-- 🔍 **Real-time Detection**: Captures certificate access via eBPF
-- 📊 **Prometheus Metrics**: Exposes detailed certificate expiry metrics
-- ⚠️ **Multi-level Alerts**: 7, 30, and 90-day expiry thresholds
-- 🔄 **Periodic Scanning**: Proactively scans certificate directories
-- 🐳 **Podman Native**: Designed for RHEL9 with rootless/rootful support
-- 🔒 **SELinux Compatible**: Includes SELinux policy module
-- 📈 **Grafana Dashboards**: Pre-built visualization templates
 
 ## Prerequisites
 
@@ -564,13 +577,5 @@ For issues or questions, please open an issue in the repository.
 - [cryptography](https://cryptography.io/) - Python cryptography library
 - [Prometheus](https://prometheus.io/) - Monitoring and alerting
 
-## Changelog
-
-### v1.0.0 (2025-02-10)
-- Initial release
-- Support for RHEL9/Podman
-- Real-time certificate monitoring
-- Prometheus metrics integration
-- Grafana dashboard
 - SELinux policy
 - Systemd integration
