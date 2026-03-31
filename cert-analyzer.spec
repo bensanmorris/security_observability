@@ -45,7 +45,6 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  python3.11
 BuildRequires:  python3.11-devel
 BuildRequires:  gcc
-BuildRequires:  git
 BuildRequires:  systemd-rpm-macros
 
 Requires:       python3.11
@@ -79,47 +78,23 @@ workload enrichment.
 
 %build
 # ── Clean any leftover artifacts from a previous build run ───────────────────
-rm -rf %{_builddir}/proto-venv \
-       %{_builddir}/tetragon-src \
-       %{_builddir}/generated \
-       %{_builddir}/venv
+rm -rf %{_builddir}/venv
 
 # ── Bootstrap pip (not available as a separate package on UBI9) ──────────────
 python3.11 -m ensurepip --upgrade
 
-# ── Generate Tetragon protobuf bindings ───────────────────────────────────────
-# Create a temporary venv just for proto generation.
-# Use python3.11 explicitly — the venv will have python3.11 but not python3.
-python3.11 -m venv %{_builddir}/proto-venv
-%{_builddir}/proto-venv/bin/pip install --quiet grpcio-tools==%{_grpcio_version} protobuf==%{_protobuf_version}
-
-mkdir -p %{_builddir}/generated/tetragon
-
-# Fetch Tetragon API protos at the pinned version via sparse git checkout
-git clone --depth 1 --filter=blob:none --sparse \
-    https://github.com/cilium/tetragon.git \
-    %{_builddir}/tetragon-src \
-    --branch %{_tetragon_version}
-cd %{_builddir}/tetragon-src && git sparse-checkout set api/v1/tetragon
-
-%{_builddir}/proto-venv/bin/python3.11 -m grpc_tools.protoc \
-    -I %{_builddir}/tetragon-src/api/v1 \
-    --python_out=%{_builddir}/generated \
-    --grpc_python_out=%{_builddir}/generated \
-    %{_builddir}/tetragon-src/api/v1/tetragon/*.proto
-
-touch %{_builddir}/generated/tetragon/__init__.py
-
 # ── Build the bundled virtualenv ──────────────────────────────────────────────
+# Tetragon protobuf bindings are pre-generated and included in the source
+# tarball under tetragon/ — the spec does not clone or fetch external repos.
 python3.11 -m venv %{_builddir}/venv
 
 %{_builddir}/venv/bin/pip install --quiet --upgrade pip
 
 # Install all runtime dependencies
 %{_builddir}/venv/bin/pip install --quiet \
-    grpcio==%{_grpcio_version} \
-    grpcio-tools==%{_grpcio_version} \
-    protobuf==%{_protobuf_version} \
+    grpcio==1.60.1 \
+    grpcio-tools==1.60.1 \
+    protobuf==4.25.3 \
     prometheus-client==0.19.0 \
     cryptography==41.0.7 \
     pyyaml==6.0.1 \
@@ -148,8 +123,8 @@ install -d %{buildroot}%{ana_log}
 # Main analyzer script
 install -m 0755 cert_analyzer.py %{buildroot}%{ana_home}/cert_analyzer.py
 
-# Generated Tetragon protos
-cp -r %{_builddir}/generated/tetragon %{buildroot}%{ana_home}/tetragon
+# Generated Tetragon protos — pre-built and included in the source tarball
+cp -r tetragon %{buildroot}%{ana_home}/tetragon
 
 # Bundled virtualenv
 cp -r %{_builddir}/venv/. %{buildroot}%{ana_venv}/

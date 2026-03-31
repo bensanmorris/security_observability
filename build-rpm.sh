@@ -86,6 +86,36 @@ if [[ ! -f "$REPO_ROOT/LICENSE" ]]; then
     exit 1
 fi
 
+# ── Generate Tetragon protobuf bindings ──────────────────────────────────────
+# Protos are generated here and included in the source tarball so the spec
+# file does not need to clone any external repositories.
+echo "Generating Tetragon protobuf bindings (version: $TETRAGON_VERSION)..."
+
+PROTO_TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$PROTO_TMPDIR" "$TMPDIR_SRC"' EXIT
+
+python3.11 -m venv "$PROTO_TMPDIR/venv"
+"$PROTO_TMPDIR/venv/bin/pip" install --quiet \
+    grpcio-tools=="${GRPCIO_VERSION}" \
+    protobuf=="${PROTOBUF_VERSION}"
+
+git clone --depth 1 --filter=blob:none --sparse \
+    https://github.com/cilium/tetragon.git \
+    "$PROTO_TMPDIR/tetragon-src" \
+    --branch "$TETRAGON_VERSION"
+cd "$PROTO_TMPDIR/tetragon-src" && git sparse-checkout set api/v1/tetragon
+cd "$SCRIPT_DIR"
+
+mkdir -p "$PROTO_TMPDIR/generated/tetragon"
+"$PROTO_TMPDIR/venv/bin/python3.11" -m grpc_tools.protoc \
+    -I "$PROTO_TMPDIR/tetragon-src/api/v1" \
+    --python_out="$PROTO_TMPDIR/generated" \
+    --grpc_python_out="$PROTO_TMPDIR/generated" \
+    "$PROTO_TMPDIR/tetragon-src/api/v1/tetragon/"*.proto
+
+touch "$PROTO_TMPDIR/generated/tetragon/__init__.py"
+echo "Protobuf bindings generated."
+
 # ── Create source tarball ─────────────────────────────────────────────────────
 TARNAME="cert-analyzer-${VERSION}"
 TARBALL="$RPMBUILD_ROOT/SOURCES/${TARNAME}.tar.gz"
@@ -93,13 +123,14 @@ TARBALL="$RPMBUILD_ROOT/SOURCES/${TARNAME}.tar.gz"
 echo "Creating source tarball: $TARBALL"
 
 TMPDIR_SRC="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_SRC"' EXIT
 
 mkdir -p "$TMPDIR_SRC/$TARNAME"
-cp "$REPO_ROOT/cert_analyzer.py"     "$TMPDIR_SRC/$TARNAME/"
-cp "$REPO_ROOT/LICENSE"              "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/cert_analyzer.py"       "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/LICENSE"                "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/cert-analyzer.service" "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/cert-analyzer.conf"    "$TMPDIR_SRC/$TARNAME/"
+# Include pre-generated protos so the spec needs no network access
+cp -r "$PROTO_TMPDIR/generated/tetragon" "$TMPDIR_SRC/$TARNAME/tetragon"
 
 tar -czf "$TARBALL" -C "$TMPDIR_SRC" "$TARNAME"
 echo "Tarball created: $TARBALL"
@@ -114,8 +145,6 @@ rpmbuild -ba \
     --define "_version $VERSION" \
     --define "_release $RPM_RELEASE" \
     --define "_tetragon_version $TETRAGON_VERSION" \
-    --define "_grpcio_version $GRPCIO_VERSION" \
-    --define "_protobuf_version $PROTOBUF_VERSION" \
     "$RPMBUILD_ROOT/SPECS/cert-analyzer.spec"
 
 # ── Report output ─────────────────────────────────────────────────────────────
