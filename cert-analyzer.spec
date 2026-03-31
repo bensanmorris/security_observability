@@ -167,6 +167,17 @@ install -m 0640 cert-analyzer.conf %{buildroot}%{ana_conf}/cert-analyzer.conf
 install -d %{buildroot}%{_unitdir}
 install -m 0644 cert-analyzer.service %{buildroot}%{_unitdir}/cert-analyzer.service
 
+# Stamp build-time version constants into the unit as Environment directives.
+# These are not operator-configurable — they reflect exactly what was built
+# and are used by the analyzer's version check and Prometheus build_info metric.
+# Using a systemd drop-in keeps the base unit file clean and version-independent.
+install -d %{buildroot}%{_unitdir}/cert-analyzer.service.d
+cat > %{buildroot}%{_unitdir}/cert-analyzer.service.d/version.conf << 'UNITEOF'
+[Service]
+Environment=TETRAGON_BUILD_VERSION=%{_tetragon_version}
+Environment=CERT_ANALYZER_VERSION=%{_version}
+UNITEOF
+
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
@@ -227,6 +238,7 @@ echo "  systemctl enable --now cert-analyzer"
 
 # systemd
 %{_unitdir}/cert-analyzer.service
+%{_unitdir}/cert-analyzer.service.d/version.conf
 
 
 %changelog

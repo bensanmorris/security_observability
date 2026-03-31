@@ -57,23 +57,54 @@ For environments where cert-analyzer runs as a systemd service on bare-metal or 
 The RPM installs the following layout:
 
 ```
-/opt/cert-analyzer/cert_analyzer.py     # main analyzer script
-/opt/cert-analyzer/tetragon/            # compiled Tetragon gRPC protos
-/opt/cert-analyzer/venv/                # bundled Python virtualenv
-/etc/cert-analyzer/cert-analyzer.conf   # operator configuration file
-/etc/systemd/system/cert-analyzer.service
+/opt/cert-analyzer/cert_analyzer.py              # main analyzer script
+/opt/cert-analyzer/tetragon/                     # compiled Tetragon gRPC protos
+/opt/cert-analyzer/venv/                         # bundled Python virtualenv
+/etc/cert-analyzer/cert-analyzer.conf            # operator configuration file
+/usr/lib/systemd/system/cert-analyzer.service
+/usr/lib/systemd/system/cert-analyzer.service.d/version.conf  # stamped build versions
 /var/log/cert-analyzer/
 /usr/share/licenses/cert-analyzer/LICENSE
 ```
 
 A dedicated `cert-analyzer` system user and group are created during installation. The service runs as this user with `NoNewPrivileges` and a restricted filesystem view.
 
+### Stamped Build Versions
+
+The RPM stamps two read-only version constants into a systemd drop-in at build time:
+
+```ini
+# /usr/lib/systemd/system/cert-analyzer.service.d/version.conf
+[Service]
+Environment=TETRAGON_BUILD_VERSION=v1.1.0
+Environment=CERT_ANALYZER_VERSION=1.0.0
+```
+
+These are injected automatically from the rpmbuild `--define` arguments and cannot be modified by operators — the file is owned by the RPM and replaced on every upgrade. They serve two purposes:
+
+- `TETRAGON_BUILD_VERSION` — the Tetragon version the protos were compiled against. The analyzer compares this against the running Tetragon daemon version at startup and every 5 minutes thereafter. A mismatch fires the `TetragonVersionMismatch` alert.
+- `CERT_ANALYZER_VERSION` — the cert-analyzer version, exposed via the `cert_analyzer_build` Prometheus Info metric alongside `TETRAGON_BUILD_VERSION`.
+
+After installation verify the versions were stamped correctly:
+
+```bash
+cat /usr/lib/systemd/system/cert-analyzer.service.d/version.conf
+
+# Also visible via systemctl
+systemctl show cert-analyzer | grep -i version
+
+# And via Prometheus once the service is running
+curl -s http://localhost:9090/metrics | grep cert_analyzer_build
+```
+
+If you see `Tetragon version check incomplete — build: unknown` in the logs it means either the drop-in was not installed (check the file exists) or the service was not reloaded after install (`sudo systemctl daemon-reload`).
+
 ### Building the RPM
 
 Prerequisites on the build machine:
 
 ```bash
-sudo dnf install python3.11 python3.11-devel python3.11-pip rpm-build git gcc
+sudo dnf install python3.11 python3.11-devel rpm-build git gcc
 ```
 
 Run the build script from the repository root:
