@@ -22,22 +22,24 @@ The full production stack consists of five components:
 │  └──────────────────────┘          └────────┬──────────┘    │
 │                                             │ :9090         │
 └─────────────────────────────────────────────┼───────────────┘
-                                              │ scrape
-                                    ┌─────────▼──────────┐
-                                    │    Prometheus      │
-                                    │  Stores metrics &  │
-                                    │  evaluates rules   │
-                                    └─────────┬──────────┘
-                                              │ fires alerts
-                                    ┌─────────▼──────────┐
-                                    │    Alertmanager    │
-                                    │  Routes & notifies │
-                                    └─────────┬──────────┘
-                                              │
-                                    ┌─────────▼──────────┐
-                                    │      Grafana       │
-                                    │  Visualises metrics│
-                                    └────────────────────┘
+                              ┌───────────────┼───────────────────┐
+                              │               │                   │
+                    ┌─────────▼──────────┐    │  (optional)       │
+                    │    Prometheus      │    ▼                   │
+                    │  Stores metrics &  │  ┌─────────────────┐   │
+                    │  evaluates rules   │  │     Kafka       │   │
+                    └─────────┬──────────┘  │  New cert event │   │
+                              │ fires alerts│  stream         │   │
+                    ┌─────────▼──────────┐  └─────────────────┘   │
+                    │    Alertmanager    │                        │
+                    │  Routes & notifies │                        │
+                    └─────────┬──────────┘                        │
+                              │                                   │
+                    ┌─────────▼──────────┐                        │
+                    │      Grafana       │                        │
+                    │  Visualises metrics│                        │
+                    └────────────────────┘                        │
+                              └───────────────────────────────────┘
 ```
 
 **Tetragon** is the eyes — it uses eBPF to intercept certificate file access at the kernel level and exposes events via a gRPC socket on each node.
@@ -197,6 +199,17 @@ host_prefix =
 [passwords]
 # jks_password =
 # pkcs12_password =
+
+[kafka]
+# Set enabled = true to publish new certificate discovery events to Kafka.
+# When disabled (the default) the analyzer publishes to Prometheus only.
+enabled = false
+bootstrap_servers = localhost:9092
+topic = cert-analyzer-events
+security_protocol = PLAINTEXT
+# sasl_mechanism = PLAIN
+# sasl_username  =
+# sasl_password  =
 ```
 
 Values in the config file take precedence over environment variables, which in turn take precedence over built-in defaults. This means the Kubernetes deployment path (which uses environment variables and has no config file) continues to work unchanged.
@@ -680,6 +693,95 @@ When enabled, checksums are surfaced in three places:
 - **Debug logs** — the SHA-256 is logged alongside the subject and serial number at DEBUG level
 
 When checksums are disabled (the default), the `checksum` label is present but empty on all metrics — existing queries and dashboards are unaffected.
+
+**Kafka event publishing (optional)** — cert-analyzer can publish a JSON message to a Kafka topic each time a certificate is seen for the first time. This is disabled by default and completely independent of Prometheus — enabling it does not affect metrics, alerts, or the health probes. It is intended for downstream consumers that need a real-time event stream of certificate discoveries: SIEMs, ticketing integrations, audit pipelines, or custom alerting systems.
+
+Each message is published to a single configurable topic with the certificate file path as the partition key, ensuring all events for the same certificate file land on the same partition for ordered consumption. The message schema is:
+
+```json
+{
+  "event_type":        "certificate_discovered",
+  "detected_at":       "2026-03-31T10:00:00.000000",
+  "path":              "/etc/pki/tls/certs/ca-bundle.crt",
+  "cert_index":        0,
+  "subject":           "CN=example.com",
+  "issuer":            "CN=Example CA",
+  "serial_number":     "abc123",
+  "common_name":       "example.com",
+  "san_dns_names":     ["example.com", "www.example.com"],
+  "not_before":        "2024-01-01T00:00:00",
+  "not_after":         "2025-01-01T00:00:00",
+  "days_until_expiry": 44.9,
+  "is_expired":        false,
+  "process":           "/usr/bin/curl",
+  "pid":               12345,
+  "namespace":         "default",
+  "pod_name":          "my-pod",
+  "workload_kind":     "Deployment",
+  "workload_name":     "my-app",
+  "app_label":         "my-app",
+  "container_name":    "main",
+  "container_image":   "my-app:1.0",
+  "checksum":          ""
+}
+```
+
+To enable in standalone RPM deployment, edit `/etc/cert-analyzer/cert-analyzer.conf`:
+
+```ini
+[kafka]
+enabled = true
+bootstrap_servers = broker1:9092,broker2:9092
+topic = cert-analyzer-events
+security_protocol = PLAINTEXT
+```
+
+For authenticated brokers (SASL/SSL), set the additional fields:
+
+```ini
+[kafka]
+enabled = true
+bootstrap_servers = broker1:9092
+topic = cert-analyzer-events
+security_protocol = SASL_SSL
+sasl_mechanism = PLAIN
+sasl_username = your-username
+sasl_password = your-password
+```
+
+> **Credentials in the config file** — the config file is installed with `0640` permissions owned by `root:cert-analyzer`, so only root and the cert-analyzer service account can read it. This is acceptable for standalone RPM deployments. For Kubernetes, supply credentials via environment variables backed by a Kubernetes Secret rather than a config file:
+> ```bash
+> kubectl create secret generic cert-analyzer-kafka \
+>   --from-literal=sasl-username=your-username \
+>   --from-literal=sasl-password=your-password \
+>   -n kube-system
+> ```
+> Then reference in `deployment.yaml`:
+> ```yaml
+> env:
+>   - name: KAFKA_ENABLED
+>     value: "true"
+>   - name: KAFKA_BOOTSTRAP_SERVERS
+>     value: "broker1:9092,broker2:9092"
+>   - name: KAFKA_TOPIC
+>     value: "cert-analyzer-events"
+>   - name: KAFKA_SECURITY_PROTOCOL
+>     value: "SASL_SSL"
+>   - name: KAFKA_SASL_MECHANISM
+>     value: "PLAIN"
+>   - name: KAFKA_SASL_USERNAME
+>     valueFrom:
+>       secretKeyRef:
+>         name: cert-analyzer-kafka
+>         key: sasl-username
+>   - name: KAFKA_SASL_PASSWORD
+>     valueFrom:
+>       secretKeyRef:
+>         name: cert-analyzer-kafka
+>         key: sasl-password
+> ```
+
+If the Kafka broker is unreachable at startup the analyzer logs a warning and continues with Prometheus-only operation — a broker outage never prevents certificate detection. Delivery errors are logged at `WARNING` level and do not affect the health probes or readiness state.
 
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
