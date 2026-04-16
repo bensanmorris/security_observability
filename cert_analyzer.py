@@ -55,6 +55,8 @@ except ImportError:
 # When disabled (default) the analyzer publishes to Prometheus only.
 # Enable via [kafka] enabled = true in cert-analyzer.conf or KAFKA_ENABLED=true.
 # Install with: pip install kafka-python
+KafkaProducer = None  # always defined so patch('cert_analyzer.KafkaProducer') works
+KafkaError = None     # regardless of whether kafka-python is installed
 try:
     from kafka import KafkaProducer
     from kafka.errors import KafkaError
