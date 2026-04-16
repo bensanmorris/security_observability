@@ -2583,3 +2583,407 @@ class TestHealthServerReadiness:
             port = s.getsockname()[1]
         hs = HealthServer(analyzer=analyzer, port=port)
         assert hs.port == port
+
+class TestKafkaPublisher:
+    """
+    Tests for the optional KafkaPublisher class.
+
+    Covers:
+    - No-op when kafka-python is not installed
+    - No-op when Kafka is disabled (kafka_publisher is None on analyzer)
+    - Producer initialised with correct kwargs
+    - publish() sends correct JSON message schema
+    - publish() uses cert path as message key
+    - publish() only fires for new certificates, not re-detections
+    - publish() is silent on broker errors (never raises)
+    - close() flushes and closes the producer
+    - SASL kwargs passed through when security_protocol requires them
+    - PLAINTEXT omits security_protocol kwarg
+    """
+
+    @pytest.fixture
+    def sample_cert_info(self):
+        """A fully-populated CertificateInfo for use in publisher tests."""
+        from cert_analyzer import CertificateInfo
+        return CertificateInfo(
+            path='/etc/pki/tls/certs/test.crt',
+            subject='CN=test.example.com',
+            issuer='CN=Test CA',
+            serial_number='abc123',
+            not_before=datetime(2024, 1, 1),
+            not_after=datetime(2025, 1, 1),
+            process='/usr/bin/curl',
+            pid=12345,
+            namespace='default',
+            common_name='test.example.com',
+            san_dns_names=['test.example.com', 'www.test.example.com'],
+            cert_index=0,
+            pod_name='my-pod',
+            workload_kind='Deployment',
+            workload_name='my-app',
+            pod_labels={'app': 'my-app'},
+            app_label='my-app',
+            container_name='main',
+            container_image='my-app:1.0',
+            checksum='',
+        )
+
+    def _make_publisher(self, mock_producer_class, **kwargs):
+        """Helper — construct a KafkaPublisher with a mocked KafkaProducer."""
+        from cert_analyzer import KafkaPublisher
+        defaults = dict(
+            bootstrap_servers='broker1:9092,broker2:9092',
+            topic='cert-events',
+        )
+        defaults.update(kwargs)
+        return KafkaPublisher(**defaults)
+
+    # ── availability guard ────────────────────────────────────────────────────
+
+    def test_noop_when_kafka_not_available(self, sample_cert_info, monkeypatch):
+        """publish() is silent and never raises when kafka-python is absent."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', False)
+
+        from cert_analyzer import KafkaPublisher
+        publisher = KafkaPublisher(bootstrap_servers='broker:9092', topic='t')
+        assert publisher._producer is None
+        # Must not raise
+        publisher.publish(sample_cert_info)
+
+    def test_noop_when_producer_init_fails(self, monkeypatch, sample_cert_info):
+        """publish() is silent when KafkaProducer.__init__ raises."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer', side_effect=Exception('broker down')):
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='broker:9092', topic='t')
+            assert publisher._producer is None
+            publisher.publish(sample_cert_info)   # must not raise
+
+    # ── producer initialisation ───────────────────────────────────────────────
+
+    def test_producer_initialised_with_correct_brokers(self, monkeypatch):
+        """KafkaProducer is constructed with the parsed bootstrap_servers list."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            KafkaPublisher(bootstrap_servers='b1:9092, b2:9092', topic='t')
+            call_kwargs = mock_cls.call_args[1]
+            assert call_kwargs['bootstrap_servers'] == ['b1:9092', 'b2:9092']
+
+    def test_producer_plaintext_omits_security_protocol(self, monkeypatch):
+        """security_protocol kwarg is absent when protocol is PLAINTEXT."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            KafkaPublisher(
+                bootstrap_servers='broker:9092',
+                topic='t',
+                security_protocol='PLAINTEXT',
+            )
+            call_kwargs = mock_cls.call_args[1]
+            assert 'security_protocol' not in call_kwargs
+
+    def test_producer_sasl_kwargs_passed_through(self, monkeypatch):
+        """SASL kwargs are forwarded when security_protocol is SASL_SSL."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            KafkaPublisher(
+                bootstrap_servers='broker:9092',
+                topic='t',
+                security_protocol='SASL_SSL',
+                sasl_mechanism='PLAIN',
+                sasl_username='user',
+                sasl_password='secret',
+            )
+            call_kwargs = mock_cls.call_args[1]
+            assert call_kwargs['security_protocol']     == 'SASL_SSL'
+            assert call_kwargs['sasl_mechanism']        == 'PLAIN'
+            assert call_kwargs['sasl_plain_username']   == 'user'
+            assert call_kwargs['sasl_plain_password']   == 'secret'
+
+    # ── message schema ────────────────────────────────────────────────────────
+
+    def test_publish_sends_correct_event_type(self, monkeypatch, sample_cert_info):
+        """Published message contains event_type = 'certificate_discovered'."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.publish(sample_cert_info)
+
+            mock_producer.send.assert_called_once()
+            _, send_kwargs = mock_producer.send.call_args
+            msg = send_kwargs['value']
+            assert msg['event_type'] == 'certificate_discovered'
+
+    def test_publish_message_contains_all_fields(self, monkeypatch, sample_cert_info):
+        """Published message contains all expected CertificateInfo fields."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.publish(sample_cert_info)
+
+            _, send_kwargs = mock_producer.send.call_args
+            msg = send_kwargs['value']
+
+            required_fields = [
+                'event_type', 'detected_at', 'path', 'cert_index',
+                'subject', 'issuer', 'serial_number', 'common_name',
+                'san_dns_names', 'not_before', 'not_after',
+                'days_until_expiry', 'is_expired', 'process', 'pid',
+                'namespace', 'pod_name', 'workload_kind', 'workload_name',
+                'app_label', 'container_name', 'container_image', 'checksum',
+            ]
+            for field in required_fields:
+                assert field in msg, f"Missing field: {field}"
+
+    def test_publish_message_values_match_cert_info(self, monkeypatch, sample_cert_info):
+        """Published message values correctly reflect the CertificateInfo."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.publish(sample_cert_info)
+
+            _, send_kwargs = mock_producer.send.call_args
+            msg = send_kwargs['value']
+
+            assert msg['path']          == '/etc/pki/tls/certs/test.crt'
+            assert msg['common_name']   == 'test.example.com'
+            assert msg['process']       == '/usr/bin/curl'
+            assert msg['pid']           == 12345
+            assert msg['pod_name']      == 'my-pod'
+            assert msg['namespace']     == 'default'
+            assert msg['workload_kind'] == 'Deployment'
+            assert msg['workload_name'] == 'my-app'
+            assert msg['san_dns_names'] == ['test.example.com', 'www.test.example.com']
+            assert msg['is_expired']    is True   # not_after is 2025-01-01, now > that
+
+    def test_publish_uses_cert_path_as_key(self, monkeypatch, sample_cert_info):
+        """Message key is the certificate file path for partition locality."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.publish(sample_cert_info)
+
+            _, send_kwargs = mock_producer.send.call_args
+            assert send_kwargs['key'] == '/etc/pki/tls/certs/test.crt'
+
+    def test_publish_sends_to_configured_topic(self, monkeypatch, sample_cert_info):
+        """Message is sent to the topic specified in configuration."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='my-topic')
+            publisher.publish(sample_cert_info)
+
+            topic_arg = mock_producer.send.call_args[0][0]
+            assert topic_arg == 'my-topic'
+
+    # ── error handling ────────────────────────────────────────────────────────
+
+    def test_publish_silent_on_send_error(self, monkeypatch, sample_cert_info):
+        """publish() logs a warning and never raises when send() throws."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_producer.send.side_effect = Exception('broker unavailable')
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.publish(sample_cert_info)   # must not raise
+
+    def test_on_error_callback_logs_warning(self, monkeypatch, caplog):
+        """_on_error() logs a warning without raising."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            with caplog.at_level(logging.WARNING):
+                publisher._on_error(Exception('delivery failed'))
+
+            assert any('delivery' in r.message.lower() or 'kafka' in r.message.lower()
+                       for r in caplog.records)
+
+    # ── close ─────────────────────────────────────────────────────────────────
+
+    def test_close_flushes_and_closes_producer(self, monkeypatch):
+        """close() calls flush() then close() on the underlying producer."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock, call
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.close()
+
+            mock_producer.flush.assert_called_once()
+            mock_producer.close.assert_called_once()
+
+    def test_close_noop_when_producer_is_none(self):
+        """close() is silent when _producer is None (Kafka not available)."""
+        from cert_analyzer import KafkaPublisher
+        publisher = KafkaPublisher.__new__(KafkaPublisher)
+        publisher._producer = None
+        publisher._topic = 't'
+        publisher.close()   # must not raise
+
+    # ── integration with CertificateAnalyzer ─────────────────────────────────
+
+    def test_analyzer_publishes_new_cert_to_kafka(
+        self, analyzer, temp_dir, monkeypatch
+    ):
+        """process_event publishes a new certificate to Kafka exactly once."""
+        from unittest.mock import MagicMock, patch
+        import cert_analyzer as _ca
+
+        # Attach a mock KafkaPublisher to the analyzer
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        cert, _ = TestCertificateGeneration.generate_certificate('kafka.example.com', 365)
+        path = os.path.join(temp_dir, 'kafka.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        # Simulate a Tetragon event pointing at our cert file
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = '/usr/bin/curl'
+        mock_kprobe.process.pid.value = 99
+        mock_kprobe.process.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+
+        analyzer.process_event(mock_event)
+
+        mock_publisher.publish.assert_called_once()
+        published_cert = mock_publisher.publish.call_args[0][0]
+        assert published_cert.path == path
+
+    def test_analyzer_does_not_publish_redetected_cert(
+        self, analyzer, temp_dir, monkeypatch
+    ):
+        """process_event does NOT publish to Kafka for re-detected known certs."""
+        from unittest.mock import MagicMock
+        import cert_analyzer as _ca
+
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        cert, _ = TestCertificateGeneration.generate_certificate('redetect.example.com', 365)
+        path = os.path.join(temp_dir, 'redetect.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        def make_event(p):
+            mock_event = MagicMock()
+            mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+            mock_kprobe = MagicMock()
+            mock_kprobe.process.binary = '/usr/bin/curl'
+            mock_kprobe.process.pid.value = 99
+            mock_kprobe.process.HasField.return_value = False
+            mock_arg = MagicMock()
+            mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+            mock_arg.file_arg.path = p
+            mock_kprobe.args = [mock_arg]
+            mock_event.process_kprobe = mock_kprobe
+            return mock_event
+
+        # First detection — should publish
+        analyzer.process_event(make_event(path))
+        assert mock_publisher.publish.call_count == 1
+
+        # Second detection — same file, already in known_certs, must NOT publish again
+        analyzer.process_event(make_event(path))
+        assert mock_publisher.publish.call_count == 1
+
+    def test_analyzer_without_kafka_publisher_works_normally(
+        self, analyzer, temp_dir
+    ):
+        """analyzer continues working normally when kafka_publisher is None."""
+        assert analyzer.kafka_publisher is None
+
+        cert, _ = TestCertificateGeneration.generate_certificate('nokafka.example.com', 365)
+        path = os.path.join(temp_dir, 'nokafka.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = '/usr/bin/test'
+        mock_kprobe.process.pid.value = 1
+        mock_kprobe.process.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+
+        # Must not raise even with no Kafka publisher
+        analyzer.process_event(mock_event)
+        assert path + ':0:' in ''.join(analyzer.known_certs.keys())

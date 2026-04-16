@@ -8,6 +8,7 @@ EXTENDED: Kubernetes pod enrichment via k8s_enricher
 
 import os
 import sys
+import json
 import logging
 import grpc
 from datetime import datetime, timedelta
@@ -49,6 +50,17 @@ try:
     JKS_AVAILABLE = True
 except ImportError:
     JKS_AVAILABLE = False
+
+# Import Kafka producer - optional, degrades gracefully if unavailable.
+# When disabled (default) the analyzer publishes to Prometheus only.
+# Enable via [kafka] enabled = true in cert-analyzer.conf or KAFKA_ENABLED=true.
+# Install with: pip install kafka-python
+try:
+    from kafka import KafkaProducer
+    from kafka.errors import KafkaError
+    KAFKA_AVAILABLE = True
+except ImportError:
+    KAFKA_AVAILABLE = False
 
 # The Tetragon version this build was compiled against.
 # Must be kept in lockstep with the version used in the Containerfile build arg.
@@ -287,6 +299,159 @@ class PrometheusMetrics:
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
+
+
+
+
+class KafkaPublisher:
+    """
+    Optional Kafka publisher for new certificate discovery events.
+
+    Publishes a JSON message to a configurable topic each time a certificate
+    is seen for the first time. Re-detected known certificates are not
+    published — Prometheus handles ongoing state; Kafka handles the event
+    stream of new discoveries.
+
+    The publisher is a no-op when Kafka is disabled or unavailable. All
+    errors are logged as warnings and never propagate — a broker outage must
+    never prevent the analyzer from continuing to work with Prometheus only.
+
+    Message schema (all fields present, empty string when not applicable):
+    {
+        "event_type":       "certificate_discovered",
+        "detected_at":      "2026-03-31T10:00:00.000000",   # ISO 8601 UTC
+        "path":             "/etc/pki/tls/certs/ca-bundle.crt",
+        "cert_index":       0,
+        "subject":          "CN=...",
+        "issuer":           "CN=...",
+        "serial_number":    "abc123",
+        "common_name":      "example.com",
+        "san_dns_names":    ["example.com", "www.example.com"],
+        "not_before":       "2024-01-01T00:00:00",
+        "not_after":        "2025-01-01T00:00:00",
+        "days_until_expiry": 44.9,
+        "is_expired":       false,
+        "process":          "/usr/bin/curl",
+        "pid":              12345,
+        "namespace":        "default",
+        "pod_name":         "my-pod-abc",
+        "workload_kind":    "Deployment",
+        "workload_name":    "my-app",
+        "app_label":        "my-app",
+        "container_name":   "main",
+        "container_image":  "my-app:1.0",
+        "checksum":         ""
+    }
+    """
+
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        topic: str,
+        security_protocol: str = 'PLAINTEXT',
+        sasl_mechanism: str = '',
+        sasl_username: str = '',
+        sasl_password: str = '',
+    ):
+        self._topic = topic
+        self._producer: Optional['KafkaProducer'] = None
+
+        if not KAFKA_AVAILABLE:
+            logger.warning(
+                "kafka-python is not installed — Kafka publishing disabled. "
+                "Install with: pip install kafka-python"
+            )
+            return
+
+        producer_kwargs = {
+            'bootstrap_servers': [s.strip() for s in bootstrap_servers.split(',')],
+            'value_serializer':  lambda v: json.dumps(v).encode('utf-8'),
+            'key_serializer':    lambda k: k.encode('utf-8') if k else None,
+            'acks':              'all',
+            'retries':           3,
+            'retry_backoff_ms':  200,
+        }
+
+        if security_protocol and security_protocol != 'PLAINTEXT':
+            producer_kwargs['security_protocol'] = security_protocol
+
+        if sasl_mechanism:
+            producer_kwargs['sasl_mechanism']         = sasl_mechanism
+            producer_kwargs['sasl_plain_username']    = sasl_username
+            producer_kwargs['sasl_plain_password']    = sasl_password
+
+        try:
+            self._producer = KafkaProducer(**producer_kwargs)
+            logger.info(
+                f"Kafka publisher initialised — "
+                f"brokers: {bootstrap_servers}, topic: {topic}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialise Kafka producer — "
+                f"Kafka publishing disabled: {e}"
+            )
+
+    def publish(self, cert_info: 'CertificateInfo') -> None:
+        """
+        Publish a new certificate discovery event.
+
+        Delivery is asynchronous — the producer's internal send queue handles
+        batching and retries. On_delivery callbacks log errors but never raise.
+        """
+        if self._producer is None:
+            return
+
+        message = {
+            'event_type':        'certificate_discovered',
+            'detected_at':       datetime.utcnow().isoformat(),
+            'path':              cert_info.path,
+            'cert_index':        cert_info.cert_index,
+            'subject':           cert_info.subject,
+            'issuer':            cert_info.issuer,
+            'serial_number':     cert_info.serial_number,
+            'common_name':       cert_info.common_name,
+            'san_dns_names':     cert_info.san_dns_names,
+            'not_before':        cert_info.not_before.isoformat(),
+            'not_after':         cert_info.not_after.isoformat(),
+            'days_until_expiry': round(cert_info.days_until_expiry, 2),
+            'is_expired':        cert_info.is_expired,
+            'process':           cert_info.process,
+            'pid':               cert_info.pid,
+            'namespace':         cert_info.namespace,
+            'pod_name':          cert_info.pod_name,
+            'workload_kind':     cert_info.workload_kind,
+            'workload_name':     cert_info.workload_name,
+            'app_label':         cert_info.app_label,
+            'container_name':    cert_info.container_name,
+            'container_image':   cert_info.container_image,
+            'checksum':          cert_info.checksum,
+        }
+
+        # Use cert path as the message key — ensures all events for the same
+        # certificate file land on the same partition for ordered consumption
+        key = cert_info.path
+
+        try:
+            self._producer.send(
+                self._topic,
+                key=key,
+                value=message,
+            ).add_errback(self._on_error)
+        except Exception as e:
+            logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
+
+    def _on_error(self, exc: Exception) -> None:
+        logger.warning(f"Kafka delivery error: {exc}")
+
+    def close(self) -> None:
+        """Flush pending messages and close the producer cleanly."""
+        if self._producer is not None:
+            try:
+                self._producer.flush(timeout=5)
+                self._producer.close()
+            except Exception as e:
+                logger.warning(f"Error closing Kafka producer: {e}")
 
 
 CACHE_MIN_SIZE: int = 10_000
@@ -545,11 +710,13 @@ class CertificateAnalyzer:
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
                  health_server: Optional['HealthServer'] = None,
-                 host_prefix: str = ''):
+                 host_prefix: str = '',
+                 kafka_publisher: Optional['KafkaPublisher'] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
         self.host_prefix = host_prefix
+        self.kafka_publisher = kafka_publisher
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -1186,6 +1353,10 @@ class CertificateAnalyzer:
             self.log_certificate_status(cert_info)
             self.known_certs[cert_info.unique_key] = cert_info
 
+            # Publish new certificate discovery to Kafka if enabled
+            if self.kafka_publisher is not None:
+                self.kafka_publisher.publish(cert_info)
+
         self._update_cache_metrics()
 
     def get_runtime_tetragon_version(self, stub) -> str:
@@ -1473,6 +1644,15 @@ def main():
     # Kubernetes where the node root filesystem is bind-mounted at /host
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
 
+    # ── Kafka (optional) ──────────────────────────────────────────────────────
+    kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
+    kafka_bootstrap        = cfg(cp, 'kafka', 'bootstrap_servers', 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+    kafka_topic            = cfg(cp, 'kafka', 'topic',             'KAFKA_TOPIC',             'cert-analyzer-events')
+    kafka_security         = cfg(cp, 'kafka', 'security_protocol', 'KAFKA_SECURITY_PROTOCOL', 'PLAINTEXT')
+    kafka_sasl_mechanism   = cfg(cp, 'kafka', 'sasl_mechanism',    'KAFKA_SASL_MECHANISM',    '')
+    kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
+    kafka_sasl_password    = cfg(cp, 'kafka', 'sasl_password',     'KAFKA_SASL_PASSWORD',     '')
+
     logging.getLogger().setLevel(getattr(logging, log_level.upper()))
 
     logger.info("="*60)
@@ -1491,10 +1671,28 @@ def main():
     logger.info(f"Scan interval:     {scan_interval} seconds")
     logger.info(f"Filter self events: {filter_self}")
     logger.info(f"Host prefix:       '{host_prefix}' (empty = standalone mode)")
+    logger.info(f"Kafka enabled:     {kafka_enabled}")
+    if kafka_enabled:
+        logger.info(f"Kafka brokers:     {kafka_bootstrap}")
+        logger.info(f"Kafka topic:       {kafka_topic}")
+        logger.info(f"Kafka security:    {kafka_security}")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
     start_http_server(metrics_port)
+
+    # Initialise optional Kafka publisher before the analyzer so it can be
+    # passed in at construction time
+    kafka_publisher = None
+    if kafka_enabled:
+        kafka_publisher = KafkaPublisher(
+            bootstrap_servers=kafka_bootstrap,
+            topic=kafka_topic,
+            security_protocol=kafka_security,
+            sasl_mechanism=kafka_sasl_mechanism,
+            sasl_username=kafka_sasl_username,
+            sasl_password=kafka_sasl_password,
+        )
 
     # HealthServer.is_ready() reads analyzer.metrics.last_event_timestamp, so
     # it needs the analyzer reference. CertificateAnalyzer.start() calls
@@ -1503,7 +1701,8 @@ def main():
     # passing it to HealthServer, then wiring the health server back in.
     analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
                                    filter_self_events=filter_self,
-                                   host_prefix=host_prefix)
+                                   host_prefix=host_prefix,
+                                   kafka_publisher=kafka_publisher)
 
     health = HealthServer(
         analyzer=analyzer,
@@ -1532,10 +1731,14 @@ def main():
         analyzer.start()
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
+        if kafka_publisher is not None:
+            kafka_publisher.close()
         health.stop()
         sys.exit(0)
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
+        if kafka_publisher is not None:
+            kafka_publisher.close()
         health.stop()
         sys.exit(1)
 
