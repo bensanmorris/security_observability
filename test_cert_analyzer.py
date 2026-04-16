@@ -2966,6 +2966,8 @@ class TestKafkaPublisher:
         self, analyzer, temp_dir
     ):
         """analyzer continues working normally when kafka_publisher is None."""
+        from unittest.mock import MagicMock
+
         assert analyzer.kafka_publisher is None
 
         cert, _ = TestCertificateGeneration.generate_certificate('nokafka.example.com', 365)
