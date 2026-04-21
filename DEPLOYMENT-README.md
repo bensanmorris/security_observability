@@ -783,6 +783,79 @@ sasl_password = your-password
 
 If the Kafka broker is unreachable at startup the analyzer logs a warning and continues with Prometheus-only operation — a broker outage never prevents certificate detection. Delivery errors are logged at `WARNING` level and do not affect the health probes or readiness state.
 
+*Verifying Kafka end to end*
+
+For local testing on RHEL9, run a Kafka broker in a container. The critical detail is that both the Kafka container and the cert-analyzer container must be on the same network, and Kafka must advertise `localhost` as its listener address — otherwise `kafka-python` will connect successfully for metadata but then fail to reach the broker address that Kafka advertises back:
+
+```bash
+# Run Kafka with --network host and explicit advertised listener
+podman run -d \
+  --name kafka-test \
+  --network host \
+  -e KAFKA_NODE_ID=1 \
+  -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093 \
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
+  docker.io/apache/kafka:latest
+```
+
+Wait about 10 seconds for the broker to start, then verify it is ready:
+
+```bash
+podman exec kafka-test /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+```
+
+Enable Kafka in the cert-analyzer. For the RPM service edit `/etc/cert-analyzer/cert-analyzer.conf`. For the container pass env vars — since `run-rootful.sh` already uses `--network host`, `localhost:9092` reaches the Kafka container directly:
+
+```bash
+-e KAFKA_ENABLED=true \
+-e KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
+-e KAFKA_TOPIC=cert-analyzer-events
+```
+
+Restart the analyzer and confirm Kafka initialised successfully in the logs:
+
+```bash
+sudo podman logs cert-analyzer | grep -i kafka
+# Expected:
+# Kafka enabled:     True
+# Kafka brokers:     localhost:9092
+# Kafka topic:       cert-analyzer-events
+# Kafka publisher initialised — brokers: localhost:9092, topic: cert-analyzer-events
+```
+
+If instead you see `Node 1 connection failed -- refreshing metadata` it means Kafka is advertising an internal hostname rather than `localhost` — recreate the Kafka container with the `KAFKA_ADVERTISED_LISTENERS` env var set as shown above.
+
+Trigger a detection to publish a message:
+
+```bash
+cat /etc/pki/tls/certs/ca-bundle.crt
+```
+
+Then consume from the topic to confirm the message arrived:
+
+```bash
+podman exec kafka-test /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic cert-analyzer-events \
+  --from-beginning
+```
+
+Each message is a JSON object. Press `Ctrl+C` to stop the consumer. If the topic does not exist yet (`UNKNOWN_TOPIC_OR_PARTITION`) it means no messages have been published — check the analyzer logs for Kafka errors and confirm at least one new certificate was detected since the analyzer started with Kafka enabled.
+
+Tear down the test broker when finished:
+
+```bash
+podman stop kafka-test && podman rm kafka-test
+```
+
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
 **Resource limits** — set CPU and memory limits on the cert-analyzer container. Expected memory usage is 50–150MB depending on the number of certificates being tracked.
