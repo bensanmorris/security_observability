@@ -7,6 +7,7 @@ import pytest
 import logging
 import tempfile
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from cryptography import x509
@@ -2989,3 +2990,323 @@ class TestKafkaPublisher:
         # Must not raise even with no Kafka publisher
         analyzer.process_event(mock_event)
         assert path + ':0:' in ''.join(analyzer.known_certs.keys())
+
+
+class TestKafkaReconnection:
+    """
+    Tests for KafkaPublisher automatic reconnection behaviour.
+
+    Covers:
+    - producer is nullified after a send failure so next publish retries
+    - _connect() respects the cooldown period between reconnect attempts
+    - _connect() succeeds after broker comes back up
+    - publish() reconnects automatically when producer is None
+    - publish() skips send if reconnect fails and cooldown has not elapsed
+    - multiple sequential failures do not raise
+    - _connect() closes broken producer before recreating it
+    - cooldown resets after a successful reconnect
+    - reconnect is attempted on first publish even if init failed
+    """
+
+    @pytest.fixture
+    def reconnect_publisher(self, monkeypatch):
+        """
+        A KafkaPublisher constructed with a working producer, ready for
+        reconnect tests. Returns (publisher, mock_producer_class) so tests
+        can control subsequent KafkaProducer() calls.
+        """
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            # Reset call count after init so tests start from a clean slate
+            mock_cls.reset_mock()
+            yield publisher, mock_cls
+
+    @pytest.fixture
+    def sample_cert_info(self):
+        """Minimal CertificateInfo for reconnect tests."""
+        from cert_analyzer import CertificateInfo
+        return CertificateInfo(
+            path='/etc/pki/tls/certs/test.crt',
+            subject='CN=test.example.com',
+            issuer='CN=Test CA',
+            serial_number='abc123',
+            not_before=datetime(2024, 1, 1),
+            not_after=datetime(2025, 1, 1),
+            process='/usr/bin/curl',
+            pid=1,
+            namespace='',
+            common_name='test.example.com',
+            san_dns_names=[],
+            cert_index=0,
+            pod_name='',
+            workload_kind='',
+            workload_name='',
+            pod_labels=None,
+            app_label='',
+            container_name='',
+            container_image='',
+            checksum='',
+        )
+
+    # ── producer nullified after send failure ─────────────────────────────────
+
+    def test_send_failure_nullifies_producer(self, monkeypatch, sample_cert_info):
+        """A send() exception sets _producer to None so next publish retries."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_producer.send.side_effect = Exception('broker down')
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher._producer is not None
+
+            publisher.publish(sample_cert_info)
+
+            assert publisher._producer is None, \
+                'producer should be nullified after send failure'
+
+    # ── cooldown ──────────────────────────────────────────────────────────────
+
+    def test_connect_respects_cooldown(self, monkeypatch, sample_cert_info):
+        """_connect() returns False immediately if called within the cooldown window."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            # Nullify producer and set last attempt to now
+            publisher._producer = None
+            publisher._last_connect_attempt = time.time()
+
+            mock_cls.reset_mock()
+            result = publisher._connect()
+
+            assert result is False
+            mock_cls.assert_not_called()
+
+    def test_connect_proceeds_after_cooldown(self, monkeypatch, sample_cert_info):
+        """_connect() creates a new producer once the cooldown has elapsed."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            # Simulate cooldown already elapsed
+            publisher._producer = None
+            publisher._last_connect_attempt = 0.0
+
+            mock_cls.reset_mock()
+            result = publisher._connect()
+
+            assert result is True
+            mock_cls.assert_called_once()
+            assert publisher._producer is not None
+
+    def test_publish_skips_send_when_reconnect_on_cooldown(
+        self, monkeypatch, sample_cert_info
+    ):
+        """publish() silently skips sending if reconnect is still on cooldown."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            publisher._producer = None
+            publisher._last_connect_attempt = time.time()  # cooldown active
+
+            mock_cls.reset_mock()
+            publisher.publish(sample_cert_info)  # must not raise
+
+            mock_cls.assert_not_called()  # no reconnect attempted
+
+    # ── automatic reconnect ───────────────────────────────────────────────────
+
+    def test_publish_reconnects_when_producer_is_none(
+        self, monkeypatch, sample_cert_info
+    ):
+        """publish() calls _connect() and sends when producer is None and cooldown elapsed."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            # Simulate broker restart — nullify producer and clear cooldown
+            publisher._producer = None
+            publisher._last_connect_attempt = 0.0
+
+            mock_cls.reset_mock()
+            mock_producer.reset_mock()
+
+            publisher.publish(sample_cert_info)
+
+            mock_cls.assert_called_once()          # reconnected
+            mock_producer.send.assert_called_once() # message sent
+
+    def test_publish_reconnects_and_sends_correct_message(
+        self, monkeypatch, sample_cert_info
+    ):
+        """After reconnect the published message has the correct event_type and path."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            publisher._producer = None
+            publisher._last_connect_attempt = 0.0
+            mock_cls.reset_mock()
+            mock_producer.reset_mock()
+
+            publisher.publish(sample_cert_info)
+
+            _, send_kwargs = mock_producer.send.call_args
+            assert send_kwargs['value']['event_type'] == 'certificate_discovered'
+            assert send_kwargs['value']['path'] == '/etc/pki/tls/certs/test.crt'
+
+    # ── broken producer replaced on reconnect ─────────────────────────────────
+
+    def test_connect_closes_broken_producer_before_reconnect(
+        self, monkeypatch, sample_cert_info
+    ):
+        """_connect() calls close() on an existing broken producer before creating a new one."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            broken_producer = MagicMock()
+            new_producer = MagicMock()
+            mock_cls.side_effect = [broken_producer, new_producer]
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher._producer is broken_producer
+
+            # Simulate a reconnect with cooldown cleared
+            publisher._last_connect_attempt = 0.0
+            publisher._connect()
+
+            broken_producer.close.assert_called_once()
+            assert publisher._producer is new_producer
+
+    # ── multiple sequential failures ──────────────────────────────────────────
+
+    def test_multiple_sequential_failures_never_raise(
+        self, monkeypatch, sample_cert_info
+    ):
+        """Three consecutive send failures all log warnings and never raise."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_producer.send.side_effect = Exception('broker down')
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            for _ in range(3):
+                publisher._last_connect_attempt = 0.0  # bypass cooldown each time
+                publisher.publish(sample_cert_info)     # must not raise
+
+    # ── reconnect after init failure ──────────────────────────────────────────
+
+    def test_reconnect_attempted_if_init_failed(
+        self, monkeypatch, sample_cert_info
+    ):
+        """If the initial connection fails, publish() retries once cooldown elapses."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            # First call (init) fails, second call (reconnect) succeeds
+            working_producer = MagicMock()
+            mock_cls.side_effect = [Exception('broker down on startup'), working_producer]
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher._producer is None  # init failed
+
+            # Clear cooldown to allow immediate reconnect
+            publisher._last_connect_attempt = 0.0
+
+            publisher.publish(sample_cert_info)
+
+            assert publisher._producer is working_producer
+            working_producer.send.assert_called_once()
+
+    # ── reconnect logs ─────────────────────────────────────────────────────────
+
+    def test_reconnect_failure_logs_warning(self, monkeypatch, caplog):
+        """A failed reconnect attempt logs a warning with retry interval."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.side_effect = Exception('broker down')
+            from cert_analyzer import KafkaPublisher
+
+            with caplog.at_level(logging.WARNING):
+                publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+                publisher._last_connect_attempt = 0.0
+                publisher._connect()
+
+            assert any('retry' in r.message.lower() or 'failed' in r.message.lower()
+                       for r in caplog.records)
+
+    def test_successful_reconnect_logs_info(self, monkeypatch, caplog):
+        """A successful reconnect logs an info message."""
+        import cert_analyzer as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher._producer = None
+            publisher._last_connect_attempt = 0.0
+
+            with caplog.at_level(logging.INFO):
+                publisher._connect()
+
+            assert any('connected' in r.message.lower() or 'initialised' in r.message.lower()
+                       for r in caplog.records)

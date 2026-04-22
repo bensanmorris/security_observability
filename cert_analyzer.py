@@ -357,6 +357,9 @@ class KafkaPublisher:
     ):
         self._topic = topic
         self._producer: Optional['KafkaProducer'] = None
+        self._producer_kwargs: dict = {}
+        self._last_connect_attempt: float = 0.0
+        self._reconnect_cooldown: float = 30.0  # seconds between reconnect attempts
 
         if not KAFKA_AVAILABLE:
             logger.warning(
@@ -365,7 +368,7 @@ class KafkaPublisher:
             )
             return
 
-        producer_kwargs = {
+        self._producer_kwargs = {
             'bootstrap_servers': [s.strip() for s in bootstrap_servers.split(',')],
             'value_serializer':  lambda v: json.dumps(v).encode('utf-8'),
             'key_serializer':    lambda k: k.encode('utf-8') if k else None,
@@ -375,34 +378,65 @@ class KafkaPublisher:
         }
 
         if security_protocol and security_protocol != 'PLAINTEXT':
-            producer_kwargs['security_protocol'] = security_protocol
+            self._producer_kwargs['security_protocol'] = security_protocol
 
         if sasl_mechanism:
-            producer_kwargs['sasl_mechanism']         = sasl_mechanism
-            producer_kwargs['sasl_plain_username']    = sasl_username
-            producer_kwargs['sasl_plain_password']    = sasl_password
+            self._producer_kwargs['sasl_mechanism']         = sasl_mechanism
+            self._producer_kwargs['sasl_plain_username']    = sasl_username
+            self._producer_kwargs['sasl_plain_password']    = sasl_password
+
+        self._connect(bootstrap_servers, topic)
+
+    def _connect(self, bootstrap_servers: str = '', topic: str = '') -> bool:
+        """
+        Attempt to create a KafkaProducer. Returns True on success.
+        Respects a cooldown period to avoid hammering a down broker.
+        """
+        now = time.time()
+        if now - self._last_connect_attempt < self._reconnect_cooldown:
+            return False
+        self._last_connect_attempt = now
+
+        # Close any existing broken producer before reconnecting
+        if self._producer is not None:
+            try:
+                self._producer.close(timeout=2)
+            except Exception:
+                pass
+            self._producer = None
 
         try:
-            self._producer = KafkaProducer(**producer_kwargs)
+            self._producer = KafkaProducer(**self._producer_kwargs)
+            label = bootstrap_servers or str(self._producer_kwargs.get('bootstrap_servers', ''))
+            label_topic = topic or self._topic
             logger.info(
-                f"Kafka publisher initialised — "
-                f"brokers: {bootstrap_servers}, topic: {topic}"
+                f"Kafka producer connected — "
+                f"brokers: {label}, topic: {label_topic}"
             )
+            return True
         except Exception as e:
             logger.warning(
-                f"Failed to initialise Kafka producer — "
-                f"Kafka publishing disabled: {e}"
+                f"Kafka producer connection failed (will retry in "
+                f"{int(self._reconnect_cooldown)}s): {e}"
             )
+            return False
 
     def publish(self, cert_info: 'CertificateInfo') -> None:
         """
         Publish a new certificate discovery event.
 
         Delivery is asynchronous — the producer's internal send queue handles
-        batching and retries. On_delivery callbacks log errors but never raise.
+        batching and retries. If the producer is unavailable (e.g. broker
+        restarted) a reconnect is attempted subject to a cooldown period.
+        Errors are always logged as warnings and never raised.
         """
-        if self._producer is None:
+        if not KAFKA_AVAILABLE:
             return
+
+        # Attempt reconnection if producer is absent
+        if self._producer is None:
+            if not self._connect():
+                return
 
         message = {
             'event_type':        'certificate_discovered',
@@ -442,6 +476,8 @@ class KafkaPublisher:
             ).add_errback(self._on_error)
         except Exception as e:
             logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
+            # Nullify the producer so the next publish attempt triggers reconnect
+            self._producer = None
 
     def _on_error(self, exc: Exception) -> None:
         logger.warning(f"Kafka delivery error: {exc}")
@@ -1289,6 +1325,12 @@ class CertificateAnalyzer:
         # Translate host paths — in Kubernetes the cert-analyzer runs in a
         # container where /host is a bind mount of the node root filesystem.
         # In standalone mode this prefix is empty so paths are used as-is.
+        #
+        # Tetragon may report either the prefixed path (e.g. /host/etc/pki/...)
+        # when a container process accesses the file via the bind mount, or the
+        # bare host path (e.g. /etc/pki/...) when a host process opens it.
+        # Normalise to the prefixed form so the cert file is always resolvable
+        # inside the container, but avoid double-prefixing paths already prefixed.
         if cert_path and self.host_prefix:
             if not cert_path.startswith(self.host_prefix):
                 cert_path = self.host_prefix + cert_path
