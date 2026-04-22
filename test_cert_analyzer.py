@@ -2796,8 +2796,8 @@ class TestKafkaPublisher:
             assert msg['san_dns_names'] == ['test.example.com', 'www.test.example.com']
             assert msg['is_expired']    is True   # not_after is 2025-01-01, now > that
 
-    def test_publish_uses_cert_path_as_key(self, monkeypatch, sample_cert_info):
-        """Message key is the certificate file path for partition locality."""
+    def test_publish_uses_unique_key_as_partition_key(self, monkeypatch, sample_cert_info):
+        """Message key is unique_key (path:cert_index:serial) for partition locality."""
         import cert_analyzer as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
@@ -2811,7 +2811,12 @@ class TestKafkaPublisher:
             publisher.publish(sample_cert_info)
 
             _, send_kwargs = mock_producer.send.call_args
-            assert send_kwargs['key'] == '/etc/pki/tls/certs/test.crt'
+            expected_key = sample_cert_info.unique_key  # path:cert_index:serial
+            assert send_kwargs['key'] == expected_key
+            # Verify it contains all three components
+            assert sample_cert_info.path in expected_key
+            assert str(sample_cert_info.cert_index) in expected_key
+            assert sample_cert_info.serial_number in expected_key
 
     def test_publish_sends_to_configured_topic(self, monkeypatch, sample_cert_info):
         """Message is sent to the topic specified in configuration."""

@@ -464,9 +464,13 @@ class KafkaPublisher:
             'checksum':          cert_info.checksum,
         }
 
-        # Use cert path as the message key — ensures all events for the same
-        # certificate file land on the same partition for ordered consumption
-        key = cert_info.path
+        # Use unique_key (path:cert_index:serial) as the partition key.
+        # This matches the internal cache key used by known_certs and gives
+        # consumers a stable, cryptographically-scoped identifier that survives
+        # cert rotation at the same path. All events for the same certificate
+        # (same path, index, and serial) land on the same partition for ordered
+        # consumption, while a rotated cert at the same path gets a new key.
+        key = cert_info.unique_key
 
         try:
             self._producer.send(
