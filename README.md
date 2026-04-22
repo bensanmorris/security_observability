@@ -26,6 +26,7 @@ Detect expired TLS certificates at runtime without modifying applications. Get r
 | 🔐 **Keystore password handling** | Configurable password strategy for encrypted JKS and PKCS12 keystores with failed-path caching to avoid repeated crypto overhead |
 | 🔢 **Build version tracking** | Both cert-analyzer and Tetragon build versions stamped at build time and exposed via Prometheus `Info` metric — detects proto-incompatible Tetragon upgrades at runtime |
 | 🔑 **Optional SHA-256 checksums** | Per-certificate SHA-256 fingerprints for rotation detection and cross-path correlation, surfaced as a Prometheus label when enabled |
+| 📨 **Optional Kafka event streaming** | Publishes new certificate discovery events as JSON to a configurable Kafka topic — disabled by default, supports PLAINTEXT and SASL/SSL, reconnects automatically after broker restarts |
 | 📦 **Self-contained RPM** | Installable RPM for standalone RHEL8/9 deployment — bundles Python virtualenv, systemd unit, and INI config file; no internet access required at install time |
 | 🐳 **UBI8 and UBI9 containers** | Multi-arch container images for Kubernetes DaemonSet deployment, published to GHCR on every tagged release |
 | 🔁 **CI/CD pipeline** | GitHub Actions pipeline builds both container images and the RPM, runs tests across Python 3.9–3.12, and publishes all artifacts to a GitHub Release on tag push |
