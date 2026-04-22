@@ -6,3 +6,8 @@ cryptography==41.0.7      # also provides PKCS12 (.p12/.pfx) support
 pyyaml==6.0.1
 kubernetes>=28.1.0
 pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
+
+# Optional: Kafka event publishing
+# Enable by setting [kafka] enabled = true in cert-analyzer.conf or KAFKA_ENABLED=true.
+# The analyzer degrades gracefully to Prometheus-only if this package is absent.
+kafka-python==2.0.2

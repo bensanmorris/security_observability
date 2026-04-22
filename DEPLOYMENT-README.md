@@ -22,22 +22,24 @@ The full production stack consists of five components:
 │  └──────────────────────┘          └────────┬──────────┘    │
 │                                             │ :9090         │
 └─────────────────────────────────────────────┼───────────────┘
-                                              │ scrape
-                                    ┌─────────▼──────────┐
-                                    │    Prometheus      │
-                                    │  Stores metrics &  │
-                                    │  evaluates rules   │
-                                    └─────────┬──────────┘
-                                              │ fires alerts
-                                    ┌─────────▼──────────┐
-                                    │    Alertmanager    │
-                                    │  Routes & notifies │
-                                    └─────────┬──────────┘
-                                              │
-                                    ┌─────────▼──────────┐
-                                    │      Grafana       │
-                                    │  Visualises metrics│
-                                    └────────────────────┘
+                              ┌───────────────┼───────────────────┐
+                              │               │                   │
+                    ┌─────────▼──────────┐    │  (optional)       │
+                    │    Prometheus      │    ▼                   │
+                    │  Stores metrics &  │  ┌─────────────────┐   │
+                    │  evaluates rules   │  │     Kafka       │   │
+                    └─────────┬──────────┘  │  New cert event │   │
+                              │ fires alerts│  stream         │   │
+                    ┌─────────▼──────────┐  └─────────────────┘   │
+                    │    Alertmanager    │                        │
+                    │  Routes & notifies │                        │
+                    └─────────┬──────────┘                        │
+                              │                                   │
+                    ┌─────────▼──────────┐                        │
+                    │      Grafana       │                        │
+                    │  Visualises metrics│                        │
+                    └────────────────────┘                        │
+                              └───────────────────────────────────┘
 ```
 
 **Tetragon** is the eyes — it uses eBPF to intercept certificate file access at the kernel level and exposes events via a gRPC socket on each node.
@@ -197,6 +199,17 @@ host_prefix =
 [passwords]
 # jks_password =
 # pkcs12_password =
+
+[kafka]
+# Set enabled = true to publish new certificate discovery events to Kafka.
+# When disabled (the default) the analyzer publishes to Prometheus only.
+enabled = false
+bootstrap_servers = localhost:9092
+topic = cert-analyzer-events
+security_protocol = PLAINTEXT
+# sasl_mechanism = PLAIN
+# sasl_username  =
+# sasl_password  =
 ```
 
 Values in the config file take precedence over environment variables, which in turn take precedence over built-in defaults. This means the Kubernetes deployment path (which uses environment variables and has no config file) continues to work unchanged.
@@ -680,6 +693,183 @@ When enabled, checksums are surfaced in three places:
 - **Debug logs** — the SHA-256 is logged alongside the subject and serial number at DEBUG level
 
 When checksums are disabled (the default), the `checksum` label is present but empty on all metrics — existing queries and dashboards are unaffected.
+
+**Kafka event publishing (optional)** — cert-analyzer can publish a JSON message to a Kafka topic each time a certificate is seen for the first time. This is disabled by default and completely independent of Prometheus — enabling it does not affect metrics, alerts, or the health probes. It is intended for downstream consumers that need a real-time event stream of certificate discoveries: SIEMs, ticketing integrations, audit pipelines, or custom alerting systems.
+
+Each message is published to a single configurable topic with the certificate file path as the partition key, ensuring all events for the same certificate file land on the same partition for ordered consumption. The message schema is:
+
+```json
+{
+  "event_type":        "certificate_discovered",
+  "detected_at":       "2026-03-31T10:00:00.000000",
+  "path":              "/etc/pki/tls/certs/ca-bundle.crt",
+  "cert_index":        0,
+  "subject":           "CN=example.com",
+  "issuer":            "CN=Example CA",
+  "serial_number":     "abc123",
+  "common_name":       "example.com",
+  "san_dns_names":     ["example.com", "www.example.com"],
+  "not_before":        "2024-01-01T00:00:00",
+  "not_after":         "2025-01-01T00:00:00",
+  "days_until_expiry": 44.9,
+  "is_expired":        false,
+  "process":           "/usr/bin/curl",
+  "pid":               12345,
+  "namespace":         "default",
+  "pod_name":          "my-pod",
+  "workload_kind":     "Deployment",
+  "workload_name":     "my-app",
+  "app_label":         "my-app",
+  "container_name":    "main",
+  "container_image":   "my-app:1.0",
+  "checksum":          ""
+}
+```
+
+To enable in standalone RPM deployment, edit `/etc/cert-analyzer/cert-analyzer.conf`:
+
+```ini
+[kafka]
+enabled = true
+bootstrap_servers = broker1:9092,broker2:9092
+topic = cert-analyzer-events
+security_protocol = PLAINTEXT
+```
+
+For authenticated brokers (SASL/SSL), set the additional fields:
+
+```ini
+[kafka]
+enabled = true
+bootstrap_servers = broker1:9092
+topic = cert-analyzer-events
+security_protocol = SASL_SSL
+sasl_mechanism = PLAIN
+sasl_username = your-username
+sasl_password = your-password
+```
+
+> **Credentials in the config file** — the config file is installed with `0640` permissions owned by `root:cert-analyzer`, so only root and the cert-analyzer service account can read it. This is acceptable for standalone RPM deployments. For Kubernetes, supply credentials via environment variables backed by a Kubernetes Secret rather than a config file:
+> ```bash
+> kubectl create secret generic cert-analyzer-kafka \
+>   --from-literal=sasl-username=your-username \
+>   --from-literal=sasl-password=your-password \
+>   -n kube-system
+> ```
+> Then reference in `deployment.yaml`:
+> ```yaml
+> env:
+>   - name: KAFKA_ENABLED
+>     value: "true"
+>   - name: KAFKA_BOOTSTRAP_SERVERS
+>     value: "broker1:9092,broker2:9092"
+>   - name: KAFKA_TOPIC
+>     value: "cert-analyzer-events"
+>   - name: KAFKA_SECURITY_PROTOCOL
+>     value: "SASL_SSL"
+>   - name: KAFKA_SASL_MECHANISM
+>     value: "PLAIN"
+>   - name: KAFKA_SASL_USERNAME
+>     valueFrom:
+>       secretKeyRef:
+>         name: cert-analyzer-kafka
+>         key: sasl-username
+>   - name: KAFKA_SASL_PASSWORD
+>     valueFrom:
+>       secretKeyRef:
+>         name: cert-analyzer-kafka
+>         key: sasl-password
+> ```
+
+If the Kafka broker is unreachable at startup the analyzer logs a warning and continues with Prometheus-only operation — a broker outage never prevents certificate detection. Delivery errors are logged at `WARNING` level and do not affect the health probes or readiness state.
+
+The analyzer reconnects to Kafka automatically — no restart is required after a broker outage or restart. When a `send()` fails the producer is marked as disconnected and the next certificate detection event triggers a reconnect attempt. A 30-second cooldown between reconnect attempts prevents hammering a down broker. You will see the following in the logs as the broker recovers:
+
+```
+Kafka producer connection failed (will retry in 30s): ...
+Kafka producer connected — brokers: localhost:9092, topic: cert-analyzer-events
+```
+
+*Verifying Kafka end to end*
+
+For local testing on RHEL9, run a Kafka broker in a container. The critical detail is that both the Kafka container and the cert-analyzer container must be on the same network, and Kafka must advertise `localhost` as its listener address — otherwise `kafka-python` will connect successfully for metadata but then fail to reach the broker address that Kafka advertises back:
+
+```bash
+# Run Kafka with --network host and explicit advertised listener
+podman run -d \
+  --name kafka-test \
+  --network host \
+  -e KAFKA_NODE_ID=1 \
+  -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093 \
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
+  docker.io/apache/kafka:latest
+```
+
+Wait about 10 seconds for the broker to start, then verify it is ready:
+
+```bash
+podman exec kafka-test /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+```
+
+Enable Kafka in the cert-analyzer. For the RPM service edit `/etc/cert-analyzer/cert-analyzer.conf`. For the container pass env vars — since `run-rootful.sh` already uses `--network host`, `localhost:9092` reaches the Kafka container directly:
+
+```bash
+-e KAFKA_ENABLED=true \
+-e KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
+-e KAFKA_TOPIC=cert-analyzer-events
+```
+
+> **First-time enable** — a restart is required only when enabling Kafka for the first time, since the env vars or config change must be picked up at startup. Once Kafka is enabled, the analyzer reconnects automatically after broker restarts or outages — no further analyzer restarts are needed.
+
+If restarting the container to pick up the new env vars:
+
+```bash
+sudo ./run-rootful.sh
+```
+
+Confirm Kafka initialised successfully in the logs:
+
+```bash
+sudo podman logs cert-analyzer | grep -i kafka
+# Expected:
+# Kafka enabled:     True
+# Kafka brokers:     localhost:9092
+# Kafka topic:       cert-analyzer-events
+# Kafka producer connected — brokers: localhost:9092, topic: cert-analyzer-events
+```
+
+If instead you see `Node 1 connection failed -- refreshing metadata` it means Kafka is advertising an internal hostname rather than `localhost` — recreate the Kafka container with the `KAFKA_ADVERTISED_LISTENERS` env var set as shown above.
+
+Trigger a detection to publish a message:
+
+```bash
+cat /etc/pki/tls/certs/ca-bundle.crt
+```
+
+Then consume from the topic to confirm the message arrived:
+
+```bash
+podman exec kafka-test /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic cert-analyzer-events \
+  --from-beginning
+```
+
+Each message is a JSON object. Press `Ctrl+C` to stop the consumer. If the topic does not exist yet (`UNKNOWN_TOPIC_OR_PARTITION`) it means no messages have been published — check the analyzer logs for Kafka errors and confirm at least one new certificate was detected since the analyzer started with Kafka enabled.
+
+Tear down the test broker when finished:
+
+```bash
+podman stop kafka-test && podman rm kafka-test
+```
 
 **Alertmanager silences** — when deliberately rotating a certificate, create an Alertmanager silence for that cert's `cert_path` label to suppress alerts during the rotation window.
 
