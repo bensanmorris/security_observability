@@ -18,6 +18,7 @@ sudo podman run -d \
     -e LOG_LEVEL=DEBUG \
     -e CERT_SCAN_PATHS=/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki \
     -e SCAN_INTERVAL_SECONDS=3600 \
+    -e HOST_PREFIX=/host \
     -e KAFKA_ENABLED=true \
     -e KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
     -e KAFKA_TOPIC=cert-analyzer-events \
