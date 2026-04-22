@@ -783,6 +783,13 @@ sasl_password = your-password
 
 If the Kafka broker is unreachable at startup the analyzer logs a warning and continues with Prometheus-only operation — a broker outage never prevents certificate detection. Delivery errors are logged at `WARNING` level and do not affect the health probes or readiness state.
 
+The analyzer reconnects to Kafka automatically — no restart is required after a broker outage or restart. When a `send()` fails the producer is marked as disconnected and the next certificate detection event triggers a reconnect attempt. A 30-second cooldown between reconnect attempts prevents hammering a down broker. You will see the following in the logs as the broker recovers:
+
+```
+Kafka producer connection failed (will retry in 30s): ...
+Kafka producer connected — brokers: localhost:9092, topic: cert-analyzer-events
+```
+
 *Verifying Kafka end to end*
 
 For local testing on RHEL9, run a Kafka broker in a container. The critical detail is that both the Kafka container and the cert-analyzer container must be on the same network, and Kafka must advertise `localhost` as its listener address — otherwise `kafka-python` will connect successfully for metadata but then fail to reach the broker address that Kafka advertises back:
@@ -820,7 +827,15 @@ Enable Kafka in the cert-analyzer. For the RPM service edit `/etc/cert-analyzer/
 -e KAFKA_TOPIC=cert-analyzer-events
 ```
 
-Restart the analyzer and confirm Kafka initialised successfully in the logs:
+> **First-time enable** — a restart is required only when enabling Kafka for the first time, since the env vars or config change must be picked up at startup. Once Kafka is enabled, the analyzer reconnects automatically after broker restarts or outages — no further analyzer restarts are needed.
+
+If restarting the container to pick up the new env vars:
+
+```bash
+sudo ./run-rootful.sh
+```
+
+Confirm Kafka initialised successfully in the logs:
 
 ```bash
 sudo podman logs cert-analyzer | grep -i kafka
@@ -828,7 +843,7 @@ sudo podman logs cert-analyzer | grep -i kafka
 # Kafka enabled:     True
 # Kafka brokers:     localhost:9092
 # Kafka topic:       cert-analyzer-events
-# Kafka publisher initialised — brokers: localhost:9092, topic: cert-analyzer-events
+# Kafka producer connected — brokers: localhost:9092, topic: cert-analyzer-events
 ```
 
 If instead you see `Node 1 connection failed -- refreshing metadata` it means Kafka is advertising an internal hostname rather than `localhost` — recreate the Kafka container with the `KAFKA_ADVERTISED_LISTENERS` env var set as shown above.
