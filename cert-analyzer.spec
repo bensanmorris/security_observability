@@ -99,7 +99,8 @@ python3.11 -m venv %{_builddir}/venv
     cryptography==41.0.7 \
     pyyaml==6.0.1 \
     kubernetes>=28.1.0 \
-    pyjks==20.0.0
+    pyjks==20.0.0 \
+    kafka-python==2.0.2
 
 # Make the venv relocatable by rewriting the shebang paths.
 # We do this by replacing the absolute build-time prefix with the
