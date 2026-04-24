@@ -163,9 +163,18 @@ install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
 %pre
 # Verify Tetragon is installed — it is a required runtime dependency but is
 # not available as an RPM so cannot be expressed as a package Requires.
-# Search PATH for the tetragon binary and abort with a clear message if absent.
-if ! command -v tetragon >/dev/null 2>&1; then
-    echo "ERROR: tetragon binary not found in PATH." >&2
+# RPM scriptlets run with a restricted PATH (/bin:/usr/bin:/sbin:/usr/sbin)
+# so we search common installation locations explicitly rather than relying
+# on command -v which would miss /usr/local/bin in the scriptlet environment.
+TETRAGON_FOUND=0
+for dir in /usr/local/bin /usr/bin /bin /sbin /usr/sbin /opt/tetragon/bin; do
+    if [ -x "${dir}/tetragon" ]; then
+        TETRAGON_FOUND=1
+        break
+    fi
+done
+if [ "${TETRAGON_FOUND}" -eq 0 ]; then
+    echo "ERROR: tetragon binary not found." >&2
     echo "       Install Tetragon before installing cert-analyzer." >&2
     echo "       See https://tetragon.io/docs/installation/" >&2
     exit 1
