@@ -39,6 +39,7 @@ jobs:
             - 'cert-analyzer.spec'
             - 'cert-analyzer.conf'
             - 'cert-analyzer.service'
+            - 'tetragon-policies/**'
             - '.github/workflows/build.yml'
 
   build:
@@ -263,11 +264,65 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
 
+  build-policies:
+    name: Build Tetragon Policies Archive
+    runs-on: ubuntu-latest
+    needs: changes
+    # Always run on tags and PRs; on branch pushes only run if relevant files changed
+    if: |
+      github.ref_type == 'tag' ||
+      github.event_name == 'pull_request' ||
+      needs.changes.outputs.relevant == 'true'
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          echo "value=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        else
+          echo "value=${{ github.sha }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build policies archive
+      id: archive
+      run: |
+        ARCHIVE_NAME="tetragon-policies-${{ steps.version.outputs.value }}.tar.gz"
+        tar -czf "${ARCHIVE_NAME}" tetragon-policies/
+        echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+        echo "path=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+        echo "Contents:"
+        tar -tzf "${ARCHIVE_NAME}"
+
+    - name: Upload policies archive as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.archive.outputs.name }}
+        path: ${{ steps.archive.outputs.path }}
+        retention-days: 30
+
+    - name: Build summary
+      run: |
+        echo "## 📋 Tetragon Policies Archive" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Archive:** \`${{ steps.archive.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Policies included:**" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        tar -tzf "${{ steps.archive.outputs.path }}" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
   release:
     name: Publish Release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    needs: [ build, build-rpm ]
+    needs: [ build, build-rpm, build-policies ]
     permissions:
       contents: write
 
@@ -279,19 +334,31 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
-    - name: Locate RPM
-      id: rpm
+    - name: Download policies archive artifact
+      uses: actions/download-artifact@v4
+      with:
+        pattern: tetragon-policies-*.tar.gz
+        merge-multiple: true
+        path: ./release-assets
+
+    - name: Locate release assets
+      id: assets
       run: |
         RPM_PATH=$(find ./release-assets -name "cert-analyzer-*.rpm" | head -1)
-        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+        POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
+        echo "rpm_path=${RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "rpm_name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+        echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
+        echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
 
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.ref_name }}
         draft: false
-        files: ${{ steps.rpm.outputs.path }}
+        files: |
+          ${{ steps.assets.outputs.rpm_path }}
+          ${{ steps.assets.outputs.policies_path }}
         fail_on_unmatched_files: true
         body: |
           ## cert-analyzer ${{ github.ref_name }}
@@ -305,9 +372,17 @@ jobs:
 
           ### RPM Package
 
-          `${{ steps.rpm.outputs.name }}` — attached below. Install with:
+          `${{ steps.assets.outputs.rpm_name }}` — attached below. Install with:
           ```bash
-          sudo dnf install ./${{ steps.rpm.outputs.name }}
+          sudo dnf install ./${{ steps.assets.outputs.rpm_name }}
+          ```
+
+          ### Tetragon Policies
+
+          `${{ steps.assets.outputs.policies_name }}` — attached below. Extract and apply with:
+          ```bash
+          tar -xzf ${{ steps.assets.outputs.policies_name }}
+          sudo tetra tracingpolicy add tetragon-policies/<policy-name>.yaml
           ```
 
           ### Tetragon Version
