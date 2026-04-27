@@ -753,12 +753,14 @@ class CertificateAnalyzer:
                  filter_self_events: bool = True,
                  health_server: Optional['HealthServer'] = None,
                  host_prefix: str = '',
-                 kafka_publisher: Optional['KafkaPublisher'] = None):
+                 kafka_publisher: Optional['KafkaPublisher'] = None,
+                 checksum_enabled: bool = False):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
         self.host_prefix = host_prefix
         self.kafka_publisher = kafka_publisher
+        self.checksum_enabled = checksum_enabled
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -1101,7 +1103,7 @@ class CertificateAnalyzer:
         # Compute SHA-256 of DER-encoded certificate when enabled.
         # Uses public_bytes() which is always available for a parsed cert object.
         checksum = ""
-        if CERT_CHECKSUM_ENABLED:
+        if self.checksum_enabled:
             try:
                 from cryptography.hazmat.primitives.serialization import Encoding
                 der_bytes = cert.public_bytes(Encoding.DER)
@@ -1691,6 +1693,7 @@ def main():
     # Empty by default for standalone RPM deployment — set to /host for
     # Kubernetes where the node root filesystem is bind-mounted at /host
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
+    checksum_enabled = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',           'false').lower() == 'true'
 
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
@@ -1711,7 +1714,7 @@ def main():
     logger.info(f"Tetragon address:  {tetragon_addr}")
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
-    logger.info(f"Cert checksums:    {'enabled' if CERT_CHECKSUM_ENABLED else 'disabled'}")
+    logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -1750,7 +1753,8 @@ def main():
     analyzer = CertificateAnalyzer(tetragon_addr, alert_threshold,
                                    filter_self_events=filter_self,
                                    host_prefix=host_prefix,
-                                   kafka_publisher=kafka_publisher)
+                                   kafka_publisher=kafka_publisher,
+                                   checksum_enabled=checksum_enabled)
 
     health = HealthServer(
         analyzer=analyzer,
