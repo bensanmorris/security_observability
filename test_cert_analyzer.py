@@ -1551,13 +1551,17 @@ class TestChecksum:
     Tests for SHA-256 checksum computation on parsed certificates.
     Covers enabled/disabled behaviour, correctness, DER encoding,
     error handling, and the disabled-by-default contract.
+
+    Checksum is now controlled via analyzer.checksum_enabled (an instance
+    variable set from the config file or CERT_CHECKSUM_ENABLED env var in
+    main()) rather than the module-level CERT_CHECKSUM_ENABLED constant.
+    Tests set analyzer.checksum_enabled directly to reflect this.
     """
 
     def test_checksum_empty_by_default(self, analyzer, temp_dir):
-        """checksum field is empty string when CERT_CHECKSUM_ENABLED is false."""
-        import cert_analyzer as _ca
-        assert _ca.CERT_CHECKSUM_ENABLED is False, \
-            "CERT_CHECKSUM_ENABLED must default to False"
+        """checksum field is empty string when checksum_enabled is False (the default)."""
+        assert analyzer.checksum_enabled is False, \
+            "checksum_enabled must default to False on the analyzer instance"
 
         cert, _ = TestCertificateGeneration.generate_certificate("checksum.example.com", 365)
         path = os.path.join(temp_dir, "checksum.pem")
@@ -1567,10 +1571,9 @@ class TestChecksum:
         assert len(cert_infos) == 1
         assert cert_infos[0].checksum == ""
 
-    def test_checksum_populated_when_enabled(self, analyzer, temp_dir, monkeypatch):
-        """checksum is a non-empty hex string when CERT_CHECKSUM_ENABLED=true."""
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'CERT_CHECKSUM_ENABLED', True)
+    def test_checksum_populated_when_enabled(self, analyzer, temp_dir):
+        """checksum is a non-empty hex string when checksum_enabled=True."""
+        analyzer.checksum_enabled = True
 
         cert, _ = TestCertificateGeneration.generate_certificate("checksum-on.example.com", 365)
         path = os.path.join(temp_dir, "checksum-on.pem")
@@ -1581,10 +1584,9 @@ class TestChecksum:
         assert cert_infos[0].checksum != ""
         assert len(cert_infos[0].checksum) == 64  # SHA-256 hex digest is always 64 chars
 
-    def test_checksum_is_valid_sha256_hex(self, analyzer, temp_dir, monkeypatch):
+    def test_checksum_is_valid_sha256_hex(self, analyzer, temp_dir):
         """checksum contains only valid lowercase hexadecimal characters."""
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'CERT_CHECKSUM_ENABLED', True)
+        analyzer.checksum_enabled = True
 
         cert, _ = TestCertificateGeneration.generate_certificate("hex.example.com", 365)
         path = os.path.join(temp_dir, "hex.pem")
@@ -1594,12 +1596,11 @@ class TestChecksum:
         checksum = cert_infos[0].checksum
         assert all(c in '0123456789abcdef' for c in checksum)
 
-    def test_checksum_matches_manual_sha256(self, analyzer, temp_dir, monkeypatch):
+    def test_checksum_matches_manual_sha256(self, analyzer, temp_dir):
         """checksum matches SHA-256 of the DER-encoded certificate bytes."""
-        import cert_analyzer as _ca
         import hashlib
         from cryptography.hazmat.primitives.serialization import Encoding
-        monkeypatch.setattr(_ca, 'CERT_CHECKSUM_ENABLED', True)
+        analyzer.checksum_enabled = True
 
         cert, _ = TestCertificateGeneration.generate_certificate("sha256.example.com", 365)
         path = os.path.join(temp_dir, "sha256.pem")
@@ -1614,10 +1615,9 @@ class TestChecksum:
 
         assert cert_infos[0].checksum == expected
 
-    def test_checksum_differs_for_different_certs(self, analyzer, temp_dir, monkeypatch):
+    def test_checksum_differs_for_different_certs(self, analyzer, temp_dir):
         """Two different certificates produce different checksums."""
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'CERT_CHECKSUM_ENABLED', True)
+        analyzer.checksum_enabled = True
 
         cert1, _ = TestCertificateGeneration.generate_certificate("a.example.com", 365)
         cert2, _ = TestCertificateGeneration.generate_certificate("b.example.com", 365)
@@ -1632,15 +1632,14 @@ class TestChecksum:
         assert infos1[0].checksum != infos2[0].checksum
 
     def test_checksum_identical_for_same_cert_at_different_paths(
-        self, analyzer, temp_dir, monkeypatch
+        self, analyzer, temp_dir
     ):
         """
         The same certificate file copied to two paths produces identical checksums,
         demonstrating that checksum can correlate cert identity across paths.
         """
-        import cert_analyzer as _ca
         import shutil
-        monkeypatch.setattr(_ca, 'CERT_CHECKSUM_ENABLED', True)
+        analyzer.checksum_enabled = True
 
         cert, _ = TestCertificateGeneration.generate_certificate("same.example.com", 365)
         path1 = os.path.join(temp_dir, "copy1.pem")
@@ -1653,17 +1652,44 @@ class TestChecksum:
 
         assert infos1[0].checksum == infos2[0].checksum
 
-    def test_checksum_env_var_false_disables(self, monkeypatch):
-        """CERT_CHECKSUM_ENABLED=false results in the constant being False."""
-        monkeypatch.setenv('CERT_CHECKSUM_ENABLED', 'false')
-        value = os.getenv('CERT_CHECKSUM_ENABLED', 'false').lower() == 'true'
-        assert value is False
+    def test_checksum_disabled_via_config_file(self, temp_dir):
+        """checksum_enabled=False when config file has checksum_enabled = false."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'checksum_enabled': 'false'}})
+        result = cfg(cp, 'certificates', 'checksum_enabled', 'CERT_CHECKSUM_ENABLED', 'false')
+        assert result.lower() == 'false'
+        assert (result.lower() == 'true') is False
 
-    def test_checksum_env_var_true_enables(self, monkeypatch):
-        """CERT_CHECKSUM_ENABLED=true results in the constant being True."""
+    def test_checksum_enabled_via_config_file(self, temp_dir):
+        """checksum_enabled=True when config file has checksum_enabled = true."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'checksum_enabled': 'true'}})
+        result = cfg(cp, 'certificates', 'checksum_enabled', 'CERT_CHECKSUM_ENABLED', 'false')
+        assert result.lower() == 'true'
+        assert (result.lower() == 'true') is True
+
+    def test_checksum_enabled_via_env_var_when_no_config(self, monkeypatch, temp_dir):
+        """checksum_enabled=True when env var set and no config file entry."""
+        import configparser
+        from cert_analyzer import cfg
         monkeypatch.setenv('CERT_CHECKSUM_ENABLED', 'true')
-        value = os.getenv('CERT_CHECKSUM_ENABLED', 'false').lower() == 'true'
-        assert value is True
+        cp = configparser.ConfigParser()  # empty — no config file
+        result = cfg(cp, 'certificates', 'checksum_enabled', 'CERT_CHECKSUM_ENABLED', 'false')
+        assert result.lower() == 'true'
+
+    def test_config_file_takes_precedence_over_env_var(self, monkeypatch, temp_dir):
+        """Config file value overrides env var — config file wins."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.setenv('CERT_CHECKSUM_ENABLED', 'true')  # env var says enabled
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'checksum_enabled': 'false'}})  # config says disabled
+        result = cfg(cp, 'certificates', 'checksum_enabled', 'CERT_CHECKSUM_ENABLED', 'false')
+        assert result.lower() == 'false'  # config file wins
 
     def test_checksum_error_does_not_prevent_cert_info_return(
         self, analyzer, temp_dir, monkeypatch
@@ -1672,8 +1698,7 @@ class TestChecksum:
         If checksum computation fails (e.g. public_bytes raises), extract_certificate_info
         still returns a valid CertificateInfo with an empty checksum rather than None.
         """
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca, 'CERT_CHECKSUM_ENABLED', True)
+        analyzer.checksum_enabled = True
 
         cert, _ = TestCertificateGeneration.generate_certificate("err.example.com", 365)
         path = os.path.join(temp_dir, "err.pem")
@@ -1681,7 +1706,6 @@ class TestChecksum:
 
         # Patch hashlib.sha256 to raise so the checksum path fails
         import hashlib as _hashlib
-        original_sha256 = _hashlib.sha256
 
         def _raising_sha256(*args, **kwargs):
             raise RuntimeError("simulated hash failure")
