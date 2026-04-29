@@ -407,7 +407,7 @@ jobs:
     name: Publish Release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    needs: [ build, build-rpm, build-policies ]
+    needs: [ build, build-rpm, build-policies, build-test-generator ]
     permissions:
       contents: write
 
@@ -450,9 +450,15 @@ jobs:
 
           ### Container Images
 
+          **cert-analyzer** (UBI8 and UBI9):
           ```
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9
+          ```
+
+          **cert-test-generator** (k8s_enrich_demo — UBI9):
+          ```
+          ghcr.io/${{ github.repository_owner }}/cert-test-generator:${{ github.ref_name }}
           ```
 
           ### RPM Package
