@@ -1,4 +1,4 @@
-# CertSight - Realtime TLS certificate monitoring via eBPF
+# CertSight - Realtime certificate monitoring via eBPF
 
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
