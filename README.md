@@ -1,10 +1,10 @@
-# CertSight - Realtime TLS certificate expiry detection via eBPF
+# CertSight - Realtime TLS certificate monitoring via eBPF
 
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 
-Detect expired TLS certificates at runtime without modifying applications. Get real-time visibility into TLS certificate usage across your estate including expiry, file paths, processes, and Kubernetes pod context (where applicable).
+Monitor certificates at runtime without modifying applications. Get real-time visibility into certificate usage across your estate including expiry, file paths, processes, and Kubernetes pod context (where applicable).
 
 **Supports PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) certificate formats.**
 
