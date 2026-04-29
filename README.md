@@ -4,7 +4,7 @@
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 
-Monitor certificates at runtime without modifying applications. Get real-time visibility into certificate usage across your estate including expiry, file paths, processes, and Kubernetes pod context (where applicable).
+Monitor certificates in realtime without modifying applications. Get real-time visibility into certificate usage across your estate including expiry, file paths, processes, and Kubernetes pod context (where applicable).
 
 **Supports PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) certificate formats.**
 
