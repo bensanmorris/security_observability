@@ -127,6 +127,25 @@ jobs:
         cache-to: type=gha,scope=ubi${{ matrix.ubi-version }},mode=max
         platforms: linux/amd64
 
+    - name: Export container image as tar
+      if: github.event_name != 'pull_request'
+      id: tar
+      run: |
+        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+        PULL_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:sha-${SHORT_SHA}-ubi${{ matrix.ubi-version }}"
+        TAR_NAME="cert-analyzer-ubi${{ matrix.ubi-version }}-${{ steps.version.outputs.value }}.tar.gz"
+        docker pull "${PULL_TAG}"
+        docker save "${PULL_TAG}" | gzip > "${TAR_NAME}"
+        echo "tar_name=${TAR_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Upload container image as artifact
+      if: github.event_name != 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: cert-analyzer-container-ubi${{ matrix.ubi-version }}-${{ steps.version.outputs.value }}
+        path: ${{ steps.tar.outputs.tar_name }}
+        retention-days: 30
+
     - name: Build summary
       run: |
         echo "## 🐳 Container Build (UBI ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
@@ -385,6 +404,25 @@ jobs:
         cache-to: type=gha,scope=test-generator,mode=max
         platforms: linux/amd64
 
+    - name: Export container image as tar
+      if: github.event_name != 'pull_request'
+      id: tar
+      run: |
+        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+        PULL_TAG="${{ env.REGISTRY }}/${{ github.repository_owner }}/cert-test-generator:sha-${SHORT_SHA}"
+        TAR_NAME="cert-test-generator-${{ steps.version.outputs.value }}.tar.gz"
+        docker pull "${PULL_TAG}"
+        docker save "${PULL_TAG}" | gzip > "${TAR_NAME}"
+        echo "tar_name=${TAR_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Upload container image as artifact
+      if: github.event_name != 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: cert-test-generator-container-${{ steps.version.outputs.value }}
+        path: ${{ steps.tar.outputs.tar_name }}
+        retention-days: 30
+
     - name: Build summary
       run: |
         echo "## 🧪 Test Cert Generator (k8s_enrich_demo)" >> $GITHUB_STEP_SUMMARY
@@ -426,15 +464,38 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download cert-analyzer container artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: cert-analyzer-container-ubi*
+        merge-multiple: true
+        path: ./release-assets
+
+    - name: Download cert-test-generator container artifact
+      uses: actions/download-artifact@v4
+      with:
+        pattern: cert-test-generator-container-*
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Locate release assets
       id: assets
       run: |
         RPM_PATH=$(find ./release-assets -name "cert-analyzer-*.rpm" | head -1)
         POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
+        CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" | head -1)
+        CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" | head -1)
+        GENERATOR_PATH=$(find ./release-assets -name "cert-test-generator-*.tar.gz" | head -1)
         echo "rpm_path=${RPM_PATH}" >> $GITHUB_OUTPUT
         echo "rpm_name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
         echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
         echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
+        echo "container_ubi8_path=${CONTAINER_UBI8_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi8_name=$(basename ${CONTAINER_UBI8_PATH})" >> $GITHUB_OUTPUT
+        echo "container_ubi9_path=${CONTAINER_UBI9_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi9_name=$(basename ${CONTAINER_UBI9_PATH})" >> $GITHUB_OUTPUT
+        echo "generator_path=${GENERATOR_PATH}" >> $GITHUB_OUTPUT
+        echo "generator_name=$(basename ${GENERATOR_PATH})" >> $GITHUB_OUTPUT
 
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v2
@@ -444,21 +505,27 @@ jobs:
         files: |
           ${{ steps.assets.outputs.rpm_path }}
           ${{ steps.assets.outputs.policies_path }}
+          ${{ steps.assets.outputs.container_ubi8_path }}
+          ${{ steps.assets.outputs.container_ubi9_path }}
+          ${{ steps.assets.outputs.generator_path }}
         fail_on_unmatched_files: true
         body: |
           ## cert-analyzer ${{ github.ref_name }}
 
           ### Container Images
 
-          **cert-analyzer** (UBI8 and UBI9):
+          Pull from GHCR:
           ```
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9
+          ghcr.io/${{ github.repository_owner }}/cert-test-generator:${{ github.ref_name }}
           ```
 
-          **cert-test-generator** (k8s_enrich_demo — UBI9):
-          ```
-          ghcr.io/${{ github.repository_owner }}/cert-test-generator:${{ github.ref_name }}
+          Or load from the attached tar files:
+          ```bash
+          docker load < ${{ steps.assets.outputs.container_ubi8_name }}
+          docker load < ${{ steps.assets.outputs.container_ubi9_name }}
+          docker load < ${{ steps.assets.outputs.generator_name }}
           ```
 
           ### RPM Package
