@@ -11,8 +11,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from datetime import datetime, timedelta
 import os
+import signal
 import struct
 import hashlib
+import sys
 import time
 
 def generate_test_certificate(days_valid: int, output_path: str, cn: str = None):
@@ -208,20 +210,11 @@ def generate_test_pkcs12(days_valid: int, output_path: str, cn: str = None, pass
     print(f"           Password: {password}")
 
 
-if __name__ == '__main__':
-    # In the container TEST_CERT_OUTPUT_DIR is set to /test-certs (mounted volume).
-    # Outside a container it falls back to a test-certs/ dir next to this script.
-    test_dir = os.environ.get(
-        "TEST_CERT_OUTPUT_DIR",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-certs"),
-    )
+def generate_all(test_dir: str) -> None:
+    import shutil
 
-    # Remove old test certs if they exist
     if os.path.exists(test_dir):
-        import shutil
         shutil.rmtree(test_dir)
-
-    # Create fresh directory
     os.makedirs(test_dir)
 
     print(f"Creating test certificates in {test_dir}")
@@ -235,42 +228,55 @@ if __name__ == '__main__':
         ("expiring-quarter.crt", 85, "quarter.example.com"),
         ("valid.crt", 365, "valid.example.com"),
     ]
-
     for filename, days, cn in test_cases:
-        cert_path = os.path.join(test_dir, filename)
-        generate_test_certificate(days, cert_path, cn)
+        generate_test_certificate(days, os.path.join(test_dir, filename), cn)
         print()
 
     print("="*60)
-    print(f"\nTest certificates created in: {test_dir}")
-
-    print()
     print("Generating JKS keystores...")
     print("="*60)
-    jks_cases = [
-        ("expired.jks",       -10,  "expired-jks.example.com"),
-        ("expiring-soon.jks",   5,  "soon-jks.example.com"),
-        ("valid.jks",         365,  "valid-jks.example.com"),
-    ]
-    for filename, days, cn in jks_cases:
+    for filename, days, cn in [
+        ("expired.jks",       -10, "expired-jks.example.com"),
+        ("expiring-soon.jks",   5, "soon-jks.example.com"),
+        ("valid.jks",         365, "valid-jks.example.com"),
+    ]:
         generate_test_jks(days, os.path.join(test_dir, filename), cn)
         print()
 
     print("="*60)
     print("Generating PKCS12 keystores...")
     print("="*60)
-    pkcs12_cases = [
-        ("expired.p12",       -10,  "expired-pkcs12.example.com"),
-        ("expiring-soon.p12",   5,  "soon-pkcs12.example.com"),
-        ("valid.p12",         365,  "valid-pkcs12.example.com"),
-    ]
-    for filename, days, cn in pkcs12_cases:
+    for filename, days, cn in [
+        ("expired.p12",       -10, "expired-pkcs12.example.com"),
+        ("expiring-soon.p12",   5, "soon-pkcs12.example.com"),
+        ("valid.p12",         365, "valid-pkcs12.example.com"),
+    ]:
         generate_test_pkcs12(days, os.path.join(test_dir, filename), cn)
         print()
 
     print("="*60)
-    print("\nTo test the analyzer:")
-    print(f"  1. Trigger cert access:  cat {test_dir}/expired.crt")
-    print(f"                           cat {test_dir}/expired.jks")
-    print(f"                           cat {test_dir}/expired.p12")
-    print(f"  2. Check metrics:        curl -s http://localhost:9090/metrics | grep expired")
+    print(f"Done. Certs in: {test_dir}")
+
+
+if __name__ == '__main__':
+    # In the container TEST_CERT_OUTPUT_DIR=/test-certs (mounted volume).
+    # Outside a container it falls back to a test-certs/ dir next to this script.
+    test_dir = os.environ.get(
+        "TEST_CERT_OUTPUT_DIR",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-certs"),
+    )
+    interval = int(os.environ.get("CERT_REGEN_INTERVAL_SECONDS", "60"))
+
+    def _stop(sig, _frame):
+        print(f"\nReceived signal {sig}, exiting.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    print(f"Cert generator starting — output: {test_dir}, interval: {interval}s")
+
+    while True:
+        generate_all(test_dir)
+        print(f"Next regeneration in {interval}s …")
+        time.sleep(interval)

@@ -1,38 +1,35 @@
-# Run the test cert generator as a one-shot Job in kind.
+# Deploys the test cert generator as a long-running Deployment in kind.
 #
-# The container writes PEM, JKS and PKCS12 test certificates to /test-certs,
-# which is backed by a hostPath on the kind node.  cert-analyzer (deployed via
-# kubernetes/deployment.yaml) mounts the host root at /host and scans the paths
-# listed in CERT_SCAN_PATHS, so add /host/tmp/cert-analyzer-test to that env var
-# if you want the analyzer to pick up these certs automatically.
+# The container regenerates all PEM/JKS/PKCS12 test certificates every
+# CERT_REGEN_INTERVAL_SECONDS (default 60) seconds, writing them to /test-certs
+# which is backed by a hostPath on the kind node.
+#
+# cert-analyzer (kubernetes/deployment.yaml) mounts the host root at /host and
+# scans CERT_SCAN_PATHS — add /host/tmp/cert-analyzer-test to that env var so
+# the analyzer picks up these certs automatically.
 #
 # Usage:
-#   # Load the image into the kind cluster first:
 #   kind load docker-image ghcr.io/<owner>/cert-test-generator:latest
-#
 #   kubectl apply -f k8s_enrich_demo/job.yaml
-#   kubectl -n kube-system wait --for=condition=complete job/cert-test-generator --timeout=60s
-#   kubectl -n kube-system logs job/cert-test-generator
-#
-# The generated certs will be on the kind node at /tmp/cert-analyzer-test/.
-# Access them via a privileged debug pod, or configure cert-analyzer with:
-#   CERT_SCAN_PATHS=/host/etc/ssl,/host/etc/pki,/host/tmp/cert-analyzer-test
+#   kubectl -n kube-system logs -f deployment/cert-test-generator
 ---
-apiVersion: batch/v1
-kind: Job
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: cert-test-generator
   namespace: kube-system
   labels:
     app: cert-test-generator
 spec:
-  ttlSecondsAfterFinished: 600
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cert-test-generator
   template:
     metadata:
       labels:
         app: cert-test-generator
     spec:
-      restartPolicy: Never
       containers:
       - name: cert-test-generator
         image: ghcr.io/bensanmorris/cert-test-generator:latest
@@ -40,6 +37,8 @@ spec:
         env:
         - name: TEST_CERT_OUTPUT_DIR
           value: /test-certs
+        - name: CERT_REGEN_INTERVAL_SECONDS
+          value: "60"
         volumeMounts:
         - name: test-certs
           mountPath: /test-certs
@@ -62,7 +61,7 @@ spec:
       volumes:
       - name: test-certs
         hostPath:
-          # Certs land here on the kind node — readable by cert-analyzer via its
-          # /host mount if CERT_SCAN_PATHS includes /host/tmp/cert-analyzer-test
+          # Certs land here on the kind node — add /host/tmp/cert-analyzer-test
+          # to cert-analyzer's CERT_SCAN_PATHS to have them picked up automatically.
           path: /tmp/cert-analyzer-test
           type: DirectoryOrCreate
