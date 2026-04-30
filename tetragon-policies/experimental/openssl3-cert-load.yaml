@@ -1,0 +1,70 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openssl3-cert-load
+spec:
+  uprobes:
+  # SSL_CTX_use_certificate_file(SSL_CTX*, const char* file, int type)
+  # SSL_CTX_use_certificate_chain_file(SSL_CTX*, const char* file)
+  # arg[1] is the certificate file path — captured as a string.
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_file"
+    - "SSL_CTX_use_certificate_chain_file"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "string"
+    selectors:
+    - matchActions:
+      - action: Post
+  - path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_file"
+    - "SSL_CTX_use_certificate_chain_file"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "string"
+    selectors:
+    - matchActions:
+      - action: Post
+
+  # d2i_X509(X509 **px, const unsigned char **in, long len)
+  # arg[1] is a pointer-to-pointer to the DER buffer; arg[2] is its length.
+  # Tetragon reads `len` bytes starting at the address held in arg[1] via
+  # bpf_probe_read_user. Because the C argument is `const unsigned char**`
+  # (a double pointer), the bytes captured are from the address of the local
+  # pointer variable, not the DER cert itself. This is a known limitation of
+  # uprobe-based capture for double-pointer args; the analyzer will attempt
+  # DER parsing and silently discard events where parsing fails.
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "d2i_X509"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "bytes"
+      sizeArgIndex: 3
+    - index: 2
+      type: "size_t"
+    selectors:
+    - matchActions:
+      - action: Post
+  - path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    symbols:
+    - "d2i_X509"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "bytes"
+      sizeArgIndex: 3
+    - index: 2
+      type: "size_t"
+    selectors:
+    - matchActions:
+      - action: Post
