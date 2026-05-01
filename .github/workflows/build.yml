@@ -186,7 +186,6 @@ jobs:
           python3.11 \
           python3.11-devel \
           rpm-build \
-          rpmdevtools \
           git \
           gcc \
           make \
@@ -215,7 +214,7 @@ jobs:
         fi
 
     - name: Set up rpmbuild tree
-      run: rpmdev-setuptree
+      run: mkdir -p "${HOME}/rpmbuild/"{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
     - name: Generate Tetragon protobuf bindings
       run: |
