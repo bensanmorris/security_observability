@@ -3,7 +3,7 @@
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 
-Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of certificate accesses in realtime, then parses and exposes certificate, process and k8s (where applicable) data as Prometheus metrics and Kafka topics.
+Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of certificate accesses in realtime. Parses and exposes certificate, process and k8s (where applicable) data as Prometheus metrics and Kafka topics.
 
 Supports PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`).
 
