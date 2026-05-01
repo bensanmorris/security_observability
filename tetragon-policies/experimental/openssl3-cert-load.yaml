@@ -20,9 +20,10 @@ spec:
 
   # d2i_X509(X509 **px, const unsigned char **in, long len)
   # arg[1] is a pointer-to-pointer to the DER buffer; arg[2] is its length.
+  # Note: d2i_X509 lives in libcrypto.so.3, not libssl.so.3.
   # Note: 'char_buf' used instead of 'bytes' for Tetragon v1.1.0 compatibility.
   # Note: 'selectors' removed — only matchPIDs supported in v1.1.0 uprobes.
-  - path: "/usr/lib64/libssl.so.3"
+  - path: "/usr/lib64/libcrypto.so.3"
     symbols:
     - "d2i_X509"
     args:
