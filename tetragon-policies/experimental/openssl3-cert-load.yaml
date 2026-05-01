@@ -40,6 +40,9 @@ spec:
   # pointer variable, not the DER cert itself. This is a known limitation of
   # uprobe-based capture for double-pointer args; the analyzer will attempt
   # DER parsing and silently discard events where parsing fails.
+  #
+  # Note: 'char_buf' is used instead of 'bytes' for Tetragon v1.1.0 compatibility.
+  # 'bytes' was added in a later Tetragon version.
   - path: "/usr/lib64/libssl.so.3"
     symbols:
     - "d2i_X509"
@@ -47,7 +50,7 @@ spec:
     - index: 0
       type: "uint64"
     - index: 1
-      type: "bytes"
+      type: "char_buf"
       sizeArgIndex: 3
     - index: 2
       type: "size_t"
@@ -61,7 +64,7 @@ spec:
     - index: 0
       type: "uint64"
     - index: 1
-      type: "bytes"
+      type: "char_buf"
       sizeArgIndex: 3
     - index: 2
       type: "size_t"
