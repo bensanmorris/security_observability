@@ -15,6 +15,7 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.hazmat.backends import default_backend
 from prometheus_client import REGISTRY
 
@@ -3339,3 +3340,306 @@ class TestKafkaReconnection:
 
             assert any('connected' in r.message.lower() or 'initialised' in r.message.lower()
                        for r in caplog.records)
+
+
+class TestOpensslUprobeHooking:
+    """
+    Tests for OpenSSL uprobe interception (openssl3-cert-load policy).
+
+    Two code paths are exercised:
+    - File-path hooks (SSL_CTX_use_certificate_file / SSL_CTX_use_certificate_chain_file):
+      cert path is carried in a string_arg and handled by the existing
+      extract_cert_path_from_event / process_event flow.
+    - In-memory hooks (d2i_X509): raw DER bytes arrive in a bytes_arg and are
+      handled by _handle_uprobe_in_memory_cert, which parses them directly
+      without touching the filesystem.
+    """
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _cert_der(cn='openssl.example.com', days=365):
+        cert, _ = TestCertificateGeneration.generate_certificate(cn, days)
+        return cert, cert.public_bytes(Encoding.DER)
+
+    @staticmethod
+    def _make_string_arg(value):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'string_arg'
+        arg.string_arg = value
+        return arg
+
+    @staticmethod
+    def _make_bytes_arg(data):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'bytes_arg'
+        arg.bytes_arg = data
+        return arg
+
+    @staticmethod
+    def _make_uprobe_event(args, pid=1234, binary='/usr/bin/nginx', has_pod=False):
+        """Build a minimal mock process_uprobe event."""
+        from unittest.mock import MagicMock
+
+        mock_uprobe = MagicMock()
+        mock_uprobe.process.binary = binary
+        mock_uprobe.process.pid.value = pid
+
+        if has_pod:
+            mock_uprobe.process.HasField.side_effect = lambda f: f in ('pid', 'pod')
+            mock_uprobe.process.pod.namespace = 'test-ns'
+            mock_uprobe.process.pod.name = 'test-pod'
+            mock_uprobe.process.pod.workload_object.kind = 'Deployment'
+            mock_uprobe.process.pod.workload_object.name = 'test-deploy'
+            mock_uprobe.process.pod.labels = {}
+        else:
+            mock_uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+
+        mock_uprobe.args = args
+
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        mock_event.process_uprobe = mock_uprobe
+        return mock_event
+
+    @staticmethod
+    def _make_kprobe_event():
+        """Build a minimal mock process_kprobe event (no args)."""
+        from unittest.mock import MagicMock
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = '/usr/bin/curl'
+        mock_kprobe.process.pid.value = 999
+        mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.args = []
+        mock_event.process_kprobe = mock_kprobe
+        return mock_event
+
+    # ----------------------------------------- file-path uprobe (string_arg)
+
+    def test_file_path_uprobe_string_arg_is_extracted(self, analyzer, temp_dir):
+        """extract_cert_path_from_event finds a cert path in a uprobe string_arg."""
+        cert_path = os.path.join(temp_dir, 'server.pem')
+        cert, _ = TestCertificateGeneration.generate_certificate('path-uprobe.example.com', 365)
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        event = self._make_uprobe_event([self._make_string_arg(cert_path)])
+        extracted, _, _, _, _ = analyzer.extract_cert_path_from_event(event)
+
+        assert extracted == cert_path
+
+    def test_file_path_uprobe_non_cert_string_arg_is_ignored(self, analyzer):
+        """extract_cert_path_from_event ignores a string_arg that is not a cert path."""
+        event = self._make_uprobe_event([self._make_string_arg('/etc/hosts')])
+        cert_path, _, _, _, _ = analyzer.extract_cert_path_from_event(event)
+
+        assert cert_path is None
+
+    def test_file_path_uprobe_process_event_end_to_end(self, analyzer, temp_dir):
+        """process_event resolves a cert file referenced by a uprobe string_arg."""
+        cert_path = os.path.join(temp_dir, 'uprobe-file.pem')
+        cert, _ = TestCertificateGeneration.generate_certificate('uprobe-file.example.com', 365)
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        event = self._make_uprobe_event([self._make_string_arg(cert_path)])
+        analyzer.process_event(event)
+
+        assert any(k.startswith(cert_path + ':') for k in analyzer.known_certs)
+
+    # ----------------------------------------- in-memory DER (bytes_arg)
+
+    def test_handle_bytes_returns_false_for_kprobe_event(self, analyzer):
+        """_handle_uprobe_in_memory_cert returns False for a non-uprobe event."""
+        result = analyzer._handle_uprobe_in_memory_cert(self._make_kprobe_event())
+        assert result is False
+
+    def test_handle_bytes_returns_false_when_no_bytes_arg(self, analyzer):
+        """_handle_uprobe_in_memory_cert returns False when args contain no bytes_arg."""
+        _, der = self._cert_der()
+        # Only a string_arg — no bytes_arg
+        event = self._make_uprobe_event([self._make_string_arg('/some/path.pem')])
+        assert analyzer._handle_uprobe_in_memory_cert(event) is False
+
+    def test_handle_bytes_returns_false_for_garbage_bytes(self, analyzer):
+        """_handle_uprobe_in_memory_cert returns False and does not raise on invalid DER."""
+        event = self._make_uprobe_event([self._make_bytes_arg(b'\xde\xad\xbe\xef' * 16)])
+        assert analyzer._handle_uprobe_in_memory_cert(event) is False
+
+    def test_handle_bytes_returns_false_for_empty_bytes(self, analyzer):
+        """_handle_uprobe_in_memory_cert returns False on empty bytes_arg."""
+        event = self._make_uprobe_event([self._make_bytes_arg(b'')])
+        assert analyzer._handle_uprobe_in_memory_cert(event) is False
+
+    def test_handle_bytes_returns_true_for_valid_der(self, analyzer):
+        """_handle_uprobe_in_memory_cert returns True when bytes_arg is valid DER."""
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        assert analyzer._handle_uprobe_in_memory_cert(event) is True
+
+    def test_handle_bytes_adds_cert_to_known_certs(self, analyzer):
+        """A cert parsed from bytes_arg is stored in known_certs."""
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        analyzer._handle_uprobe_in_memory_cert(event)
+        assert len(analyzer.known_certs) == 1
+
+    def test_handle_bytes_synthetic_path_format(self, analyzer):
+        """CertificateInfo.path uses the uprobe://d2i_X509/<pid>/<serial> scheme."""
+        cert, der = self._cert_der()
+        serial = str(cert.serial_number)
+        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=5678)
+        analyzer._handle_uprobe_in_memory_cert(event)
+
+        stored = list(analyzer.known_certs.values())[0]
+        assert stored.path == f'uprobe://d2i_X509/5678/{serial}'
+
+    def test_handle_bytes_deduplicates_same_cert(self, analyzer):
+        """Calling _handle_uprobe_in_memory_cert twice with the same DER adds only one entry."""
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        analyzer._handle_uprobe_in_memory_cert(event)
+        analyzer._handle_uprobe_in_memory_cert(event)
+        assert len(analyzer.known_certs) == 1
+
+    def test_handle_bytes_two_distinct_certs_both_stored(self, analyzer):
+        """Two different certs from separate bytes_arg events are both stored."""
+        _, der1 = self._cert_der('a.example.com')
+        _, der2 = self._cert_der('b.example.com')
+        analyzer._handle_uprobe_in_memory_cert(
+            self._make_uprobe_event([self._make_bytes_arg(der1)], pid=1)
+        )
+        analyzer._handle_uprobe_in_memory_cert(
+            self._make_uprobe_event([self._make_bytes_arg(der2)], pid=2)
+        )
+        assert len(analyzer.known_certs) == 2
+
+    def test_handle_bytes_cert_fields_populated(self, analyzer):
+        """CertificateInfo fields are correctly populated from the DER cert."""
+        cert, der = self._cert_der('fields.example.com', days=90)
+        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=42,
+                                        binary='/usr/bin/python3')
+        analyzer._handle_uprobe_in_memory_cert(event)
+
+        info = list(analyzer.known_certs.values())[0]
+        assert 'fields.example.com' in info.subject
+        assert info.pid == 42
+        assert info.process == '/usr/bin/python3'
+        assert info.days_until_expiry > 80
+
+    def test_handle_bytes_updates_last_event_timestamp(self, analyzer):
+        """last_event_timestamp is updated when a bytes_arg cert is successfully parsed."""
+        analyzer.metrics.last_event_timestamp._value.set(0)
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        analyzer._handle_uprobe_in_memory_cert(event)
+        assert analyzer.metrics.last_event_timestamp._value.get() > 0
+
+    def test_handle_bytes_timestamp_not_updated_on_invalid_der(self, analyzer):
+        """last_event_timestamp is NOT updated when DER parsing fails."""
+        analyzer.metrics.last_event_timestamp._value.set(0)
+        event = self._make_uprobe_event([self._make_bytes_arg(b'not-a-cert')])
+        analyzer._handle_uprobe_in_memory_cert(event)
+        assert analyzer.metrics.last_event_timestamp._value.get() == 0
+
+    def test_handle_bytes_self_filter_by_process_name(self, analyzer):
+        """cert-analyzer process is silently dropped when filter_self_events is True."""
+        assert analyzer.filter_self_events is True
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)],
+                                        binary='/app/cert-analyzer')
+        result = analyzer._handle_uprobe_in_memory_cert(event)
+        assert result is False
+        assert len(analyzer.known_certs) == 0
+
+    def test_handle_bytes_self_filter_by_pid(self, analyzer, monkeypatch):
+        """Own process PID is silently dropped when filter_self_events is True."""
+        assert analyzer.filter_self_events is True
+        monkeypatch.setattr(os, 'getpid', lambda: 9999)
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=9999)
+        result = analyzer._handle_uprobe_in_memory_cert(event)
+        assert result is False
+        assert len(analyzer.known_certs) == 0
+
+    def test_handle_bytes_self_filter_disabled(self, analyzer):
+        """cert-analyzer process is NOT filtered when filter_self_events is False."""
+        analyzer.filter_self_events = False
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)],
+                                        binary='/app/cert-analyzer')
+        result = analyzer._handle_uprobe_in_memory_cert(event)
+        assert result is True
+
+    def test_handle_bytes_pod_context_applied(self, analyzer):
+        """Pod name and namespace from the uprobe event are stored on CertificateInfo."""
+        _, der = self._cert_der()
+        event = self._make_uprobe_event([self._make_bytes_arg(der)], has_pod=True)
+        analyzer._handle_uprobe_in_memory_cert(event)
+
+        info = list(analyzer.known_certs.values())[0]
+        assert info.pod_name == 'test-pod'
+        assert info.namespace == 'test-ns'
+
+    # ----------------------------------------- process_event routing
+
+    def test_process_event_routes_bytes_arg_to_in_memory_handler(self, analyzer):
+        """process_event stores a cert when the uprobe event contains bytes_arg."""
+        _, der = self._cert_der('route.example.com')
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        analyzer.process_event(event)
+        assert len(analyzer.known_certs) == 1
+
+    def test_process_event_skips_bytes_handler_for_kprobe(self, analyzer):
+        """process_event does not attempt bytes parsing for a kprobe event with no path."""
+        event = self._make_kprobe_event()
+        analyzer.process_event(event)  # no path, no bytes_arg → nothing stored
+        assert len(analyzer.known_certs) == 0
+
+    def test_process_event_prefers_file_path_over_bytes_arg(self, analyzer, temp_dir):
+        """When both string_arg and bytes_arg are present, the file path wins."""
+        cert_path = os.path.join(temp_dir, 'both.pem')
+        cert, der = self._cert_der('both.example.com')
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        event = self._make_uprobe_event([
+            self._make_string_arg(cert_path),
+            self._make_bytes_arg(der),
+        ])
+        analyzer.process_event(event)
+
+        # Stored under the real file path, not a synthetic uprobe:// path
+        assert any(k.startswith(cert_path + ':') for k in analyzer.known_certs)
+        assert not any('uprobe://' in k for k in analyzer.known_certs)
+
+    # ----------------------------------------- Kafka integration
+
+    def test_kafka_published_for_new_in_memory_cert(self, analyzer):
+        """A new cert extracted from bytes_arg is published to Kafka."""
+        from unittest.mock import MagicMock
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        _, der = self._cert_der('kafka-bytes.example.com')
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        analyzer._handle_uprobe_in_memory_cert(event)
+
+        mock_publisher.publish.assert_called_once()
+        published = mock_publisher.publish.call_args[0][0]
+        assert 'uprobe://d2i_X509' in published.path
+
+    def test_kafka_not_published_for_redetected_in_memory_cert(self, analyzer):
+        """Re-detected in-memory cert (same DER) is NOT published to Kafka again."""
+        from unittest.mock import MagicMock
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        _, der = self._cert_der('kafka-dedup.example.com')
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+
+        analyzer._handle_uprobe_in_memory_cert(event)
+        analyzer._handle_uprobe_in_memory_cert(event)
+
+        assert mock_publisher.publish.call_count == 1

@@ -1343,6 +1343,69 @@ class CertificateAnalyzer:
 
         return cert_path, process_name, pid, namespace, tetragon_pod
 
+    def _handle_uprobe_in_memory_cert(self, event) -> bool:
+        """
+        Handle a process_uprobe event where the cert arrives as raw DER bytes
+        (e.g. d2i_X509). Returns True if a cert was successfully extracted and
+        processed, False otherwise (no bytes_arg, unparseable bytes, etc.).
+        """
+        if not event.HasField('process_uprobe'):
+            return False
+
+        uprobe = event.process_uprobe
+        process_name = uprobe.process.binary
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+
+        if self.filter_self_events:
+            if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
+                logger.debug(f"Skipping self-generated uprobe bytes event from {process_name}")
+                return False
+            if pid == os.getpid():
+                logger.debug(f"Skipping self-generated uprobe bytes event from PID {pid}")
+                return False
+
+        raw_bytes = None
+        for arg in uprobe.args:
+            if arg.HasField('bytes_arg'):
+                raw_bytes = bytes(arg.bytes_arg)
+                break
+
+        if not raw_bytes:
+            return False
+
+        try:
+            cert = x509.load_der_x509_certificate(raw_bytes, default_backend())
+        except Exception as e:
+            logger.debug(f"Could not parse uprobe bytes_arg as DER certificate: {e}")
+            return False
+
+        serial = str(cert.serial_number)
+        synthetic_path = f"uprobe://d2i_X509/{pid}/{serial}"
+
+        self.metrics.last_event_timestamp.set(time.time())
+        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
+
+        if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
+            logger.info(f"Re-detected known in-memory certificate: {synthetic_path}")
+            return True
+
+        cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid, namespace)
+        if cert_info is None:
+            return False
+
+        self._apply_pod_context(cert_info, tetragon_pod)
+        self.metrics.update_certificate_metrics(cert_info)
+        self.log_certificate_status(cert_info)
+        self.known_certs[cert_info.unique_key] = cert_info
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        self._update_cache_metrics()
+        return True
+
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
@@ -1352,6 +1415,7 @@ class CertificateAnalyzer:
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
 
         if not cert_path:
+            self._handle_uprobe_in_memory_cert(event)
             return
 
         # Optionally skip events from the analyzer itself to avoid a feedback loop.

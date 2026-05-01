@@ -131,6 +131,9 @@ cp "$SCRIPT_DIR/cert-analyzer.service" "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/cert-analyzer.conf"    "$TMPDIR_SRC/$TARNAME/"
 # Include pre-generated protos so the spec needs no network access
 cp -r "$PROTO_TMPDIR/generated/tetragon" "$TMPDIR_SRC/$TARNAME/tetragon"
+# Tetragon systemd drop-in that exposes the socket to the cert-analyzer group
+cp "$REPO_ROOT/tetragon-config/systemd/tetragon-override.conf" \
+    "$TMPDIR_SRC/$TARNAME/tetragon-override.conf"
 
 tar -czf "$TARBALL" -C "$TMPDIR_SRC" "$TARNAME"
 echo "Tarball created: $TARBALL"
