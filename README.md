@@ -57,12 +57,78 @@ sudo systemctl enable --now cert-analyzer
 
 `/etc/cert-analyzer/cert-analyzer.conf` — preserved across upgrades.
 
+**[tetragon]**
+
 | Setting | Default | Description |
 |---|---|---|
-| `TETRAGON_ADDR` | `unix:///var/run/tetragon/tetragon.sock` | Tetragon gRPC address |
-| `METRICS_PORT` | `9090` | Prometheus metrics port |
-| `ALERT_THRESHOLD_DAYS` | `30` | Days before expiry to flag a certificate |
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `addr` | `unix:///run/tetragon/tetragon.sock` | Tetragon gRPC address |
+| `version_check_interval` | `300` | Seconds between Tetragon version checks |
+
+**[metrics]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `port` | `9090` | Prometheus metrics port |
+
+**[health]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `port` | `8086` | Liveness (`/healthz`) and readiness (`/readyz`) probe port |
+| `readiness_grace_period_seconds` | `60` | Seconds after startup before readiness checking begins |
+| `readiness_staleness_seconds` | `300` | Max age of last event before pod is marked not-ready |
+
+**[alerting]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `threshold_days` | `30` | Days before expiry at which to emit warning-level log output |
+
+**[scanning]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `paths` | `/etc/ssl,/etc/pki` | Comma-separated directories for periodic certificate scanning |
+| `interval_seconds` | `3600` | Seconds between periodic scans |
+
+**[logging]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+
+**[cache]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_size` | `10000` | LRU cache size for known certs, processed paths, and failed passwords (minimum 10,000) |
+
+**[certificates]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `checksum_enabled` | `false` | Compute SHA-256 fingerprints per certificate |
+| `filter_self_events` | `true` | Ignore certificate accesses made by the analyzer itself |
+| `host_prefix` | _(empty)_ | Path prefix prepended to certificate paths from Tetragon events — leave empty for bare metal, set to `/host` for Kubernetes |
+
+**[passwords]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `jks_password` | _(unset)_ | Password tried when opening encrypted JKS keystores |
+| `pkcs12_password` | _(unset)_ | Password tried when opening encrypted PKCS12 keystores |
+
+**[kafka]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Publish certificate discovery events to Kafka |
+| `bootstrap_servers` | `localhost:9092` | Comma-separated broker addresses |
+| `topic` | `cert-analyzer-events` | Topic to publish events to |
+| `security_protocol` | `PLAINTEXT` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` |
+| `sasl_mechanism` | _(unset)_ | SASL mechanism — required for `SASL_*` protocols |
+| `sasl_username` | _(unset)_ | SASL username |
+| `sasl_password` | _(unset)_ | SASL password |
 
 ---
 
