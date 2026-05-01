@@ -156,6 +156,12 @@ Environment=TETRAGON_BUILD_VERSION=%{_tetragon_version}
 Environment=CERT_ANALYZER_VERSION=%{_version}
 UNITEOF
 
+# ── Tetragon systemd drop-in ──────────────────────────────────────────────────
+# Exposes /var/run/tetragon/tetragon.sock to the cert-analyzer group
+install -d %{buildroot}/etc/systemd/system/tetragon.service.d
+install -m 0644 tetragon-override.conf \
+    %{buildroot}/etc/systemd/system/tetragon.service.d/cert-analyzer.conf
+
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
@@ -204,8 +210,17 @@ chown -R %{ana_user}:%{ana_group} %{ana_log}
 chown    root:%{ana_group}         %{ana_conf}/cert-analyzer.conf
 chmod    0640                      %{ana_conf}/cert-analyzer.conf
 
+# Reload systemd to pick up the Tetragon drop-in
+systemctl daemon-reload >/dev/null 2>&1 || true
+
 echo "cert-analyzer installed."
-echo "Edit /etc/cert-analyzer/cert-analyzer.conf then run:"
+echo ""
+echo "ACTION REQUIRED: A Tetragon systemd override has been installed to:"
+echo "  /etc/systemd/system/tetragon.service.d/cert-analyzer.conf"
+echo "Restart Tetragon to expose the socket to cert-analyzer:"
+echo "  systemctl restart tetragon"
+echo ""
+echo "Then edit /etc/cert-analyzer/cert-analyzer.conf and run:"
 echo "  systemctl enable --now cert-analyzer"
 
 
@@ -215,6 +230,7 @@ echo "  systemctl enable --now cert-analyzer"
 
 %postun
 %systemd_postun_with_restart cert-analyzer.service
+systemctl daemon-reload >/dev/null 2>&1 || true
 
 
 %files
@@ -236,6 +252,7 @@ echo "  systemctl enable --now cert-analyzer"
 # systemd
 %{_unitdir}/cert-analyzer.service
 %{_unitdir}/cert-analyzer.service.d/version.conf
+/etc/systemd/system/tetragon.service.d/cert-analyzer.conf
 
 
 %changelog
