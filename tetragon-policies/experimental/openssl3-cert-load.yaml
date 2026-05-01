@@ -6,7 +6,14 @@ spec:
   uprobes:
   # SSL_CTX_use_certificate_file(SSL_CTX*, const char* file, int type)
   # SSL_CTX_use_certificate_chain_file(SSL_CTX*, const char* file)
-  # arg[1] is the certificate file path — captured as a string.
+  # Hooks applications that load certificate files explicitly via OpenSSL.
+  # This covers: openssl s_client -CAfile, nginx, Apache, Java via OpenSSL, etc.
+  #
+  # Note: d2i_X509 (in-memory DER cert loading) is not hookable in Tetragon
+  # v1.1.0 because the symbol is versioned (d2i_X509@@OPENSSL_3.0.0) and
+  # Tetragon v1.1.0 does not support versioned symbol names. Upgrade to
+  # Tetragon v1.3+ to enable d2i_X509 hooking.
+  #
   # RHEL8/9 path — Tetragon v1.1.0 compatible
   - path: "/usr/lib64/libssl.so.3"
     symbols:
@@ -17,19 +24,3 @@ spec:
       type: "uint64"
     - index: 1
       type: "string"
-
-  # d2i_X509(X509 **px, const unsigned char **in, long len)
-  # Note: versioned symbol name required on RHEL9 — d2i_X509@@OPENSSL_3.0.0
-  # Note: 'char_buf' used instead of 'bytes' for Tetragon v1.1.0 compatibility.
-  # Note: 'selectors' removed — only matchPIDs supported in v1.1.0 uprobes.
-  - path: "/usr/lib64/libcrypto.so.3"
-    symbols:
-    - "d2i_X509@@OPENSSL_3.0.0"
-    args:
-    - index: 0
-      type: "uint64"
-    - index: 1
-      type: "char_buf"
-      sizeArgIndex: 3
-    - index: 2
-      type: "size_t"
