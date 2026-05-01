@@ -250,6 +250,8 @@ jobs:
         cp tetragon-config/systemd/tetragon-override.conf "${TMPDIR}/${TARNAME}/tetragon-override.conf"
         # Include pre-generated protos so the spec needs no network access
         cp -r /tmp/generated/tetragon "${TMPDIR}/${TARNAME}/tetragon"
+        # Include policies for the cert-analyzer-policies subpackage
+        cp -r tetragon-policies "${TMPDIR}/${TARNAME}/tetragon-policies"
         tar -czf "${HOME}/rpmbuild/SOURCES/${TARNAME}.tar.gz" \
             -C "${TMPDIR}" "${TARNAME}"
 
@@ -265,19 +267,28 @@ jobs:
           --define "_tetragon_version ${{ env.TETRAGON_VERSION }}" \
           "${HOME}/rpmbuild/SPECS/cert-analyzer.spec"
 
-    - name: Locate built RPM
+    - name: Locate built RPMs
       id: rpm
       run: |
-        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" | head -1)
-        RPM_NAME=$(basename "${RPM_PATH}")
+        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" ! -name "cert-analyzer-policies-*.rpm" | head -1)
+        POLICIES_RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-policies-*.rpm" | head -1)
         echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "name=${RPM_NAME}" >> $GITHUB_OUTPUT
+        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+        echo "policies_path=${POLICIES_RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "policies_name=$(basename ${POLICIES_RPM_PATH})" >> $GITHUB_OUTPUT
 
     - name: Upload RPM as build artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ steps.rpm.outputs.name }}
         path: ${{ steps.rpm.outputs.path }}
+        retention-days: 30
+
+    - name: Upload policies RPM as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.policies_name }}
+        path: ${{ steps.rpm.outputs.policies_path }}
         retention-days: 30
 
     - name: Build summary
@@ -288,6 +299,7 @@ jobs:
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Policies RPM:** \`${{ steps.rpm.outputs.policies_name }}\`" >> $GITHUB_STEP_SUMMARY
 
   build-policies:
     name: Build Tetragon Policies Archive
@@ -452,10 +464,10 @@ jobs:
       contents: write
 
     steps:
-    - name: Download RPM artifact
+    - name: Download RPM artifacts
       uses: actions/download-artifact@v4
       with:
-        pattern: cert-analyzer-*.rpm
+        pattern: cert-analyzer*.rpm
         merge-multiple: true
         path: ./release-assets
 
@@ -483,13 +495,16 @@ jobs:
     - name: Locate release assets
       id: assets
       run: |
-        RPM_PATH=$(find ./release-assets -name "cert-analyzer-*.rpm" | head -1)
+        RPM_PATH=$(find ./release-assets -name "cert-analyzer-*.rpm" ! -name "cert-analyzer-policies-*.rpm" | head -1)
+        POLICIES_RPM_PATH=$(find ./release-assets -name "cert-analyzer-policies-*.rpm" | head -1)
         POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
         CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" | head -1)
         CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" | head -1)
         GENERATOR_PATH=$(find ./release-assets -name "cert-test-generator-*.tar.gz" | head -1)
         echo "rpm_path=${RPM_PATH}" >> $GITHUB_OUTPUT
         echo "rpm_name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+        echo "policies_rpm_path=${POLICIES_RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "policies_rpm_name=$(basename ${POLICIES_RPM_PATH})" >> $GITHUB_OUTPUT
         echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
         echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
         echo "container_ubi8_path=${CONTAINER_UBI8_PATH}" >> $GITHUB_OUTPUT
@@ -506,6 +521,7 @@ jobs:
         draft: false
         files: |
           ${{ steps.assets.outputs.rpm_path }}
+          ${{ steps.assets.outputs.policies_rpm_path }}
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
@@ -530,16 +546,21 @@ jobs:
           docker load < ${{ steps.assets.outputs.generator_name }}
           ```
 
-          ### RPM Package
+          ### RPM Packages
 
-          `${{ steps.assets.outputs.rpm_name }}` — attached below. Install with:
+          `${{ steps.assets.outputs.rpm_name }}` — agent only. Install with:
           ```bash
           sudo dnf install ./${{ steps.assets.outputs.rpm_name }}
           ```
 
-          ### Tetragon Policies
+          `${{ steps.assets.outputs.policies_rpm_name }}` — Tetragon eBPF policies (optional). Installs the stable `certificate-file-access` policy into `/etc/tetragon/tetragon.tp.d/` for automatic loading. Install with:
+          ```bash
+          sudo dnf install ./${{ steps.assets.outputs.rpm_name }} ./${{ steps.assets.outputs.policies_rpm_name }}
+          ```
 
-          `${{ steps.assets.outputs.policies_name }}` — attached below. Extract and apply with:
+          ### Tetragon Policies (tar.gz)
+
+          `${{ steps.assets.outputs.policies_name }}` — attached below. Extract and apply manually with:
           ```bash
           tar -xzf ${{ steps.assets.outputs.policies_name }}
           sudo tetra tracingpolicy add tetragon-policies/<policy-name>.yaml
