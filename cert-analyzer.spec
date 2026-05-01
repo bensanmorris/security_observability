@@ -74,6 +74,7 @@ workload enrichment.
 
 %package policies
 Summary:        Tetragon eBPF policies for cert-analyzer
+BuildArch:      noarch
 Requires:       cert-analyzer = %{version}-%{release}
 
 %description policies

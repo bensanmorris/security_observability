@@ -162,7 +162,7 @@ jobs:
         echo '```' >> $GITHUB_STEP_SUMMARY
 
   build-rpm:
-    name: Build RPM
+    name: Build RPM (RHEL ${{ matrix.ubi-version }})
     runs-on: ubuntu-latest
     needs: changes
     # Always run on tags and PRs; on branch pushes only run if relevant files changed
@@ -171,9 +171,13 @@ jobs:
       github.event_name == 'pull_request' ||
       needs.changes.outputs.relevant == 'true'
     container:
-      image: registry.access.redhat.com/ubi9/ubi:latest
+      image: registry.access.redhat.com/ubi${{ matrix.ubi-version }}/ubi:latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ubi-version: ["8", "9"]
 
     steps:
     - name: Install build prerequisites
@@ -293,7 +297,7 @@ jobs:
 
     - name: Build summary
       run: |
-        echo "## 📦 RPM Build" >> $GITHUB_STEP_SUMMARY
+        echo "## 📦 RPM Build (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
@@ -495,16 +499,10 @@ jobs:
     - name: Locate release assets
       id: assets
       run: |
-        RPM_PATH=$(find ./release-assets -name "cert-analyzer-*.rpm" ! -name "cert-analyzer-policies-*.rpm" | head -1)
-        POLICIES_RPM_PATH=$(find ./release-assets -name "cert-analyzer-policies-*.rpm" | head -1)
         POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
         CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" | head -1)
         CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" | head -1)
         GENERATOR_PATH=$(find ./release-assets -name "cert-test-generator-*.tar.gz" | head -1)
-        echo "rpm_path=${RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "rpm_name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
-        echo "policies_rpm_path=${POLICIES_RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "policies_rpm_name=$(basename ${POLICIES_RPM_PATH})" >> $GITHUB_OUTPUT
         echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
         echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
         echo "container_ubi8_path=${CONTAINER_UBI8_PATH}" >> $GITHUB_OUTPUT
@@ -520,8 +518,7 @@ jobs:
         tag_name: ${{ github.ref_name }}
         draft: false
         files: |
-          ${{ steps.assets.outputs.rpm_path }}
-          ${{ steps.assets.outputs.policies_rpm_path }}
+          ./release-assets/cert-analyzer*.rpm
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
@@ -548,14 +545,18 @@ jobs:
 
           ### RPM Packages
 
-          `${{ steps.assets.outputs.rpm_name }}` — agent only. Install with:
+          RPMs for RHEL 8 (`.el8`) and RHEL 9 (`.el9`) are attached below.
+
+          Agent only:
           ```bash
-          sudo dnf install ./${{ steps.assets.outputs.rpm_name }}
+          sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
+          sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm   # RHEL 9
           ```
 
-          `${{ steps.assets.outputs.policies_rpm_name }}` — Tetragon eBPF policies (optional). Installs the stable `certificate-file-access` policy into `/etc/tetragon/tetragon.tp.d/` for automatic loading. Install with:
+          Agent + Tetragon policies (installs `certificate-file-access` policy into `/etc/tetragon/tetragon.tp.d/` for automatic loading):
           ```bash
-          sudo dnf install ./${{ steps.assets.outputs.rpm_name }} ./${{ steps.assets.outputs.policies_rpm_name }}
+          sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm ./cert-analyzer-policies-<version>.el8.noarch.rpm   # RHEL 8
+          sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm ./cert-analyzer-policies-<version>.el9.noarch.rpm   # RHEL 9
           ```
 
           ### Tetragon Policies (tar.gz)
