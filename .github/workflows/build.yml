@@ -41,6 +41,7 @@ jobs:
             - 'cert-analyzer.conf'
             - 'cert-analyzer.service'
             - 'tetragon-policies/**'
+            - 'tetragon-config/**'
             - '.github/workflows/build.yml'
           test-generator:
             - 'k8s_enrich_demo/**'
@@ -246,6 +247,7 @@ jobs:
         cp LICENSE                   "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.service     "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.conf        "${TMPDIR}/${TARNAME}/"
+        cp tetragon-config/systemd/tetragon-override.conf "${TMPDIR}/${TARNAME}/tetragon-override.conf"
         # Include pre-generated protos so the spec needs no network access
         cp -r /tmp/generated/tetragon "${TMPDIR}/${TARNAME}/tetragon"
         tar -czf "${HOME}/rpmbuild/SOURCES/${TARNAME}.tar.gz" \
