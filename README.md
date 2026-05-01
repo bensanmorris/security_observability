@@ -3,7 +3,7 @@
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 
-Monitor TLS certificate expiry in real-time without modifying applications. Hooks Tetragon's eBPF `fd_install` kprobe to detect certificate file access the moment any process opens it, then parses and exposes expiry metadata as Prometheus metrics.
+Utilises Tetragon to hook kprobes and uprobes to detect certificate accesses, then parses and exposes certificate, process and k8s (where applicable) data as Prometheus metrics and Kafka topics.
 
 Supports PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`).
 
