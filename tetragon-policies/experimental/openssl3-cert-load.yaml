@@ -16,9 +16,6 @@ spec:
       type: "uint64"
     - index: 1
       type: "string"
-    selectors:
-    - matchActions:
-      - action: Post
   - path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
     symbols:
     - "SSL_CTX_use_certificate_file"
@@ -28,21 +25,11 @@ spec:
       type: "uint64"
     - index: 1
       type: "string"
-    selectors:
-    - matchActions:
-      - action: Post
 
   # d2i_X509(X509 **px, const unsigned char **in, long len)
   # arg[1] is a pointer-to-pointer to the DER buffer; arg[2] is its length.
-  # Tetragon reads `len` bytes starting at the address held in arg[1] via
-  # bpf_probe_read_user. Because the C argument is `const unsigned char**`
-  # (a double pointer), the bytes captured are from the address of the local
-  # pointer variable, not the DER cert itself. This is a known limitation of
-  # uprobe-based capture for double-pointer args; the analyzer will attempt
-  # DER parsing and silently discard events where parsing fails.
-  #
-  # Note: 'char_buf' is used instead of 'bytes' for Tetragon v1.1.0 compatibility.
-  # 'bytes' was added in a later Tetragon version.
+  # Note: 'char_buf' used instead of 'bytes' for Tetragon v1.1.0 compatibility.
+  # Note: 'selectors' removed — only matchPIDs supported in v1.1.0 uprobes.
   - path: "/usr/lib64/libssl.so.3"
     symbols:
     - "d2i_X509"
@@ -54,9 +41,6 @@ spec:
       sizeArgIndex: 3
     - index: 2
       type: "size_t"
-    selectors:
-    - matchActions:
-      - action: Post
   - path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
     symbols:
     - "d2i_X509"
@@ -68,6 +52,3 @@ spec:
       sizeArgIndex: 3
     - index: 2
       type: "size_t"
-    selectors:
-    - matchActions:
-      - action: Post
