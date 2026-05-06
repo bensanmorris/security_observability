@@ -1343,46 +1343,6 @@ class CertificateAnalyzer:
 
         return cert_path, process_name, pid, namespace, tetragon_pod
 
-    def _read_proc_mem(self, pid: int, address: int, size: int) -> Optional[bytes]:
-        """Read `size` bytes from process memory at `address` via /proc/{pid}/mem."""
-        try:
-            with open(f'/proc/{pid}/mem', 'rb') as f:
-                f.seek(address)
-                data = f.read(size)
-                return data if len(data) == size else None
-        except Exception as e:
-            logger.debug(f"proc mem read failed pid={pid} addr=0x{address:x} size={size}: {e}")
-            return None
-
-    def _read_der_via_proc_mem(self, pid: int, args) -> Optional[bytes]:
-        """
-        Read DER bytes from process memory for d2i_X509 uprobe events.
-
-        d2i_X509(X509 **px, const unsigned char **in, long len): arg1 is a
-        pointer-to-pointer. We dereference it once via /proc/{pid}/mem to
-        get the address of the DER data, then read len bytes from there.
-
-        Expects args[1].uint64_arg = address of (const unsigned char *) pointing
-        to the DER buffer, and args[2].int64_arg = length of that buffer.
-        """
-        if len(args) < 3:
-            return None
-        if not args[1].HasField('uint64_arg') or not args[2].HasField('int64_arg'):
-            return None
-
-        in_ptr = args[1].uint64_arg
-        length  = args[2].int64_arg
-
-        if length <= 0 or length > 65536:  # certs are never larger than 64 KB
-            return None
-
-        der_ptr_bytes = self._read_proc_mem(pid, in_ptr, 8)
-        if not der_ptr_bytes:
-            return None
-        der_ptr = int.from_bytes(der_ptr_bytes, byteorder='little')
-
-        return self._read_proc_mem(pid, der_ptr, length)
-
     def _handle_uprobe_in_memory_cert(self, event) -> bool:
         """
         Handle a process_uprobe event where the cert arrives as raw DER bytes
@@ -1411,9 +1371,6 @@ class CertificateAnalyzer:
             if arg.HasField('bytes_arg'):
                 raw_bytes = bytes(arg.bytes_arg)
                 break
-
-        if not raw_bytes:
-            raw_bytes = self._read_der_via_proc_mem(pid, uprobe.args)
 
         if not raw_bytes:
             return False
