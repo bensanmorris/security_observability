@@ -3408,6 +3408,31 @@ class TestOpensslUprobeHooking:
         return arg
 
     @staticmethod
+    def _make_uint64_arg(value):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'uint64_arg'
+        arg.uint64_arg = value
+        return arg
+
+    @staticmethod
+    def _make_int64_arg(value):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'int64_arg'
+        arg.int64_arg = value
+        return arg
+
+    @staticmethod
+    def _make_d2i_x509_args(in_ptr, length):
+        """Build the three uprobe args as captured from a d2i_X509 event."""
+        return [
+            TestOpensslUprobeHooking._make_uint64_arg(0),        # arg0: px (NULL)
+            TestOpensslUprobeHooking._make_uint64_arg(in_ptr),   # arg1: &in
+            TestOpensslUprobeHooking._make_int64_arg(length),    # arg2: len
+        ]
+
+    @staticmethod
     def _make_uprobe_event(args, pid=1234, binary='/usr/bin/nginx', has_pod=False):
         """Build a minimal mock process_uprobe event."""
         from unittest.mock import MagicMock
@@ -3672,3 +3697,101 @@ class TestOpensslUprobeHooking:
         analyzer._handle_uprobe_in_memory_cert(event)
 
         assert mock_publisher.publish.call_count == 1
+
+    # ---------------------- d2i_X509 double-pointer path (/proc/{pid}/mem)
+    #
+    # d2i_X509(X509 **px, const unsigned char **in, long len): Tetragon captures
+    # the pointer args as uint64 values. The handler dereferences arg1 via
+    # /proc/{pid}/mem to reach the actual DER bytes (double-pointer pattern).
+    # _read_proc_mem is monkeypatched so tests run without a live process.
+
+    def _proc_mem_mock(self, in_ptr, der_ptr, der):
+        """Return a _read_proc_mem replacement that simulates the double-pointer layout."""
+        length = len(der)
+        def _mock(pid, address, size):
+            if address == in_ptr and size == 8:
+                return der_ptr.to_bytes(8, byteorder='little')
+            if address == der_ptr and size == length:
+                return der
+            return None
+        return _mock
+
+    def test_proc_mem_path_returns_true_for_valid_der(self, analyzer, monkeypatch):
+        """d2i_X509 pointer args resolved via /proc/mem yield a valid cert."""
+        _, der = self._cert_der('proc-mem.example.com')
+        in_ptr, der_ptr = 0x7fff0001, 0x55aa0002
+        event = self._make_uprobe_event(
+            self._make_d2i_x509_args(in_ptr, len(der)), pid=1234
+        )
+        monkeypatch.setattr(analyzer, '_read_proc_mem',
+                            self._proc_mem_mock(in_ptr, der_ptr, der))
+        assert analyzer._handle_uprobe_in_memory_cert(event) is True
+
+    def test_proc_mem_path_adds_cert_to_known_certs(self, analyzer, monkeypatch):
+        """Cert read from process memory is stored in known_certs."""
+        _, der = self._cert_der('proc-mem-store.example.com')
+        in_ptr, der_ptr = 0x7fff0010, 0x55aa0020
+        event = self._make_uprobe_event(
+            self._make_d2i_x509_args(in_ptr, len(der)), pid=2000
+        )
+        monkeypatch.setattr(analyzer, '_read_proc_mem',
+                            self._proc_mem_mock(in_ptr, der_ptr, der))
+        analyzer._handle_uprobe_in_memory_cert(event)
+        assert len(analyzer.known_certs) == 1
+
+    def test_proc_mem_path_synthetic_path_format(self, analyzer, monkeypatch):
+        """Cert from proc/mem uses the uprobe://d2i_X509/<pid>/<serial> path scheme."""
+        cert, der = self._cert_der('proc-mem-path.example.com')
+        in_ptr, der_ptr = 0x7fff0030, 0x55aa0040
+        event = self._make_uprobe_event(
+            self._make_d2i_x509_args(in_ptr, len(der)), pid=3000
+        )
+        monkeypatch.setattr(analyzer, '_read_proc_mem',
+                            self._proc_mem_mock(in_ptr, der_ptr, der))
+        analyzer._handle_uprobe_in_memory_cert(event)
+
+        stored = list(analyzer.known_certs.values())[0]
+        assert stored.path == f'uprobe://d2i_X509/3000/{cert.serial_number}'
+
+    def test_proc_mem_path_returns_false_on_read_failure(self, analyzer, monkeypatch):
+        """A /proc/mem read failure returns False without raising."""
+        _, der = self._cert_der()
+        in_ptr = 0x7fff0050
+        event = self._make_uprobe_event(
+            self._make_d2i_x509_args(in_ptr, len(der)), pid=4000
+        )
+        monkeypatch.setattr(analyzer, '_read_proc_mem', lambda *_: None)
+        assert analyzer._handle_uprobe_in_memory_cert(event) is False
+
+    def test_proc_mem_path_returns_false_for_excessive_length(self, analyzer, monkeypatch):
+        """A length value above the 64 KB guard returns False without touching /proc/mem."""
+        reads = []
+        monkeypatch.setattr(analyzer, '_read_proc_mem',
+                            lambda *a: reads.append(a) or None)
+        event = self._make_uprobe_event(
+            self._make_d2i_x509_args(0x1000, 65537), pid=5000
+        )
+        assert analyzer._handle_uprobe_in_memory_cert(event) is False
+        assert reads == [], "_read_proc_mem should not be called when length exceeds guard"
+
+    def test_proc_mem_path_returns_false_for_zero_length(self, analyzer, monkeypatch):
+        """Zero length returns False without touching /proc/mem."""
+        reads = []
+        monkeypatch.setattr(analyzer, '_read_proc_mem',
+                            lambda *a: reads.append(a) or None)
+        event = self._make_uprobe_event(
+            self._make_d2i_x509_args(0x1000, 0), pid=6000
+        )
+        assert analyzer._handle_uprobe_in_memory_cert(event) is False
+        assert reads == []
+
+    def test_bytes_arg_takes_precedence_over_proc_mem(self, analyzer, monkeypatch):
+        """bytes_arg (direct DER in event) is used before the proc/mem fallback."""
+        _, der = self._cert_der('precedence.example.com')
+        proc_mem_called = []
+        monkeypatch.setattr(analyzer, '_read_proc_mem',
+                            lambda *a: proc_mem_called.append(a) or None)
+
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        assert analyzer._handle_uprobe_in_memory_cert(event) is True
+        assert proc_mem_called == [], "proc/mem should not be consulted when bytes_arg is present"
