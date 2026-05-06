@@ -34,6 +34,14 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
+# CAP_SYS_PTRACE is required to read /proc/{pid}/mem for other-user processes,
+# which is how the d2i_X509 uprobe handler resolves the double-pointer **in
+# argument to extract DER certificate bytes from process memory.
+# RHEL's default ptrace_scope=1 (YAMA) blocks cross-process /proc/mem access
+# without this capability. AmbientCapabilities ensures it survives the exec
+# into the Python process even under NoNewPrivileges.
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=CAP_SYS_PTRACE
 # Allow read-only access to host certificate directories and Tetragon socket
 ReadOnlyPaths=/etc/ssl /etc/pki /var/run/cilium
 # Allow read access to the configuration file
