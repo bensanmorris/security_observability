@@ -3672,4 +3672,3 @@ class TestOpensslUprobeHooking:
         analyzer._handle_uprobe_in_memory_cert(event)
 
         assert mock_publisher.publish.call_count == 1
-
