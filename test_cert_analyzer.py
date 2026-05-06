@@ -1853,6 +1853,35 @@ class TestTetragonVersionCheck:
         except Exception as exc:
             pytest.fail(f"get_runtime_tetragon_version raised unexpectedly: {exc}")
 
+    def test_get_runtime_version_returns_unknown_when_get_version_request_absent(
+        self, analyzer, monkeypatch, caplog
+    ):
+        """Tetragon <= v1.1.0 lacks GetVersionRequest — must return 'unknown' and warn."""
+        import cert_analyzer as _ca
+        monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
+        stub = _MockVersionStub(version='v1.0.0')
+
+        with caplog.at_level(logging.WARNING, logger='cert_analyzer'):
+            result = analyzer.get_runtime_tetragon_version(stub)
+
+        assert result == 'unknown'
+        assert any('GetVersionRequest' in r.message for r in caplog.records)
+
+    def test_get_runtime_version_does_not_call_stub_when_get_version_request_absent(
+        self, analyzer, monkeypatch
+    ):
+        """No RPC call is made when GetVersionRequest is missing from the bindings."""
+        import cert_analyzer as _ca
+        monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
+
+        calls = []
+        stub = _MockVersionStub(version='v1.0.0')
+        stub.GetVersion = lambda *a, **kw: calls.append(1)  # noqa: E731
+
+        analyzer.get_runtime_tetragon_version(stub)
+
+        assert calls == [], "GetVersion RPC should not be called on old Tetragon bindings"
+
 
 class TestBuildInfo:
     """
