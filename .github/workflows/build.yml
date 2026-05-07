@@ -505,9 +505,10 @@ jobs:
       id: archive
       run: |
         ARCHIVE_NAME="probe-tests-${{ steps.version.outputs.value }}.tar.gz"
-        tar -czf "${ARCHIVE_NAME}" \
-          -C probe_tests/build test_openssl3_cert_load \
-          -C "${{ github.workspace }}/probe_tests" README.md
+        mkdir probe-tests-stage
+        cp probe_tests/build/test_openssl3_cert_load probe-tests-stage/
+        cp probe_tests/README.md probe-tests-stage/
+        tar -czf "${ARCHIVE_NAME}" -C probe-tests-stage .
         echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
         echo "path=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
 
