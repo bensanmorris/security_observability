@@ -27,6 +27,7 @@ jobs:
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
       test-generator: ${{ steps.filter.outputs.test-generator }}
+      probe-tests: ${{ steps.filter.outputs.probe-tests }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -45,6 +46,9 @@ jobs:
             - '.github/workflows/build.yml'
           test-generator:
             - 'k8s_enrich_demo/**'
+            - '.github/workflows/build.yml'
+          probe-tests:
+            - 'probe_tests/**'
             - '.github/workflows/build.yml'
 
   build:
@@ -458,11 +462,79 @@ jobs:
         echo "kubectl apply -f k8s_enrich_demo/job.yaml" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
 
+  build-probe-tests:
+    name: Build Probe Tests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: |
+      github.ref_type == 'tag' ||
+      github.event_name == 'pull_request' ||
+      needs.changes.outputs.probe-tests == 'true'
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Install build prerequisites
+      run: |
+        dnf install -y \
+          cmake \
+          gcc-c++ \
+          make \
+          openssl-devel
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          echo "value=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        else
+          echo "value=${{ github.sha }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build probe tests
+      run: |
+        cmake -S probe_tests -B probe_tests/build
+        cmake --build probe_tests/build
+
+    - name: Package probe tests archive
+      id: archive
+      run: |
+        ARCHIVE_NAME="probe-tests-${{ steps.version.outputs.value }}.tar.gz"
+        tar -czf "${ARCHIVE_NAME}" \
+          -C probe_tests/build test_openssl3_cert_load \
+          -C "${{ github.workspace }}/probe_tests" README.md
+        echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+        echo "path=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Upload probe tests archive as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.archive.outputs.name }}
+        path: ${{ steps.archive.outputs.path }}
+        retention-days: 30
+
+    - name: Build summary
+      run: |
+        echo "## 🔬 Probe Tests" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Archive:** \`${{ steps.archive.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Contents:**" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        tar -tzf "${{ steps.archive.outputs.path }}" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
   release:
     name: Publish Release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    needs: [ build, build-rpm, build-policies, build-test-generator ]
+    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests ]
     permissions:
       contents: write
 
@@ -495,6 +567,13 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download probe tests artifact
+      uses: actions/download-artifact@v4
+      with:
+        pattern: probe-tests-*.tar.gz
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Locate release assets
       id: assets
       run: |
@@ -510,6 +589,9 @@ jobs:
         echo "container_ubi9_name=$(basename ${CONTAINER_UBI9_PATH})" >> $GITHUB_OUTPUT
         echo "generator_path=${GENERATOR_PATH}" >> $GITHUB_OUTPUT
         echo "generator_name=$(basename ${GENERATOR_PATH})" >> $GITHUB_OUTPUT
+        PROBE_TESTS_PATH=$(find ./release-assets -name "probe-tests-*.tar.gz" | head -1)
+        echo "probe_tests_path=${PROBE_TESTS_PATH}" >> $GITHUB_OUTPUT
+        echo "probe_tests_name=$(basename ${PROBE_TESTS_PATH})" >> $GITHUB_OUTPUT
 
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v2
@@ -522,6 +604,7 @@ jobs:
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
           ${{ steps.assets.outputs.generator_path }}
+          ${{ steps.assets.outputs.probe_tests_path }}
         fail_on_unmatched_files: true
         body: |
           ## cert-analyzer ${{ github.ref_name }}
@@ -564,6 +647,14 @@ jobs:
           ```bash
           tar -xzf ${{ steps.assets.outputs.policies_name }}
           sudo tetra tracingpolicy add tetragon-policies/<policy-name>.yaml
+          ```
+
+          ### Probe Tests
+
+          `${{ steps.assets.outputs.probe_tests_name }}` — attached below. Native binaries (built on RHEL 9 / UBI 9) for manually exercising Tetragon uprobe hooks. Run with Tetragon active to confirm `cert_analyzer.py` receives the expected events:
+          ```bash
+          tar -xzf ${{ steps.assets.outputs.probe_tests_name }}
+          ./test_openssl3_cert_load /path/to/cert.pem
           ```
 
           ### Tetragon Version
