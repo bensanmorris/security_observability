@@ -150,3 +150,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Kubernetes / pod enrichment demo](POD-ENRICHMENT-DEMO-README.md)
 - [Deployment guide](DEPLOYMENT-README.md)
 - [Testing guide](TEST-README.md)
+- [Uprobe hook tests](probe_tests/README.md) — C++ programs for verifying Tetragon uprobe policies fire correctly
