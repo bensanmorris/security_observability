@@ -5,7 +5,7 @@
 
 Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of certificate accesses in realtime. Parses and surfaces certificate, process and k8s data (where applicable) as both Prometheus metrics and Kafka topics.
 
-Supports in-memory certificate intercepts (via uprobe hooks) for post-decrypt inspection (no keys required) in addition to file-based PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) formats.
+Supports in-memory certificate intercepts (via system crypto lib uprobe hooks) for post-decrypt inspection (no keys required) in addition to file-based PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) formats.
 
 ---
 
