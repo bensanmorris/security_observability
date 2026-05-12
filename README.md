@@ -34,6 +34,22 @@ sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm ./cert-analyzer-polici
 
 The installer will fail with a clear error if Tetragon is not found.
 
+**Manually applying policies from the CI archive (development / testing):**
+
+Each CI run and release attaches a `tetragon-policies-<version>.tar.gz` artifact containing all policy YAMLs (including those under `experimental/`). To apply a policy without installing the RPM:
+
+```bash
+tar -xzf tetragon-policies-<version>.tar.gz
+
+# Load immediately (active until Tetragon restarts):
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml   # RHEL 9 only
+
+# Or install persistently (loaded automatically on Tetragon start):
+sudo cp tetragon-policies/certificate-file-access.yaml /etc/tetragon/tetragon.tp.d/
+sudo systemctl restart tetragon
+```
+
 ---
 
 ## Post-install
