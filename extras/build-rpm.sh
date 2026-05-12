@@ -127,19 +127,21 @@ TMPDIR_SRC="$(mktemp -d)"
 mkdir -p "$TMPDIR_SRC/$TARNAME"
 cp "$REPO_ROOT/cert_analyzer.py"       "$TMPDIR_SRC/$TARNAME/"
 cp "$REPO_ROOT/LICENSE"                "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/cert-analyzer.service" "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/cert-analyzer.conf"    "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/cert-analyzer.service" "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/cert-analyzer.conf"    "$TMPDIR_SRC/$TARNAME/"
 # Include pre-generated protos so the spec needs no network access
 cp -r "$PROTO_TMPDIR/generated/tetragon" "$TMPDIR_SRC/$TARNAME/tetragon"
 # Tetragon systemd drop-in that exposes the socket to the cert-analyzer group
 cp "$REPO_ROOT/tetragon-config/systemd/tetragon-override.conf" \
     "$TMPDIR_SRC/$TARNAME/tetragon-override.conf"
+# Tetragon tracing policies
+cp -r "$REPO_ROOT/tetragon-policies" "$TMPDIR_SRC/$TARNAME/tetragon-policies"
 
 tar -czf "$TARBALL" -C "$TMPDIR_SRC" "$TARNAME"
 echo "Tarball created: $TARBALL"
 
 # ── Copy spec file ────────────────────────────────────────────────────────────
-cp "$SCRIPT_DIR/cert-analyzer.spec" "$RPMBUILD_ROOT/SPECS/cert-analyzer.spec"
+cp "$REPO_ROOT/cert-analyzer.spec" "$RPMBUILD_ROOT/SPECS/cert-analyzer.spec"
 
 # ── Run rpmbuild ──────────────────────────────────────────────────────────────
 echo "Running rpmbuild..."
