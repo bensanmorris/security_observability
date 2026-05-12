@@ -1387,7 +1387,7 @@ class CertificateAnalyzer:
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
         self.metrics.last_event_timestamp.set(time.time())
-        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
+        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {os.path.basename(process_name)} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
             logger.info(f"Re-detected known in-memory certificate: {synthetic_path}")
@@ -1433,7 +1433,7 @@ class CertificateAnalyzer:
                 logger.debug(f"Skipping self-generated event from PID {pid}")
                 return
 
-        logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
+        logger.info(f"🔍 Detected certificate access: {cert_path} by {os.path.basename(process_name)} (PID: {pid})")
 
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
