@@ -3379,7 +3379,7 @@ class TestOpensslUprobeHooking:
     - File-path hooks (SSL_CTX_use_certificate_file / SSL_CTX_use_certificate_chain_file):
       cert path is carried in a string_arg and handled by the existing
       extract_cert_path_from_event / process_event flow.
-    - In-memory hooks (d2i_X509): raw DER bytes arrive in a bytes_arg and are
+    - In-memory hooks (SSL_CTX_use_certificate_ASN1): raw DER bytes arrive in a bytes_arg and are
       handled by _handle_uprobe_in_memory_cert, which parses them directly
       without touching the filesystem.
     """
@@ -3408,13 +3408,15 @@ class TestOpensslUprobeHooking:
         return arg
 
     @staticmethod
-    def _make_uprobe_event(args, pid=1234, binary='/usr/bin/nginx', has_pod=False):
+    def _make_uprobe_event(args, pid=1234, binary='/usr/bin/nginx', has_pod=False,
+                           symbol='SSL_CTX_use_certificate_ASN1'):
         """Build a minimal mock process_uprobe event."""
         from unittest.mock import MagicMock
 
         mock_uprobe = MagicMock()
         mock_uprobe.process.binary = binary
         mock_uprobe.process.pid.value = pid
+        mock_uprobe.symbol = symbol
 
         if has_pod:
             mock_uprobe.process.HasField.side_effect = lambda f: f in ('pid', 'pod')
@@ -3516,14 +3518,15 @@ class TestOpensslUprobeHooking:
         assert len(analyzer.known_certs) == 1
 
     def test_handle_bytes_synthetic_path_format(self, analyzer):
-        """CertificateInfo.path uses the uprobe://d2i_X509/<pid>/<serial> scheme."""
+        """CertificateInfo.path uses the uprobe://<symbol>/<pid>/<serial> scheme."""
         cert, der = self._cert_der()
         serial = str(cert.serial_number)
-        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=5678)
+        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=5678,
+                                        symbol='SSL_CTX_use_certificate_ASN1')
         analyzer._handle_uprobe_in_memory_cert(event)
 
         stored = list(analyzer.known_certs.values())[0]
-        assert stored.path == f'uprobe://d2i_X509/5678/{serial}'
+        assert stored.path == f'uprobe://SSL_CTX_use_certificate_ASN1/5678/{serial}'
 
     def test_handle_bytes_deduplicates_same_cert(self, analyzer):
         """Calling _handle_uprobe_in_memory_cert twice with the same DER adds only one entry."""
@@ -3657,7 +3660,7 @@ class TestOpensslUprobeHooking:
 
         mock_publisher.publish.assert_called_once()
         published = mock_publisher.publish.call_args[0][0]
-        assert 'uprobe://d2i_X509' in published.path
+        assert 'uprobe://SSL_CTX_use_certificate_ASN1' in published.path
 
     def test_kafka_not_published_for_redetected_in_memory_cert(self, analyzer):
         """Re-detected in-memory cert (same DER) is NOT published to Kafka again."""

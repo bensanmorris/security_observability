@@ -1346,8 +1346,9 @@ class CertificateAnalyzer:
     def _handle_uprobe_in_memory_cert(self, event) -> bool:
         """
         Handle a process_uprobe event where the cert arrives as raw DER bytes
-        (e.g. d2i_X509). Returns True if a cert was successfully extracted and
-        processed, False otherwise (no bytes_arg, unparseable bytes, etc.).
+        (e.g. SSL_CTX_use_certificate_ASN1). Returns True if a cert was
+        successfully extracted and processed, False otherwise (no bytes_arg,
+        unparseable bytes, etc.).
         """
         if not event.HasField('process_uprobe'):
             return False
@@ -1382,10 +1383,11 @@ class CertificateAnalyzer:
             return False
 
         serial = str(cert.serial_number)
-        synthetic_path = f"uprobe://d2i_X509/{pid}/{serial}"
+        symbol = uprobe.symbol if uprobe.symbol else "SSL_CTX_use_certificate_ASN1"
+        synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
         self.metrics.last_event_timestamp.set(time.time())
-        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
+        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {os.path.basename(process_name)} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
             logger.info(f"Re-detected known in-memory certificate: {synthetic_path}")
@@ -1431,7 +1433,7 @@ class CertificateAnalyzer:
                 logger.debug(f"Skipping self-generated event from PID {pid}")
                 return
 
-        logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
+        logger.info(f"🔍 Detected certificate access: {cert_path} by {os.path.basename(process_name)} (PID: {pid})")
 
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
