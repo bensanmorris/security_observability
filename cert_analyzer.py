@@ -1272,19 +1272,18 @@ class CertificateAnalyzer:
             logger.debug(f"   Container: {info.container_name} ({info.container_image})")
 
     def _resolve_process_binary(self, process_name: str, pid: int) -> str:
-        """Fall back to /proc/{pid}/exe when Tetragon truncates the binary path to a directory."""
-        if not os.path.isdir(process_name):
-            return process_name
+        """Resolve the full binary path when Tetragon truncates it to a parent directory.
+
+        Always probes /proc/{pid}/exe so that ProtectHome (which makes os.path.isdir()
+        unreliable for /home paths inside the service namespace) does not prevent
+        resolution while the process is still alive.
+        """
         try:
-            return os.readlink(f"/proc/{pid}/exe")
+            exe = os.readlink(f"/proc/{pid}/exe")
+            if exe == process_name or exe.startswith(process_name + "/"):
+                return exe
         except OSError:
             pass
-        try:
-            with open(f"/proc/{pid}/comm") as f:
-                return f.read().strip()
-        except OSError:
-            pass
-        logger.debug(f"PID {pid} already exited; Tetragon binary path truncated to directory {process_name}")
         return process_name
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:

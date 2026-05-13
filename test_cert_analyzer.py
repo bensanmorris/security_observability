@@ -3680,17 +3680,19 @@ class TestOpensslUprobeHooking:
 class TestResolveProcessBinary:
     """Tests for _resolve_process_binary fallback when Tetragon truncates the binary path."""
 
-    def test_normal_file_path_returned_unchanged(self, analyzer):
-        """/proc is not consulted when binary is a regular file."""
-        result = analyzer._resolve_process_binary('/usr/bin/nginx', 9999)
+    def test_normal_path_confirmed_via_proc_exe(self, analyzer):
+        """A non-truncated binary path is returned unchanged when proc/exe agrees."""
+        import unittest.mock as mock
+        with mock.patch('os.readlink', return_value='/usr/bin/nginx'):
+            result = analyzer._resolve_process_binary('/usr/bin/nginx', 9999)
         assert result == '/usr/bin/nginx'
 
-    def test_directory_path_resolved_via_proc_exe(self, analyzer, tmp_path):
-        """When binary is a directory, /proc/{pid}/exe symlink is followed."""
-        binary = tmp_path / 'test_openssl3_cert_load'
-        binary.write_bytes(b'')
+    def test_truncated_path_resolved_via_proc_exe(self, analyzer, tmp_path):
+        """When Tetragon gives a directory (truncated), /proc/{pid}/exe provides the full path."""
         link_dir = tmp_path / 'build'
         link_dir.mkdir()
+        binary = link_dir / 'test_openssl3_cert_load'
+        binary.write_bytes(b'')
 
         import unittest.mock as mock
 
@@ -3705,36 +3707,29 @@ class TestResolveProcessBinary:
             result = analyzer._resolve_process_binary(str(link_dir), 1234)
         assert result == str(binary)
 
-    def test_proc_exe_oserror_falls_back_to_comm(self, analyzer, tmp_path, monkeypatch):
-        """/proc/{pid}/comm is read when /proc/{pid}/exe raises OSError."""
-        link_dir = tmp_path / 'build'
-        link_dir.mkdir()
-
-        comm_file = tmp_path / 'comm'
-        comm_file.write_text('test_openssl3_cert_load\n')
-
-        import builtins, unittest.mock as mock
-
-        original_open = builtins.open
-
-        def mock_open(path, *args, **kwargs):
-            if path == '/proc/42/comm':
-                return original_open(str(comm_file), *args, **kwargs)
-            return original_open(path, *args, **kwargs)
-
-        with mock.patch('os.readlink', side_effect=OSError('no such process')), \
-             mock.patch('builtins.open', side_effect=mock_open):
-            result = analyzer._resolve_process_binary(str(link_dir), 42)
-        assert result == 'test_openssl3_cert_load'
-
-    def test_both_proc_reads_fail_returns_original(self, analyzer, tmp_path):
-        """Original directory path is returned when both /proc reads fail."""
-        link_dir = tmp_path / 'build'
-        link_dir.mkdir()
-
+    def test_protect_home_path_resolved_via_proc_exe(self, analyzer, tmp_path):
+        """Works even when ProtectHome makes os.path.isdir() unreliable for /home paths."""
         import unittest.mock as mock
 
-        with mock.patch('os.readlink', side_effect=OSError), \
-             mock.patch('builtins.open', side_effect=OSError):
-            result = analyzer._resolve_process_binary(str(link_dir), 99)
-        assert result == str(link_dir)
+        home_dir = '/home/benm/app/build'
+        home_binary = '/home/benm/app/build/myserver'
+
+        original_readlink = __import__('os').readlink
+
+        def mock_readlink(path):
+            if path == '/proc/1234/exe':
+                return home_binary
+            return original_readlink(path)
+
+        with mock.patch('os.readlink', side_effect=mock_readlink), \
+             mock.patch('os.path.isdir', return_value=False):
+            result = analyzer._resolve_process_binary(home_dir, 1234)
+        assert result == home_binary
+
+    def test_proc_exe_oserror_returns_original(self, analyzer):
+        """Original path is returned when /proc/{pid}/exe raises OSError (process exited)."""
+        import unittest.mock as mock
+
+        with mock.patch('os.readlink', side_effect=OSError('no such process')):
+            result = analyzer._resolve_process_binary('/some/build/dir', 42)
+        assert result == '/some/build/dir'
