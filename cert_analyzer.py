@@ -1284,6 +1284,7 @@ class CertificateAnalyzer:
                 return f.read().strip()
         except OSError:
             pass
+        logger.debug(f"PID {pid} already exited; Tetragon binary path truncated to directory {process_name}")
         return process_name
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
