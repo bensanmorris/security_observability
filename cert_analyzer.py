@@ -1280,10 +1280,12 @@ class CertificateAnalyzer:
         """
         try:
             exe = os.readlink(f"/proc/{pid}/exe")
-            if exe == process_name or exe.startswith(process_name + "/"):
+            prefix = process_name.rstrip("/")
+            logger.debug(f"_resolve_process_binary: pid={pid} tetragon={process_name!r} exe={exe!r}")
+            if exe == prefix or exe.startswith(prefix + "/"):
                 return exe
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug(f"_resolve_process_binary: pid={pid} readlink failed: {e}")
         return process_name
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
