@@ -1281,11 +1281,12 @@ class CertificateAnalyzer:
         try:
             exe = os.readlink(f"/proc/{pid}/exe")
             prefix = process_name.rstrip("/")
-            logger.debug(f"_resolve_process_binary: pid={pid} tetragon={process_name!r} exe={exe!r}")
             if exe == prefix or exe.startswith(prefix + "/"):
+                if exe != process_name:
+                    logger.debug(f"Resolved truncated binary path for PID {pid}: {process_name!r} -> {exe!r}")
                 return exe
         except OSError as e:
-            logger.debug(f"_resolve_process_binary: pid={pid} readlink failed: {e}")
+            logger.debug(f"Could not resolve binary path for PID {pid}: {e}")
         return process_name
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
