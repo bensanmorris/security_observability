@@ -1271,6 +1271,21 @@ class CertificateAnalyzer:
             logger.debug(f"   Workload: {info.workload}")
             logger.debug(f"   Container: {info.container_name} ({info.container_image})")
 
+    def _resolve_process_binary(self, process_name: str, pid: int) -> str:
+        """Fall back to /proc/{pid}/exe when Tetragon truncates the binary path to a directory."""
+        if not os.path.isdir(process_name):
+            return process_name
+        try:
+            return os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            pass
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                return f.read().strip()
+        except OSError:
+            pass
+        return process_name
+
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
         """
         Extract certificate path, process name, PID, namespace, and the raw
@@ -1289,8 +1304,8 @@ class CertificateAnalyzer:
         # Handle kprobe events
         if event.HasField('process_kprobe'):
             kprobe = event.process_kprobe
-            process_name = kprobe.process.binary
             pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+            process_name = self._resolve_process_binary(kprobe.process.binary, pid)
 
             if kprobe.process.HasField('pod'):
                 tetragon_pod = kprobe.process.pod
@@ -1313,8 +1328,8 @@ class CertificateAnalyzer:
         # Handle uprobe events
         elif event.HasField('process_uprobe'):
             uprobe = event.process_uprobe
-            process_name = uprobe.process.binary
             pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+            process_name = self._resolve_process_binary(uprobe.process.binary, pid)
 
             if uprobe.process.HasField('pod'):
                 tetragon_pod = uprobe.process.pod
@@ -1354,8 +1369,8 @@ class CertificateAnalyzer:
             return False
 
         uprobe = event.process_uprobe
-        process_name = uprobe.process.binary
         pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
         tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
         namespace = tetragon_pod.namespace if tetragon_pod else ""
 
@@ -1387,7 +1402,7 @@ class CertificateAnalyzer:
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
         self.metrics.last_event_timestamp.set(time.time())
-        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {os.path.basename(process_name)} (PID: {pid})")
+        logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
             logger.info(f"Re-detected known in-memory certificate: {synthetic_path}")
@@ -1433,7 +1448,7 @@ class CertificateAnalyzer:
                 logger.debug(f"Skipping self-generated event from PID {pid}")
                 return
 
-        logger.info(f"🔍 Detected certificate access: {cert_path} by {os.path.basename(process_name)} (PID: {pid})")
+        logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
 
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
