@@ -8,7 +8,7 @@
  *   2. SSL_CTX_use_certificate_chain_file (file path, PEM chain)
  *   3. SSL_CTX_use_certificate_ASN1      (raw DER bytes in memory)
  *
- * Usage: ./test_openssl3_cert_load [cert.pem]
+ * Usage: ./test_openssl3_cert_load [--pause] [cert.pem]
  *
  * Defaults to ../test-certs/valid.crt when no argument is supplied so the
  * binary can be run directly from a build/ subdirectory of probe_tests/.
@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -178,7 +179,13 @@ static bool test_use_certificate_asn1(const std::string& cert_path)
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
-    const std::string cert_path = (argc > 1) ? argv[1] : "../test-certs/valid.crt";
+    bool do_pause = false;
+    int cert_arg = 1;
+    if (argc > 1 && std::string(argv[1]) == "--pause") {
+        do_pause = true;
+        cert_arg = 2;
+    }
+    const std::string cert_path = (argc > cert_arg) ? argv[cert_arg] : "../test-certs/valid.crt";
 
     OPENSSL_init_ssl(
         OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS,
@@ -198,6 +205,11 @@ int main(int argc, char* argv[])
     if (failures)
         std::cout << " (" << failures << " failed)";
     std::cout << " ===\n";
+
+    if (do_pause) {
+        std::cout << "PID " << getpid() << " pausing — press Ctrl+C to exit\n";
+        pause();
+    }
 
     return failures ? 1 : 0;
 }

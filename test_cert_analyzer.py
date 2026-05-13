@@ -3675,3 +3675,61 @@ class TestOpensslUprobeHooking:
         analyzer._handle_uprobe_in_memory_cert(event)
 
         assert mock_publisher.publish.call_count == 1
+
+
+class TestResolveProcessBinary:
+    """Tests for _resolve_process_binary fallback when Tetragon truncates the binary path."""
+
+    def test_normal_path_confirmed_via_proc_exe(self, analyzer):
+        """A non-truncated binary path is returned unchanged when proc/exe agrees."""
+        import unittest.mock as mock
+        with mock.patch('os.readlink', return_value='/usr/bin/nginx'):
+            result = analyzer._resolve_process_binary('/usr/bin/nginx', 9999)
+        assert result == '/usr/bin/nginx'
+
+    def test_truncated_path_resolved_via_proc_exe(self, analyzer, tmp_path):
+        """When Tetragon gives a directory (truncated), /proc/{pid}/exe provides the full path."""
+        link_dir = tmp_path / 'build'
+        link_dir.mkdir()
+        binary = link_dir / 'test_openssl3_cert_load'
+        binary.write_bytes(b'')
+
+        import unittest.mock as mock
+
+        original_readlink = __import__('os').readlink
+
+        def mock_readlink(path):
+            if path == '/proc/1234/exe':
+                return str(binary)
+            return original_readlink(path)
+
+        with mock.patch('os.readlink', side_effect=mock_readlink):
+            result = analyzer._resolve_process_binary(str(link_dir), 1234)
+        assert result == str(binary)
+
+    def test_protect_home_path_resolved_via_proc_exe(self, analyzer, tmp_path):
+        """Works even when ProtectHome makes os.path.isdir() unreliable for /home paths."""
+        import unittest.mock as mock
+
+        home_dir = '/home/benm/app/build'
+        home_binary = '/home/benm/app/build/myserver'
+
+        original_readlink = __import__('os').readlink
+
+        def mock_readlink(path):
+            if path == '/proc/1234/exe':
+                return home_binary
+            return original_readlink(path)
+
+        with mock.patch('os.readlink', side_effect=mock_readlink), \
+             mock.patch('os.path.isdir', return_value=False):
+            result = analyzer._resolve_process_binary(home_dir, 1234)
+        assert result == home_binary
+
+    def test_proc_exe_oserror_returns_original(self, analyzer):
+        """Original path is returned when /proc/{pid}/exe raises OSError (process exited)."""
+        import unittest.mock as mock
+
+        with mock.patch('os.readlink', side_effect=OSError('no such process')):
+            result = analyzer._resolve_process_binary('/some/build/dir', 42)
+        assert result == '/some/build/dir'
