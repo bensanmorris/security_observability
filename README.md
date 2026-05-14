@@ -36,8 +36,11 @@ tar -xzf tetragon-policies-<version>.tar.gz
 
 # Load immediately (active until Tetragon restarts):
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml     # RHEL 9
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl1_1-cert-load.yaml   # RHEL 8
+
+# RHEL 9 (OpenSSL 3):
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml
+# RHEL 8 (OpenSSL 1.1):
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl1_1-cert-load.yaml
 
 # Or install persistently (loaded automatically on Tetragon start):
 sudo cp tetragon-policies/certificate-file-access.yaml /etc/tetragon/tetragon.tp.d/
