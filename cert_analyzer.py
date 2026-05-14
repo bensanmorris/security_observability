@@ -1401,7 +1401,7 @@ class CertificateAnalyzer:
             return False
 
         serial = str(cert.serial_number)
-        symbol = uprobe.symbol if uprobe.symbol else "SSL_CTX_use_certificate_ASN1"
+        symbol = uprobe.symbol if uprobe.symbol else "uprobe symbol not provided"
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
         self.metrics.last_event_timestamp.set(time.time())
