@@ -257,8 +257,6 @@ jobs:
         cp tetragon-config/systemd/tetragon-override.conf "${TMPDIR}/${TARNAME}/tetragon-override.conf"
         # Include pre-generated protos so the spec needs no network access
         cp -r /tmp/generated/tetragon "${TMPDIR}/${TARNAME}/tetragon"
-        # Include policies for the cert-analyzer-policies subpackage
-        cp -r tetragon-policies "${TMPDIR}/${TARNAME}/tetragon-policies"
         tar -czf "${HOME}/rpmbuild/SOURCES/${TARNAME}.tar.gz" \
             -C "${TMPDIR}" "${TARNAME}"
 
@@ -277,25 +275,15 @@ jobs:
     - name: Locate built RPMs
       id: rpm
       run: |
-        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" ! -name "cert-analyzer-policies-*.rpm" | head -1)
-        POLICIES_RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-policies-*.rpm" | head -1)
+        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" | head -1)
         echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
         echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
-        echo "policies_path=${POLICIES_RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "policies_name=$(basename ${POLICIES_RPM_PATH})" >> $GITHUB_OUTPUT
 
     - name: Upload RPM as build artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ steps.rpm.outputs.name }}
         path: ${{ steps.rpm.outputs.path }}
-        retention-days: 30
-
-    - name: Upload policies RPM as build artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ steps.rpm.outputs.policies_name }}
-        path: ${{ steps.rpm.outputs.policies_path }}
         retention-days: 30
 
     - name: Build summary
@@ -306,7 +294,6 @@ jobs:
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "**Policies RPM:** \`${{ steps.rpm.outputs.policies_name }}\`" >> $GITHUB_STEP_SUMMARY
 
   build-policies:
     name: Build Tetragon Policies Archive
@@ -630,24 +617,28 @@ jobs:
 
           RPMs for RHEL 8 (`.el8`) and RHEL 9 (`.el9`) are attached below.
 
-          Agent only:
           ```bash
           sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
           sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm   # RHEL 9
           ```
 
-          Agent + Tetragon policies (installs `certificate-file-access` policy into `/etc/tetragon/tetragon.tp.d/` for automatic loading):
-          ```bash
-          sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm ./cert-analyzer-policies-<version>.el8.noarch.rpm   # RHEL 8
-          sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm ./cert-analyzer-policies-<version>.el9.noarch.rpm   # RHEL 9
-          ```
-
           ### Tetragon Policies (tar.gz)
 
-          `${{ steps.assets.outputs.policies_name }}` — attached below. Extract and apply manually with:
+          Policies are shipped separately so they can be updated independently of the agent. `${{ steps.assets.outputs.policies_name }}` is attached below.
+
           ```bash
           tar -xzf ${{ steps.assets.outputs.policies_name }}
-          sudo tetra tracingpolicy add tetragon-policies/<policy-name>.yaml
+
+          # Load immediately (active until Tetragon restarts):
+          sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+          # RHEL 9 (OpenSSL 3):
+          sudo tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml
+          # RHEL 8 (OpenSSL 1.1):
+          sudo tetra tracingpolicy add tetragon-policies/experimental/openssl1_1-cert-load.yaml
+
+          # Or install persistently (loaded automatically on Tetragon start):
+          sudo cp tetragon-policies/certificate-file-access.yaml /etc/tetragon/tetragon.tp.d/
+          sudo systemctl restart tetragon
           ```
 
           ### Probe Tests
