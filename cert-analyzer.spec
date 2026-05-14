@@ -72,18 +72,6 @@ metrics. Supports PEM, DER, JKS, and PKCS12 formats with Kubernetes
 workload enrichment.
 
 
-%package policies
-Summary:        Tetragon eBPF policies for cert-analyzer
-BuildArch:      noarch
-Requires:       cert-analyzer = %{version}-%{release}
-
-%description policies
-Tetragon TracingPolicy definitions for the cert-analyzer TLS certificate
-monitor. Installs the stable certificate-file-access policy into the Tetragon
-auto-load directory (/etc/tetragon/tetragon.tp.d/) so it is loaded
-automatically on daemon start. Experimental policies are installed to
-/usr/share/cert-analyzer-policies/experimental/ for manual use.
-
 
 %prep
 %setup -q
@@ -175,16 +163,6 @@ install -d %{buildroot}/etc/systemd/system/tetragon.service.d
 install -m 0644 tetragon-override.conf \
     %{buildroot}/etc/systemd/system/tetragon.service.d/cert-analyzer.conf
 
-# ── Tetragon policies ─────────────────────────────────────────────────────────
-install -d %{buildroot}/etc/tetragon/tetragon.tp.d
-install -m 0644 tetragon-policies/certificate-file-access.yaml \
-    %{buildroot}/etc/tetragon/tetragon.tp.d/cert-analyzer-certificate-file-access.yaml
-
-install -d %{buildroot}%{_datadir}/cert-analyzer-policies/experimental
-install -m 0644 tetragon-policies/experimental/tls-service-tracking.yaml \
-    %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/tls-service-tracking.yaml
-install -m 0644 tetragon-policies/experimental/openssl3-cert-load.yaml \
-    %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/openssl3-cert-load.yaml
 
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
@@ -279,14 +257,6 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 /etc/systemd/system/tetragon.service.d/cert-analyzer.conf
 
 
-%files policies
-%dir /etc/tetragon
-%dir /etc/tetragon/tetragon.tp.d
-%config /etc/tetragon/tetragon.tp.d/cert-analyzer-certificate-file-access.yaml
-%dir %{_datadir}/cert-analyzer-policies
-%dir %{_datadir}/cert-analyzer-policies/experimental
-%{_datadir}/cert-analyzer-policies/experimental/tls-service-tracking.yaml
-%{_datadir}/cert-analyzer-policies/experimental/openssl3-cert-load.yaml
 
 
 %changelog

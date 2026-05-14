@@ -18,32 +18,29 @@ Supports in-memory certificate intercepts (via system crypto lib uprobe hooks) f
 
 ## Installation
 
-Download the RPMs from the [latest release](../../releases/latest).
+Download the RPM from the [latest release](../../releases/latest).
 
-**Agent only:**
 ```bash
 sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm   # RHEL 9
 sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
 ```
 
-**Agent + Tetragon policies** (automatically loads the `certificate-file-access` kprobe policy on Tetragon start):
-```bash
-sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm ./cert-analyzer-policies-<version>.el9.noarch.rpm   # RHEL 9
-sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm ./cert-analyzer-policies-<version>.el8.noarch.rpm   # RHEL 8
-```
-
 The installer will fail with a clear error if Tetragon is not found.
 
-**Manually applying policies from the CI archive (development / testing):**
+**Applying Tetragon policies:**
 
-Each CI run and release attaches a `tetragon-policies-<version>.tar.gz` artifact containing all policy YAMLs (including those under `experimental/`). To apply a policy without installing the RPM:
+Policies are not bundled in the RPM — they are shipped separately so they can be updated independently of the agent. Each CI run and release attaches a `tetragon-policies-<version>.tar.gz` artifact containing all policy YAMLs (including those under `experimental/`).
 
 ```bash
 tar -xzf tetragon-policies-<version>.tar.gz
 
 # Load immediately (active until Tetragon restarts):
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml   # RHEL 9 only
+
+# RHEL 9 (OpenSSL 3):
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml
+# RHEL 8 (OpenSSL 1.1):
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl1_1-cert-load.yaml
 
 # Or install persistently (loaded automatically on Tetragon start):
 sudo cp tetragon-policies/certificate-file-access.yaml /etc/tetragon/tetragon.tp.d/
