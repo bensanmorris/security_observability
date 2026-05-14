@@ -185,6 +185,8 @@ install -m 0644 tetragon-policies/experimental/tls-service-tracking.yaml \
     %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/tls-service-tracking.yaml
 install -m 0644 tetragon-policies/experimental/openssl3-cert-load.yaml \
     %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/openssl3-cert-load.yaml
+install -m 0644 tetragon-policies/experimental/openssl1_1-cert-load.yaml \
+    %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/openssl1_1-cert-load.yaml
 
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
@@ -287,6 +289,7 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 %dir %{_datadir}/cert-analyzer-policies/experimental
 %{_datadir}/cert-analyzer-policies/experimental/tls-service-tracking.yaml
 %{_datadir}/cert-analyzer-policies/experimental/openssl3-cert-load.yaml
+%{_datadir}/cert-analyzer-policies/experimental/openssl1_1-cert-load.yaml
 
 
 %changelog
