@@ -766,13 +766,15 @@ class CertificateAnalyzer:
                  health_server: Optional['HealthServer'] = None,
                  host_prefix: str = '',
                  kafka_publisher: Optional['KafkaPublisher'] = None,
-                 checksum_enabled: bool = False):
+                 checksum_enabled: bool = False,
+                 demo_mode: bool = False):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
         self.host_prefix = host_prefix
         self.kafka_publisher = kafka_publisher
         self.checksum_enabled = checksum_enabled
+        self.demo_mode = demo_mode
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -1267,21 +1269,22 @@ class CertificateAnalyzer:
                 f"{k8s_ctx}"
             )
 
-        logger.debug(f"   Subject: {info.subject}")
-        logger.debug(f"   Issuer: {info.issuer}")
-        logger.debug(f"   Serial: {info.serial_number}")
+        detail_log = logger.info if self.demo_mode else logger.debug
+        detail_log(f"   Subject: {info.subject}")
+        detail_log(f"   Issuer: {info.issuer}")
+        detail_log(f"   Serial: {info.serial_number}")
         if info.checksum:
-            logger.debug(f"   SHA-256: {info.checksum}")
-        logger.debug(
+            detail_log(f"   SHA-256: {info.checksum}")
+        detail_log(
             f"   Valid: {info.not_before.strftime('%Y-%m-%d')} -> "
             f"{info.not_after.strftime('%Y-%m-%d')}"
         )
         if info.san_dns_names:
-            logger.debug(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+            detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
         if info.pod_name:
-            logger.debug(f"   Pod: {info.namespace}/{info.pod_name}")
-            logger.debug(f"   Workload: {info.workload}")
-            logger.debug(f"   Container: {info.container_name} ({info.container_image})")
+            detail_log(f"   Pod: {info.namespace}/{info.pod_name}")
+            detail_log(f"   Workload: {info.workload}")
+            detail_log(f"   Container: {info.container_name} ({info.container_image})")
 
     def _resolve_process_binary(self, process_name: str, pid: int) -> str:
         """Resolve the full binary path when Tetragon truncates it to a parent directory.
@@ -1796,6 +1799,7 @@ def main():
     # Kubernetes where the node root filesystem is bind-mounted at /host
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
     checksum_enabled = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',           'false').lower() == 'true'
+    demo_mode        = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                       'false').lower() == 'true'
 
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
@@ -1856,7 +1860,8 @@ def main():
                                    filter_self_events=filter_self,
                                    host_prefix=host_prefix,
                                    kafka_publisher=kafka_publisher,
-                                   checksum_enabled=checksum_enabled)
+                                   checksum_enabled=checksum_enabled,
+                                   demo_mode=demo_mode)
 
     health = HealthServer(
         analyzer=analyzer,
