@@ -20,8 +20,12 @@ make
 Exercises the three uprobe hooks in `openssl3-cert-load.yaml`.
 
 ```bash
-./test_openssl3_cert_load                        # uses ../test-certs/valid.crt
-./test_openssl3_cert_load /path/to/other.crt
+./test_openssl3_cert_load                        # run all three tests
+./test_openssl3_cert_load --test 1               # SSL_CTX_use_certificate_file only
+./test_openssl3_cert_load --test 2               # SSL_CTX_use_certificate_chain_file only
+./test_openssl3_cert_load --test 3               # SSL_CTX_use_certificate_ASN1 only (embedded cert, no file needed)
+./test_openssl3_cert_load --test 1 --pause       # run test 1 then hold — useful for inspecting Tetragon events
+./test_openssl3_cert_load /path/to/other.crt     # custom cert for tests 1 & 2
 ```
 
 | # | Function | Uprobe hook captures |
