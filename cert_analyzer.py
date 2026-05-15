@@ -305,6 +305,12 @@ class PrometheusMetrics:
 
 
 
+_kafka_delivery_errors = Counter(
+    'kafka_delivery_errors_total',
+    'Total number of Kafka message delivery failures (async, broker-side)',
+)
+
+
 class KafkaPublisher:
     """
     Optional Kafka publisher for new certificate discovery events.
@@ -485,6 +491,12 @@ class KafkaPublisher:
 
     def _on_error(self, exc: Exception) -> None:
         logger.warning(f"Kafka delivery error: {exc}")
+        _kafka_delivery_errors.inc()
+        # Nullify the producer so the next publish attempt triggers reconnect.
+        # Without this, a broker that drops messages in-flight (broker down,
+        # auth failure, topic deleted) would leave the producer in a state where
+        # send() appears to succeed but nothing is ever delivered.
+        self._producer = None
 
     def close(self) -> None:
         """Flush pending messages and close the producer cleanly."""
