@@ -123,6 +123,7 @@ sudo systemctl enable --now cert-analyzer
 | `checksum_enabled` | `false` | Compute SHA-256 fingerprints per certificate |
 | `filter_self_events` | `true` | Ignore certificate accesses made by the analyzer itself |
 | `host_prefix` | _(empty)_ | Path prefix prepended to certificate paths from Tetragon events — leave empty for bare metal, set to `/host` for Kubernetes |
+| `demo_mode` | `false` | Log certificate details (subject, issuer, serial, validity, SANs) at INFO level instead of DEBUG — for demos only, leave false in production |
 
 **[passwords]**
 
