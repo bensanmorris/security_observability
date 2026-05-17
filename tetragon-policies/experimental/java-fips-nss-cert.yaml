@@ -1,0 +1,61 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: java-fips-nss-cert
+spec:
+  uprobes:
+  # NSC_CreateObject(CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
+  #                  CK_OBJECT_HANDLE_PTR phObject)
+  #
+  # Fires whenever the NSS PKCS11 token creates an object — including certificate
+  # objects (CKA_CLASS = CKO_CERTIFICATE = 0x01).  When FIPS mode is enabled on
+  # RHEL, Java's SunPKCS11-NSS-FIPS provider routes all cert imports (e.g.
+  # KeyStore.setCertificateEntry) through this function in libsoftokn3.so.
+  #
+  # The cert DER bytes are inside the pTemplate CK_ATTRIBUTE array — they are NOT
+  # a direct function argument.  Tetragon captures the template pointer and element
+  # count as uint64 values; cert_analyzer then walks the template via
+  # /proc/<pid>/mem to locate CKA_VALUE (type=0x11), follows its pValue pointer to
+  # the DER data, and parses the certificate.
+  #
+  # Why uint64 and not char_buf?
+  #   char_buf requires a direct (length, pointer) pair in the function signature.
+  #   pTemplate is a pointer to an *array of structs*, each of which contains a
+  #   further pointer to the actual data.  Tetragon's eBPF policy cannot chain two
+  #   bpf_probe_read_user calls; the /proc/pid/mem approach in cert_analyzer
+  #   performs this two-hop dereference in userspace instead.
+  #
+  # RHEL9 path — Tetragon v1.1.0 compatible
+  - path: "/usr/lib64/libsoftokn3.so"
+    symbols:
+    - "NSC_CreateObject"
+    args:
+    - index: 0
+      type: "uint64"   # CK_SESSION_HANDLE hSession
+    - index: 1
+      type: "uint64"   # CK_ATTRIBUTE_PTR pTemplate  (pointer; cert_analyzer reads /proc/mem)
+    - index: 2
+      type: "uint64"   # CK_ULONG ulCount            (attribute count; drives read size)
+
+  # NSC_FindObjectsInit(CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount)
+  #
+  # Fires when Java enumerates objects in the NSS PKCS11 token, including the cert
+  # scan that occurs during KeyStore.load().  In FIPS mode each call to
+  # KeyStore.load(null, null) triggers one FindObjectsInit per object class searched.
+  #
+  # This hook provides process-level attribution for cert-read events (who loaded
+  # certs from the NSS token) but does not yield cert bytes directly — the certs
+  # are returned by subsequent NSC_FindObjects / NSC_GetAttributeValue calls.
+  # cert_analyzer logs these as informational PKCS11 cert-read events.
+  #
+  # RHEL9 path — Tetragon v1.1.0 compatible
+  - path: "/usr/lib64/libsoftokn3.so"
+    symbols:
+    - "NSC_FindObjectsInit"
+    args:
+    - index: 0
+      type: "uint64"   # CK_SESSION_HANDLE hSession
+    - index: 1
+      type: "uint64"   # CK_ATTRIBUTE_PTR pTemplate  (search filter; cert_analyzer checks CKO_CERTIFICATE)
+    - index: 2
+      type: "uint64"   # CK_ULONG ulCount
