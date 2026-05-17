@@ -160,7 +160,7 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 
 ## Further reading
 
-- [Uprobe hook tests](probe_tests/README.md) - C++ programs for verifying Tetragon uprobe policies fire correctly
+- [Uprobe hook tests](probe_tests/README.md) - Programs for verifying Tetragon uprobe policies fire correctly
 - [Quick start demo](extras/README-QUICKSTART.md)
 - [Kubernetes / pod enrichment demo](extras/POD-ENRICHMENT-DEMO-README.md)
 - [Deployment guide](extras/DEPLOYMENT-README.md)
