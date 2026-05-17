@@ -1376,6 +1376,212 @@ class CertificateAnalyzer:
 
         return cert_path, process_name, pid, namespace, tetragon_pod
 
+    # ------------------------------------------------------------------
+    # PKCS11 / NSS helpers (Java FIPS mode)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_process_memory(pid: int, address: int, size: int) -> Optional[bytes]:
+        """Read bytes from a process's virtual address space via /proc/<pid>/mem.
+
+        Requires CAP_SYS_PTRACE (or the same UID as the target process when
+        YAMA ptrace restrictions are relaxed).  cert_analyzer typically runs as
+        root in the Tetragon security-monitoring context, so this works.
+        """
+        if address == 0 or size == 0:
+            return None
+        try:
+            with open(f"/proc/{pid}/mem", "rb") as f:
+                f.seek(address)
+                return f.read(size)
+        except (IOError, OSError, OverflowError) as exc:
+            logger.debug(f"Cannot read /proc/{pid}/mem at 0x{address:x} ({size}B): {exc}")
+            return None
+
+    def _handle_nsc_create_object(self, event) -> bool:
+        """Handle a NSC_CreateObject uprobe event from libsoftokn3.so.
+
+        NSC_CreateObject(session, pTemplate, ulCount, phObject) is called when
+        the NSS PKCS11 token creates any object — keys, digest sessions, and
+        certificates (CKA_CLASS = CKO_CERTIFICATE = 0x01).
+
+        When Java runs under FIPS mode, KeyStore.setCertificateEntry() calls this
+        function to import a certificate DER blob into the NSS FIPS token.  The
+        cert bytes live inside the CK_ATTRIBUTE pTemplate array:
+
+            struct CK_ATTRIBUTE {          // 24 bytes on LP64
+                uint64 type;               // e.g. 0x01 = CKA_CLASS, 0x11 = CKA_VALUE
+                void  *pValue;             // pointer to the attribute's value
+                uint64 ulValueLen;         // byte length of *pValue
+            };
+
+        Tetragon captures pTemplate and ulCount as uint64 args (args[1] and args[2]).
+        This method reads the template from /proc/<pid>/mem, locates CKA_CLASS and
+        CKA_VALUE, verifies the object is a certificate, then follows the CKA_VALUE
+        pValue pointer to extract the raw DER bytes.
+        """
+        if not event.HasField('process_uprobe'):
+            return False
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+
+        if self.filter_self_events:
+            if "cert-analyzer" in process_name or "cert_analyzer" in process_name:
+                return False
+            if pid == os.getpid():
+                return False
+
+        # Extract the three uint64 args: session, pTemplate, ulCount
+        uint64_args = [arg.uint64_arg for arg in uprobe.args if arg.HasField('uint64_arg')]
+        if len(uint64_args) < 3:
+            logger.debug("NSC_CreateObject: fewer than 3 uint64 args, skipping")
+            return False
+
+        template_addr = uint64_args[1]
+        count = uint64_args[2]
+
+        if count == 0 or count > 64:
+            logger.debug(f"NSC_CreateObject: implausible attribute count {count}, skipping")
+            return False
+
+        # Read the flat CK_ATTRIBUTE array (each entry is 24 bytes)
+        template_bytes = self._read_process_memory(pid, template_addr, count * 24)
+        if not template_bytes or len(template_bytes) < count * 24:
+            logger.debug(f"NSC_CreateObject: could not read template from PID {pid}")
+            return False
+
+        CKA_CLASS = 0x00000001
+        CKO_CERTIFICATE = 0x00000001
+        CKA_VALUE = 0x00000011
+        ATTR_SIZE = 24  # sizeof(CK_ATTRIBUTE) on LP64
+
+        ck_class: Optional[int] = None
+        der_addr: Optional[int] = None
+        der_len: int = 0
+
+        for i in range(count):
+            off = i * ATTR_SIZE
+            attr_type = int.from_bytes(template_bytes[off:off+8], 'little')
+            p_value   = int.from_bytes(template_bytes[off+8:off+16], 'little')
+            val_len   = int.from_bytes(template_bytes[off+16:off+24], 'little')
+
+            if attr_type == CKA_CLASS and val_len in (4, 8):
+                class_bytes = self._read_process_memory(pid, p_value, val_len)
+                if class_bytes:
+                    ck_class = int.from_bytes(class_bytes[:val_len], 'little')
+            elif attr_type == CKA_VALUE and val_len > 0:
+                der_addr = p_value
+                der_len  = val_len
+
+        if ck_class != CKO_CERTIFICATE:
+            logger.debug(f"NSC_CreateObject from {process_name}: CKA_CLASS={ck_class:#x}, not a cert")
+            return False
+
+        if not der_addr or not (64 < der_len < 65536):
+            logger.debug(f"NSC_CreateObject from {process_name}: no CKA_VALUE or implausible len {der_len}")
+            return False
+
+        der_bytes = self._read_process_memory(pid, der_addr, der_len)
+        if not der_bytes:
+            logger.debug(f"NSC_CreateObject: could not read DER bytes from PID {pid}")
+            return False
+
+        try:
+            cert = x509.load_der_x509_certificate(der_bytes, default_backend())
+        except Exception as exc:
+            logger.debug(f"NSC_CreateObject: DER parse failed: {exc}")
+            return False
+
+        serial = str(cert.serial_number)
+        synthetic_path = f"uprobe://NSC_CreateObject/{pid}/{serial}"
+
+        self.metrics.last_event_timestamp.set(time.time())
+        logger.info(
+            f"🔍 Detected Java FIPS in-memory certificate: {synthetic_path} "
+            f"by {process_name} (PID: {pid})"
+        )
+
+        if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
+            logger.info(f"Re-detected known Java FIPS certificate: {synthetic_path}")
+            return True
+
+        cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid, namespace)
+        if cert_info is None:
+            return False
+
+        self._apply_pod_context(cert_info, tetragon_pod)
+        self.metrics.update_certificate_metrics(cert_info)
+        self.log_certificate_status(cert_info)
+        self.known_certs[cert_info.unique_key] = cert_info
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        self._update_cache_metrics()
+        return True
+
+    def _handle_nsc_find_objects_init(self, event) -> bool:
+        """Handle a NSC_FindObjectsInit uprobe event from libsoftokn3.so.
+
+        This fires when Java enumerates objects in the NSS PKCS11 token, which
+        happens during KeyStore.load() in FIPS mode.  The template may contain
+        a CKO_CERTIFICATE class filter, indicating a cert-read operation.
+
+        We cannot extract cert bytes here (they are returned by subsequent
+        NSC_FindObjects + NSC_GetAttributeValue calls), but we log the event
+        to show that Java FIPS cert enumeration was detected.
+        """
+        if not event.HasField('process_uprobe'):
+            return False
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+
+        if self.filter_self_events and pid == os.getpid():
+            return False
+
+        uint64_args = [arg.uint64_arg for arg in uprobe.args if arg.HasField('uint64_arg')]
+        if len(uint64_args) < 3:
+            return False
+
+        template_addr = uint64_args[1]
+        count = uint64_args[2]
+
+        if count == 0 or count > 32:
+            return False
+
+        template_bytes = self._read_process_memory(pid, template_addr, count * 24)
+        if not template_bytes:
+            return False
+
+        CKA_CLASS = 0x00000001
+        CKO_CERTIFICATE = 0x00000001
+        ATTR_SIZE = 24
+
+        for i in range(count):
+            off = i * ATTR_SIZE
+            attr_type = int.from_bytes(template_bytes[off:off+8], 'little')
+            p_value   = int.from_bytes(template_bytes[off+8:off+16], 'little')
+            val_len   = int.from_bytes(template_bytes[off+16:off+24], 'little')
+
+            if attr_type == CKA_CLASS and val_len in (4, 8):
+                class_bytes = self._read_process_memory(pid, p_value, val_len)
+                if class_bytes:
+                    ck_class = int.from_bytes(class_bytes[:val_len], 'little')
+                    if ck_class == CKO_CERTIFICATE:
+                        logger.info(
+                            f"🔍 Java FIPS cert enumeration: NSC_FindObjectsInit "
+                            f"from {process_name} (PID: {pid}) — "
+                            f"cert bytes in subsequent NSC_GetAttributeValue"
+                        )
+                        return True
+        return False
+
     def _handle_uprobe_in_memory_cert(self, event) -> bool:
         """
         Handle a process_uprobe event where the cert arrives as raw DER bytes
@@ -1450,6 +1656,15 @@ class CertificateAnalyzer:
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
 
         if not cert_path:
+            # Route PKCS11/NSS events (Java FIPS) to dedicated handlers first.
+            if event.HasField('process_uprobe'):
+                symbol = event.process_uprobe.symbol
+                if symbol == "NSC_CreateObject":
+                    self._handle_nsc_create_object(event)
+                    return
+                if symbol == "NSC_FindObjectsInit":
+                    self._handle_nsc_find_objects_init(event)
+                    return
             self._handle_uprobe_in_memory_cert(event)
             return
 
