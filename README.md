@@ -39,6 +39,8 @@ sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-a
 
 # RHEL 9 (OpenSSL 3):
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml
+# RHEL 9 (FIPS / NSS):
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-fips-nss-cert.yaml
 # RHEL 8 (OpenSSL 1.1):
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl1_1-cert-load.yaml
 
