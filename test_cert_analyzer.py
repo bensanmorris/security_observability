@@ -3677,6 +3677,387 @@ class TestOpensslUprobeHooking:
         assert mock_publisher.publish.call_count == 1
 
 
+class TestJavaNSSFIPSHooking:
+    """
+    Tests for NSC_CreateObject / NSC_FindObjectsInit uprobe handlers (java-fips-nss-cert policy).
+
+    Both handlers decode a little-endian CK_ATTRIBUTE[] template read from /proc/<pid>/mem.
+    _read_process_memory is patched throughout so no live process is needed.
+    """
+
+    # PKCS#11 constants mirrored from the production code
+    CKA_CLASS        = 0x00000001
+    CKA_VALUE        = 0x00000011
+    CKO_CERTIFICATE  = 0x00000001
+    TMPL_ADDR        = 0x1000
+    CLASS_ADDR       = 0x2000
+    DER_ADDR         = 0x3000
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _cert_der(cn='fips.example.com', days=365):
+        cert, _ = TestCertificateGeneration.generate_certificate(cn, days)
+        return cert, cert.public_bytes(Encoding.DER)
+
+    @staticmethod
+    def _make_uint64_arg(value):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'uint64_arg'
+        arg.uint64_arg = value
+        return arg
+
+    @staticmethod
+    def _pack_attr(attr_type: int, p_value: int, val_len: int) -> bytes:
+        """Pack one CK_ATTRIBUTE struct (24 bytes, little-endian LP64 layout)."""
+        return (
+            attr_type.to_bytes(8, 'little') +
+            p_value.to_bytes(8, 'little') +
+            val_len.to_bytes(8, 'little')
+        )
+
+    @classmethod
+    def _make_event(cls, symbol, uint64_values, pid=1234, binary='/usr/bin/java',
+                    has_pod=False):
+        """Build a mock process_uprobe event with uint64 args."""
+        from unittest.mock import MagicMock
+        mock_uprobe = MagicMock()
+        mock_uprobe.process.binary = binary
+        mock_uprobe.process.pid.value = pid
+        mock_uprobe.symbol = symbol
+        if has_pod:
+            mock_uprobe.process.HasField.side_effect = lambda f: f in ('pid', 'pod')
+            mock_uprobe.process.pod.namespace = 'fips-ns'
+            mock_uprobe.process.pod.name = 'java-pod'
+            mock_uprobe.process.pod.workload_object.kind = 'Deployment'
+            mock_uprobe.process.pod.workload_object.name = 'java-deploy'
+            mock_uprobe.process.pod.labels = {}
+        else:
+            mock_uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        mock_uprobe.args = [cls._make_uint64_arg(v) for v in uint64_values]
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        mock_event.process_uprobe = mock_uprobe
+        return mock_event
+
+    @staticmethod
+    def _make_kprobe_event():
+        from unittest.mock import MagicMock
+        ev = MagicMock()
+        ev.HasField.side_effect = lambda f: f == 'process_kprobe'
+        return ev
+
+    @classmethod
+    def _cert_template(cls, der: bytes) -> tuple:
+        """
+        Build the three _read_process_memory return values for a successful
+        _handle_nsc_create_object call: (template_bytes, ck_class_bytes, der_bytes).
+        Template layout: [CKA_CLASS → CLASS_ADDR, CKA_VALUE → DER_ADDR].
+        """
+        tmpl = (
+            cls._pack_attr(cls.CKA_CLASS, cls.CLASS_ADDR, 4) +
+            cls._pack_attr(cls.CKA_VALUE, cls.DER_ADDR, len(der))
+        )
+        ck_class = cls.CKO_CERTIFICATE.to_bytes(4, 'little')
+        return tmpl, ck_class, der
+
+    # ------------------------------------------------------------------ _read_process_memory
+
+    def test_read_memory_returns_none_for_zero_address(self, analyzer):
+        assert analyzer._read_process_memory(1234, 0, 100) is None
+
+    def test_read_memory_returns_none_for_zero_size(self, analyzer):
+        assert analyzer._read_process_memory(1234, self.TMPL_ADDR, 0) is None
+
+    def test_read_memory_returns_none_on_ioerror(self, analyzer):
+        import unittest.mock as mock
+        with mock.patch('builtins.open', side_effect=IOError('no such process')):
+            assert analyzer._read_process_memory(99999, self.TMPL_ADDR, 16) is None
+
+    def test_read_memory_returns_bytes_on_success(self, analyzer):
+        import unittest.mock as mock
+        data = b'\xde\xad\xbe\xef' * 4
+        m = mock.MagicMock()
+        m.__enter__ = mock.Mock(return_value=m)
+        m.__exit__ = mock.Mock(return_value=False)
+        m.read.return_value = data
+        with mock.patch('builtins.open', return_value=m):
+            result = analyzer._read_process_memory(1234, self.TMPL_ADDR, 16)
+        assert result == data
+
+    # ------------------------------------------------------------------ NSC_CreateObject
+
+    def test_create_object_rejects_kprobe(self, analyzer):
+        """Returns False immediately for a non-uprobe event type."""
+        assert analyzer._handle_nsc_create_object(self._make_kprobe_event()) is False
+
+    def test_create_object_rejects_too_few_args(self, analyzer):
+        """Returns False when fewer than 3 uint64 args are present."""
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR])
+        assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_zero_count(self, analyzer):
+        """Returns False when attribute count arg is 0."""
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 0])
+        assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_excessive_count(self, analyzer):
+        """Returns False when attribute count exceeds the sanity cap of 64."""
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 65])
+        assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_unreadable_template(self, analyzer):
+        """Returns False when /proc/pid/mem cannot be read for the template."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory', return_value=None):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_non_cert_ck_class(self, analyzer):
+        """Returns False when CKA_CLASS is CKO_DATA (0x0), not CKO_CERTIFICATE."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl = (
+            self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4) +
+            self._pack_attr(self.CKA_VALUE, self.DER_ADDR, len(der))
+        )
+        ck_data = (0x00000000).to_bytes(4, 'little')
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_data, der]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_missing_cka_value(self, analyzer):
+        """Returns False when template contains CKA_CLASS only (no DER payload pointer)."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_cert = self.CKO_CERTIFICATE.to_bytes(4, 'little')
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_garbage_der(self, analyzer):
+        """Returns False when the CKA_VALUE bytes are not valid DER."""
+        import unittest.mock as mock
+        junk = b'\xde\xad\xbe\xef' * 50  # 200 bytes — passes size guard, fails DER parse
+        tmpl, ck_cert, _ = self._cert_template(junk)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, junk]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_unreadable_der(self, analyzer):
+        """Returns False when the DER memory read returns None."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, None]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_accepts_valid_cert(self, analyzer):
+        """Returns True when a well-formed DER cert is found in the template."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            assert analyzer._handle_nsc_create_object(event) is True
+
+    def test_create_object_stores_cert_in_known_certs(self, analyzer):
+        """A valid cert is persisted to known_certs after extraction."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        assert len(analyzer.known_certs) == 1
+
+    def test_create_object_synthetic_path_format(self, analyzer):
+        """CertificateInfo.path uses the uprobe://NSC_CreateObject/<pid>/<serial> scheme."""
+        import unittest.mock as mock
+        cert, der = self._cert_der()
+        serial = str(cert.serial_number)
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2], pid=5555)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        stored = list(analyzer.known_certs.values())[0]
+        assert stored.path == f'uprobe://NSC_CreateObject/5555/{serial}'
+
+    def test_create_object_deduplicates_cert(self, analyzer):
+        """A second event for the same cert returns True without adding a duplicate entry."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is True
+        assert len(analyzer.known_certs) == 1
+
+    def test_create_object_self_filter_by_process_name(self, analyzer):
+        """Events from a cert-analyzer binary are silently dropped."""
+        import unittest.mock as mock
+        assert analyzer.filter_self_events is True
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2],
+                                 binary='/app/cert-analyzer')
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is False
+        assert len(analyzer.known_certs) == 0
+
+    def test_create_object_self_filter_by_pid(self, analyzer, monkeypatch):
+        """Events whose PID matches the analyzer's own PID are silently dropped."""
+        import unittest.mock as mock
+        assert analyzer.filter_self_events is True
+        monkeypatch.setattr(os, 'getpid', lambda: 1234)
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2], pid=1234)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is False
+
+    def test_create_object_updates_event_timestamp(self, analyzer):
+        """last_event_timestamp is updated after a successful cert extraction."""
+        import unittest.mock as mock
+        analyzer.metrics.last_event_timestamp._value.set(0)
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        assert analyzer.metrics.last_event_timestamp._value.get() > 0
+
+    def test_create_object_applies_pod_context(self, analyzer):
+        """Pod namespace from the uprobe event is stored on the resulting CertificateInfo."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2], has_pod=True)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        stored = list(analyzer.known_certs.values())[0]
+        assert stored.namespace == 'fips-ns'
+
+    # ------------------------------------------------------------------ NSC_FindObjectsInit
+
+    def test_find_objects_rejects_kprobe(self, analyzer):
+        """Returns False immediately for a non-uprobe event type."""
+        assert analyzer._handle_nsc_find_objects_init(self._make_kprobe_event()) is False
+
+    def test_find_objects_rejects_too_few_args(self, analyzer):
+        """Returns False when fewer than 3 uint64 args are present."""
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR])
+        assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_zero_count(self, analyzer):
+        """Returns False when the attribute count arg is 0."""
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 0])
+        assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_excessive_count(self, analyzer):
+        """Returns False when attribute count exceeds the sanity cap of 32."""
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 33])
+        assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_unreadable_template(self, analyzer):
+        """Returns False when /proc/pid/mem cannot be read for the template."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory', return_value=None):
+            assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_non_cert_filter(self, analyzer):
+        """Returns False when the template filters on CKO_DATA, not CKO_CERTIFICATE."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_data = (0x00000000).to_bytes(4, 'little')
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_data]):
+            assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_returns_true_for_cert_filter(self, analyzer):
+        """Returns True when the template contains a CKO_CERTIFICATE class filter."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_cert = self.CKO_CERTIFICATE.to_bytes(4, 'little')
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert]):
+            assert analyzer._handle_nsc_find_objects_init(event) is True
+
+    def test_find_objects_logs_cert_enumeration(self, analyzer, caplog):
+        """An INFO log mentioning NSC_FindObjectsInit is emitted when cert enumeration fires."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_cert = self.CKO_CERTIFICATE.to_bytes(4, 'little')
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1],
+                                 binary='/usr/bin/java', pid=9876)
+        with caplog.at_level(logging.INFO):
+            with mock.patch.object(analyzer, '_read_process_memory',
+                                   side_effect=[tmpl, ck_cert]):
+                analyzer._handle_nsc_find_objects_init(event)
+        assert any('NSC_FindObjectsInit' in r.message for r in caplog.records)
+
+    def test_find_objects_self_filter_by_pid(self, analyzer, monkeypatch):
+        """Own PID is dropped before any memory reads occur."""
+        import unittest.mock as mock
+        assert analyzer.filter_self_events is True
+        monkeypatch.setattr(os, 'getpid', lambda: 9876)
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1], pid=9876)
+        with mock.patch.object(analyzer, '_read_process_memory') as mock_mem:
+            result = analyzer._handle_nsc_find_objects_init(event)
+        assert result is False
+        mock_mem.assert_not_called()
+
+    # ------------------------------------------------------------------ process_event routing
+
+    def test_process_event_routes_nsc_create_object(self, analyzer):
+        """process_event dispatches NSC_CreateObject symbol to _handle_nsc_create_object."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_handle_nsc_create_object') as mock_handler:
+            analyzer.process_event(event)
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_routes_nsc_find_objects_init(self, analyzer):
+        """process_event dispatches NSC_FindObjectsInit symbol to _handle_nsc_find_objects_init."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_handle_nsc_find_objects_init') as mock_handler:
+            analyzer.process_event(event)
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_nsc_symbols_do_not_fall_through_to_bytes_handler(self, analyzer):
+        """_handle_uprobe_in_memory_cert is not called when the symbol is an NSC_ handler."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_handle_nsc_create_object', return_value=True), \
+             mock.patch.object(analyzer, '_handle_uprobe_in_memory_cert') as mock_bytes:
+            analyzer.process_event(event)
+        mock_bytes.assert_not_called()
+
+
 class TestResolveProcessBinary:
     """Tests for _resolve_process_binary fallback when Tetragon truncates the binary path."""
 
