@@ -491,7 +491,7 @@ jobs:
         cmake --build probe_tests/build
 
     - name: Build Java probe test
-      run: javac probe_tests/java/FipsJavaCertLoad.java
+      run: javac -encoding UTF-8 probe_tests/java/FipsJavaCertLoad.java
 
     - name: Package probe tests archive
       id: archive
