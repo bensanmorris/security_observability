@@ -59,6 +59,21 @@ java -cp . FipsJavaCertLoad --pause                # pause after tests (useful f
 java -cp . FipsJavaCertLoad /path/to/other.crt     # custom cert
 ```
 
+> **FIPS mode note:** When running on a system with OS-level FIPS enabled
+> (`/proc/sys/crypto/fips_enabled = 1`), Red Hat's JDK replaces the base
+> `SunPKCS11` provider with the pre-configured `SunPKCS11-NSS-FIPS`, which
+> cannot be reconfigured to use a custom test database.  Pass
+> `-Dcom.redhat.fips=false` to restore the configurable SunPKCS11 base so
+> the test can set up its own NSS database:
+>
+> ```bash
+> java -Dcom.redhat.fips=false -cp . FipsJavaCertLoad
+> ```
+>
+> This flag only bypasses Java's FIPS provider auto-configuration — the test
+> still explicitly routes all cert operations through NSS native (libsoftokn3.so),
+> so the uprobe hooks on `NSC_CreateObject` and `NSC_FindObjectsInit` still fire.
+
 | # | Java operation | libsoftokn3.so hook | cert_analyzer handler |
 |---|---------------|---------------------|-----------------------|
 | 1 | `KeyStore.load(null,null)` via PKCS11 | `NSC_FindObjectsInit` — cert class filter detected | `_handle_nsc_find_objects_init` — logs enumeration event |
