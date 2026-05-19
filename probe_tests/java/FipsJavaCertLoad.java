@@ -188,7 +188,18 @@ public class FipsJavaCertLoad {
     // Each test needs its own provider instance to avoid token conflicts.
     private static Provider buildP11Provider(Path cfgPath) throws Exception {
         Provider p11 = Security.getProvider("SunPKCS11");
-        if (p11 == null) throw new RuntimeException("SunPKCS11 provider not available");
+        if (p11 == null) {
+            // In FIPS mode Red Hat's JDK replaces SunPKCS11 with SunPKCS11-NSS-FIPS,
+            // which cannot be reconfigured to use a custom NSS database.
+            // Re-run with: java -Dcom.redhat.fips=false -cp . FipsJavaCertLoad
+            boolean osFips = false;
+            try { osFips = "1".equals(Files.readString(Path.of("/proc/sys/crypto/fips_enabled")).trim()); }
+            catch (IOException ignored) {}
+            String hint = osFips
+                ? "\n  OS FIPS mode is active. Re-run with: java -Dcom.redhat.fips=false -cp . FipsJavaCertLoad"
+                : "";
+            throw new RuntimeException("SunPKCS11 provider not available" + hint);
+        }
         p11 = p11.configure(cfgPath.toString());
         // Insert at position 1 (highest priority) without permanently altering the
         // global provider list between tests — we reinstall fresh each time.
