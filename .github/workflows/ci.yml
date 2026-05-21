@@ -28,18 +28,18 @@ jobs:
     
     - name: Check code formatting with Black
       run: |
-        black --check cert_analyzer.py test_cert_analyzer.py || true
-    
+        black --check cert_analyzer.py fips_compliance_checker.py test_cert_analyzer.py test_fips_compliance_checker.py || true
+
     - name: Check import sorting with isort
       run: |
-        isort --check-only cert_analyzer.py test_cert_analyzer.py || true
-    
+        isort --check-only cert_analyzer.py fips_compliance_checker.py test_cert_analyzer.py test_fips_compliance_checker.py || true
+
     - name: Lint with flake8
       run: |
         # Stop the build if there are Python syntax errors or undefined names
-        flake8 cert_analyzer.py test_cert_analyzer.py --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 cert_analyzer.py fips_compliance_checker.py test_cert_analyzer.py test_fips_compliance_checker.py --count --select=E9,F63,F7,F82 --show-source --statistics
         # Exit-zero treats all errors as warnings
-        flake8 cert_analyzer.py test_cert_analyzer.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        flake8 cert_analyzer.py fips_compliance_checker.py test_cert_analyzer.py test_fips_compliance_checker.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   security:
     name: Security Scan
@@ -59,8 +59,8 @@ jobs:
     
     - name: Run Bandit security scan
       run: |
-        bandit -r cert_analyzer.py -f json -o bandit-report.json || true
-        bandit -r cert_analyzer.py || true
+        bandit -r cert_analyzer.py fips_compliance_checker.py -f json -o bandit-report.json || true
+        bandit -r cert_analyzer.py fips_compliance_checker.py || true
     
     - name: Check dependencies for vulnerabilities
       run: |
@@ -93,12 +93,13 @@ jobs:
     
     - name: Run tests
       run: |
-        pytest test_cert_analyzer.py -v --tb=short --strict-markers
-    
+        pytest test_cert_analyzer.py test_fips_compliance_checker.py -v --tb=short --strict-markers
+
     - name: Generate coverage report
       run: |
-        pytest test_cert_analyzer.py \
+        pytest test_cert_analyzer.py test_fips_compliance_checker.py \
           --cov=cert_analyzer \
+          --cov=fips_compliance_checker \
           --cov-report=xml \
           --cov-report=html \
           --cov-report=term-missing \
@@ -132,6 +133,7 @@ jobs:
         echo "- ✅ Certificate analysis (expiry detection, validation)" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ CertificateInfo dataclass" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Path detection logic" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ FIPS compliance checker (algorithm and key validation)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Not Covered (requires Tetragon integration):" >> $GITHUB_STEP_SUMMARY
         echo "- ⏭️ Tetragon event stream processing" >> $GITHUB_STEP_SUMMARY
