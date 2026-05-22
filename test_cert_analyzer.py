@@ -1720,6 +1720,297 @@ class TestChecksum:
         assert cert_infos[0].checksum == ""
 
 
+class TestFipsComplianceEnabled:
+    """
+    Tests for the fips_compliance_enabled config option.
+
+    When True (the default): FIPS compliance is checked per-certificate and the
+    results are stored in CertificateInfo fields and emitted as Prometheus metrics.
+
+    When False: the check is skipped entirely — FIPS fields stay at empty defaults,
+    the cert_fips_compliant metric is not emitted, and no FIPS log lines appear.
+    """
+
+    # ── Default / instance behaviour ──────────────────────────────────────────
+
+    def test_fips_compliance_enabled_by_default(self, analyzer):
+        """fips_compliance_enabled defaults to True on a new analyzer instance."""
+        assert analyzer.fips_compliance_enabled is True
+
+    def test_fips_fields_populated_when_enabled(self, analyzer, temp_dir):
+        """FIPS fields on CertificateInfo are populated when fips_compliance_enabled=True."""
+        assert analyzer.fips_compliance_enabled is True
+
+        cert, _ = TestCertificateGeneration.generate_certificate("fips-on.example.com", 365)
+        path = os.path.join(temp_dir, "fips-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        # generate_certificate produces RSA-2048 / SHA-256 — always compliant
+        assert info.key_algorithm == 'RSA'
+        assert info.key_size == 2048
+        assert info.signature_hash == 'sha256'
+        assert info.fips_compliant is True
+        assert info.fips_violations == []
+
+    def test_fips_fields_empty_when_disabled(self, analyzer, temp_dir):
+        """FIPS fields are at empty defaults when fips_compliance_enabled=False."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("fips-off.example.com", 365)
+        path = os.path.join(temp_dir, "fips-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.key_algorithm == ''
+        assert info.key_size == 0
+        assert info.signature_hash == ''
+        assert info.curve_name == ''
+        assert info.fips_compliant is False
+        assert info.fips_violations == []
+
+    def test_multi_cert_bundle_all_skipped_when_disabled(self, analyzer, temp_dir):
+        """All certs in a multi-cert bundle have empty FIPS fields when disabled."""
+        analyzer.fips_compliance_enabled = False
+
+        certs_and_keys = [
+            TestCertificateGeneration.generate_certificate(f"multi{i}.example.com", 365)
+            for i in range(3)
+        ]
+        path = os.path.join(temp_dir, "bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(
+            [c for c, _ in certs_and_keys], path
+        )
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 3
+        for info in cert_infos:
+            assert info.key_algorithm == ''
+            assert info.fips_compliant is False
+            assert info.fips_violations == []
+
+    # ── _fips_check() call gating ──────────────────────────────────────────────
+
+    def test_fips_check_not_called_when_disabled(self, analyzer, temp_dir, monkeypatch):
+        """_fips_check() is never invoked when fips_compliance_enabled=False."""
+        analyzer.fips_compliance_enabled = False
+
+        calls = []
+
+        import cert_analyzer as _ca
+        from fips_compliance_checker import check_certificate as _real
+
+        def _spy(cert):
+            calls.append(cert)
+            return _real(cert)
+
+        monkeypatch.setattr(_ca, '_fips_check', _spy)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("skip.example.com", 365)
+        path = os.path.join(temp_dir, "skip.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer.analyze_certificate(path, "test", 1)
+        assert calls == [], "_fips_check must not be called when fips_compliance_enabled=False"
+
+    def test_fips_check_called_when_enabled(self, analyzer, temp_dir, monkeypatch):
+        """_fips_check() is called once per certificate when fips_compliance_enabled=True."""
+        assert analyzer.fips_compliance_enabled is True
+
+        calls = []
+
+        import cert_analyzer as _ca
+        from fips_compliance_checker import check_certificate as _real
+
+        def _spy(cert):
+            calls.append(cert)
+            return _real(cert)
+
+        monkeypatch.setattr(_ca, '_fips_check', _spy)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("check.example.com", 365)
+        path = os.path.join(temp_dir, "check.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer.analyze_certificate(path, "test", 1)
+        assert len(calls) == 1, "_fips_check must be called exactly once when enabled"
+
+    def test_fips_check_error_is_non_fatal(self, analyzer, temp_dir, monkeypatch):
+        """If _fips_check() raises, extract_certificate_info still returns CertificateInfo."""
+        import cert_analyzer as _ca
+
+        def _raising(cert):
+            raise RuntimeError("simulated fips error")
+
+        monkeypatch.setattr(_ca, '_fips_check', _raising)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("fips-err.example.com", 365)
+        path = os.path.join(temp_dir, "fips-err.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.fips_compliant is False
+        assert 'FIPS check error' in info.fips_violations
+
+    # ── Prometheus metric gating ───────────────────────────────────────────────
+
+    def test_prometheus_metric_emitted_when_enabled(self, analyzer, temp_dir):
+        """cert_fips_compliant metric has samples after update_certificate_metrics when enabled."""
+        assert analyzer.fips_compliance_enabled is True
+
+        cert, _ = TestCertificateGeneration.generate_certificate("metric-on.example.com", 365)
+        path = os.path.join(temp_dir, "metric-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        samples = list(analyzer.metrics.cert_fips_compliant.collect()[0].samples)
+        assert len(samples) > 0, \
+            "cert_fips_compliant must have at least one sample when FIPS checking is enabled"
+
+    def test_prometheus_metric_not_emitted_when_disabled(self, analyzer, temp_dir):
+        """cert_fips_compliant metric has no samples after update_certificate_metrics when disabled."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("metric-off.example.com", 365)
+        path = os.path.join(temp_dir, "metric-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        samples = list(analyzer.metrics.cert_fips_compliant.collect()[0].samples)
+        assert len(samples) == 0, \
+            "cert_fips_compliant must have no samples when FIPS checking is disabled"
+
+    def test_prometheus_metric_value_one_for_compliant_cert(self, analyzer, temp_dir):
+        """cert_fips_compliant metric is set to 1.0 for a FIPS-compliant certificate."""
+        cert, _ = TestCertificateGeneration.generate_certificate("compliant.example.com", 365)
+        path = os.path.join(temp_dir, "compliant.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        samples = list(analyzer.metrics.cert_fips_compliant.collect()[0].samples)
+        assert len(samples) == 1
+        assert samples[0].value == 1.0
+
+    # ── Logging output ─────────────────────────────────────────────────────────
+
+    def test_compliant_cert_fips_line_logged_when_enabled(self, analyzer, temp_dir, caplog):
+        """A FIPS-compliant cert produces a 'FIPS: compliant' log line when enabled."""
+        cert, _ = TestCertificateGeneration.generate_certificate("log-on.example.com", 365)
+        path = os.path.join(temp_dir, "log-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+
+        with caplog.at_level(logging.DEBUG):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        assert any(
+            'FIPS' in r.message and 'compliant' in r.message
+            for r in caplog.records
+        ), "Expected a FIPS compliant log line when fips_compliance_enabled=True"
+
+    def test_no_fips_log_lines_when_disabled(self, analyzer, temp_dir, caplog):
+        """No FIPS log lines appear when fips_compliance_enabled=False."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("log-off.example.com", 365)
+        path = os.path.join(temp_dir, "log-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+
+        with caplog.at_level(logging.DEBUG):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        fips_lines = [r for r in caplog.records if 'FIPS' in r.message]
+        assert fips_lines == [], \
+            f"Expected no FIPS log lines when disabled, got: {[r.message for r in fips_lines]}"
+
+    def test_fips_violation_logged_as_warning_when_enabled(self, analyzer, temp_dir, caplog):
+        """FIPS violations are logged as WARNING when fips_compliance_enabled=True."""
+        cert, _ = TestCertificateGeneration.generate_certificate("warn.example.com", 365)
+        path = os.path.join(temp_dir, "warn.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        info = cert_infos[0]
+        # Inject a violation to simulate a non-compliant cert
+        info.fips_compliant = False
+        info.fips_violations = ["Signature hash 'sha1' is not FIPS-approved (use SHA-256 or stronger)"]
+
+        with caplog.at_level(logging.WARNING):
+            analyzer.log_certificate_status(info)
+
+        assert any('FIPS NON-COMPLIANT' in r.message for r in caplog.records), \
+            "Expected a FIPS NON-COMPLIANT warning when violations are present"
+
+    # ── Config file / env var resolution ──────────────────────────────────────
+
+    def test_disabled_via_config_file(self):
+        """cfg() resolves to 'false' when config file sets fips_compliance_enabled = false."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'fips_compliance_enabled': 'false'}})
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'false'
+
+    def test_enabled_via_config_file(self):
+        """cfg() resolves to 'true' when config file sets fips_compliance_enabled = true."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'fips_compliance_enabled': 'true'}})
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'true'
+
+    def test_disabled_via_env_var(self, monkeypatch):
+        """cfg() resolves to 'false' from FIPS_COMPLIANCE_ENABLED=false when no config entry."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.setenv('FIPS_COMPLIANCE_ENABLED', 'false')
+        cp = configparser.ConfigParser()
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'false'
+
+    def test_config_file_takes_precedence_over_env_var(self, monkeypatch):
+        """Config file value overrides env var — config enabled wins over env disabled."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.setenv('FIPS_COMPLIANCE_ENABLED', 'false')  # env says disabled
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'fips_compliance_enabled': 'true'}})  # config says enabled
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'true'  # config file wins
+
+    def test_default_is_enabled_when_no_config_or_env(self, monkeypatch):
+        """fips_compliance_enabled defaults to 'true' when neither config nor env var is set."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.delenv('FIPS_COMPLIANCE_ENABLED', raising=False)
+        cp = configparser.ConfigParser()
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'true'
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
