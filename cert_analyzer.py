@@ -28,6 +28,7 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from prometheus_client import Gauge, Counter, Info, start_http_server
+from fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
 
 # Import generated Tetragon protos
 try:
@@ -113,6 +114,13 @@ class CertificateInfo:
     # SHA-256 of the DER-encoded certificate bytes. Empty string when
     # CERT_CHECKSUM_ENABLED=false (the default).
     checksum: str = ""
+    # FIPS 140-2/140-3 compliance fields — populated by extract_certificate_info()
+    key_algorithm: str = ""    # RSA, EC, DSA, Ed25519, Ed448, unknown
+    key_size: int = 0          # bits; 0 for EdDSA
+    signature_hash: str = ""   # sha256, sha1, md5, etc.
+    curve_name: str = ""       # secp256r1 etc. (EC only)
+    fips_compliant: bool = False
+    fips_violations: list = field(default_factory=list)
 
     @property
     def days_until_expiry(self) -> float:
@@ -197,6 +205,13 @@ class PrometheusMetrics:
             'Whether certificate expires within threshold (1=yes, 0=no)',
             ['cert_path', 'process', 'threshold_days', 'cert_index', 'pod_name',
              'namespace', 'workload_kind', 'workload_name']
+        )
+
+        self.cert_fips_compliant = Gauge(
+            'tls_certificate_fips_compliant',
+            'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
+            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+             'workload_kind', 'workload_name', 'key_algorithm', 'signature_hash']
         )
 
         # System health
@@ -302,6 +317,19 @@ class PrometheusMetrics:
                 workload_name=info.workload_name,
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
 
+        if info.key_algorithm:
+            self.cert_fips_compliant.labels(
+                cert_path=info.path,
+                process=info.process,
+                cert_index=str(info.cert_index),
+                pod_name=info.pod_name,
+                namespace=info.namespace,
+                workload_kind=info.workload_kind,
+                workload_name=info.workload_name,
+                key_algorithm=info.key_algorithm,
+                signature_hash=info.signature_hash,
+            ).set(1 if info.fips_compliant else 0)
+
 
 
 
@@ -348,7 +376,13 @@ class KafkaPublisher:
         "app_label":        "my-app",
         "container_name":   "main",
         "container_image":  "my-app:1.0",
-        "checksum":         ""
+        "checksum":         "",
+        "key_algorithm":    "RSA",
+        "key_size":         2048,
+        "signature_hash":   "sha256",
+        "curve_name":       "",
+        "fips_compliant":   true,
+        "fips_violations":  []
     }
     """
 
@@ -468,6 +502,12 @@ class KafkaPublisher:
             'container_name':    cert_info.container_name,
             'container_image':   cert_info.container_image,
             'checksum':          cert_info.checksum,
+            'key_algorithm':     cert_info.key_algorithm,
+            'key_size':          cert_info.key_size,
+            'signature_hash':    cert_info.signature_hash,
+            'curve_name':        cert_info.curve_name,
+            'fips_compliant':    cert_info.fips_compliant,
+            'fips_violations':   cert_info.fips_violations,
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
@@ -767,7 +807,8 @@ class CertificateAnalyzer:
                  host_prefix: str = '',
                  kafka_publisher: Optional['KafkaPublisher'] = None,
                  checksum_enabled: bool = False,
-                 demo_mode: bool = False):
+                 demo_mode: bool = False,
+                 fips_compliance_enabled: bool = True):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -775,6 +816,7 @@ class CertificateAnalyzer:
         self.kafka_publisher = kafka_publisher
         self.checksum_enabled = checksum_enabled
         self.demo_mode = demo_mode
+        self.fips_compliance_enabled = fips_compliance_enabled
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -1125,6 +1167,18 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not compute checksum for cert {cert_index} in {cert_path}: {e}")
 
+        fips_result = None
+        if self.fips_compliance_enabled:
+            try:
+                fips_result = _fips_check(cert)
+            except Exception as e:
+                logger.debug(f"FIPS check failed for cert {cert_index} in {cert_path}: {e}")
+                fips_result = FipsComplianceResult(
+                    compliant=False, key_algorithm='unknown', key_size=0,
+                    curve_name='', signature_hash='unknown',
+                    violations=['FIPS check error'],
+                )
+
         return CertificateInfo(
             path=cert_path,
             subject=subject,
@@ -1139,6 +1193,12 @@ class CertificateAnalyzer:
             san_dns_names=san_dns_names,
             cert_index=cert_index,
             checksum=checksum,
+            key_algorithm=fips_result.key_algorithm if fips_result is not None else '',
+            key_size=fips_result.key_size if fips_result is not None else 0,
+            signature_hash=fips_result.signature_hash if fips_result is not None else '',
+            curve_name=fips_result.curve_name if fips_result is not None else '',
+            fips_compliant=fips_result.compliant if fips_result is not None else False,
+            fips_violations=fips_result.violations if fips_result is not None else [],
         )
 
     def analyze_certificate(
@@ -1281,6 +1341,20 @@ class CertificateAnalyzer:
         )
         if info.san_dns_names:
             detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+        if info.fips_compliant:
+            alg = info.key_algorithm
+            if info.key_size:
+                alg += f" {info.key_size}-bit"
+            if info.curve_name:
+                alg += f"/{info.curve_name}"
+            if info.signature_hash:
+                alg += f"/{info.signature_hash}"
+            detail_log(f"   FIPS: compliant ({alg})")
+        elif info.fips_violations:
+            logger.warning(
+                f"⚠️  FIPS NON-COMPLIANT: {display_path} — "
+                + " | ".join(info.fips_violations)
+            )
         if info.pod_name:
             detail_log(f"   Pod: {info.namespace}/{info.pod_name}")
             detail_log(f"   Workload: {info.workload}")
@@ -2013,8 +2087,9 @@ def main():
     # Empty by default for standalone RPM deployment — set to /host for
     # Kubernetes where the node root filesystem is bind-mounted at /host
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
-    checksum_enabled = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',           'false').lower() == 'true'
-    demo_mode        = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                       'false').lower() == 'true'
+    checksum_enabled        = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',        'false').lower() == 'true'
+    demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
+    fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
@@ -2036,6 +2111,7 @@ def main():
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
     logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
+    logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -2076,7 +2152,8 @@ def main():
                                    host_prefix=host_prefix,
                                    kafka_publisher=kafka_publisher,
                                    checksum_enabled=checksum_enabled,
-                                   demo_mode=demo_mode)
+                                   demo_mode=demo_mode,
+                                   fips_compliance_enabled=fips_compliance_enabled)
 
     health = HealthServer(
         analyzer=analyzer,

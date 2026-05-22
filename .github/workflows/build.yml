@@ -37,6 +37,7 @@ jobs:
           relevant:
             - 'Containerfile'
             - 'cert_analyzer.py'
+            - 'fips_compliance_checker.py'
             - 'requirements.txt'
             - 'cert-analyzer.spec'
             - 'cert-analyzer.conf'
@@ -250,8 +251,9 @@ jobs:
         TARNAME="cert-analyzer-${VERSION}"
         TMPDIR=$(mktemp -d)
         mkdir -p "${TMPDIR}/${TARNAME}"
-        cp cert_analyzer.py          "${TMPDIR}/${TARNAME}/"
-        cp LICENSE                   "${TMPDIR}/${TARNAME}/"
+        cp cert_analyzer.py           "${TMPDIR}/${TARNAME}/"
+        cp fips_compliance_checker.py "${TMPDIR}/${TARNAME}/"
+        cp LICENSE                    "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.service     "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.conf        "${TMPDIR}/${TARNAME}/"
         cp tetragon-config/systemd/tetragon-override.conf "${TMPDIR}/${TARNAME}/tetragon-override.conf"

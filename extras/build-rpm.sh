@@ -125,8 +125,9 @@ echo "Creating source tarball: $TARBALL"
 TMPDIR_SRC="$(mktemp -d)"
 
 mkdir -p "$TMPDIR_SRC/$TARNAME"
-cp "$REPO_ROOT/cert_analyzer.py"       "$TMPDIR_SRC/$TARNAME/"
-cp "$REPO_ROOT/LICENSE"                "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/cert_analyzer.py"          "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/fips_compliance_checker.py" "$TMPDIR_SRC/$TARNAME/"
+cp "$REPO_ROOT/LICENSE"                   "$TMPDIR_SRC/$TARNAME/"
 cp "$REPO_ROOT/cert-analyzer.service" "$TMPDIR_SRC/$TARNAME/"
 cp "$REPO_ROOT/cert-analyzer.conf"    "$TMPDIR_SRC/$TARNAME/"
 # Include pre-generated protos so the spec needs no network access

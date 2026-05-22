@@ -30,4 +30,4 @@ jobs:
     
     - name: Run tests
       run: |
-        pytest test_cert_analyzer.py -v
+        pytest test_cert_analyzer.py test_fips_compliance_checker.py -v

@@ -7,6 +7,8 @@ Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of
 
 Supports in-memory certificate intercepts (via system crypto lib uprobe hooks) for post-decrypt inspection (no keys required) in addition to file-based PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) formats.
 
+Each detected certificate is automatically checked for FIPS 140-2/140-3 algorithm compliance — key type, minimum key size, approved curves, and signature hash with results surfaced in the same Prometheus metrics and Kafka events alongside expiry data.
+
 ---
 
 ## Prerequisites
