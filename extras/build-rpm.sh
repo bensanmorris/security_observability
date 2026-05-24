@@ -8,7 +8,7 @@
 # Defaults:
 #   version          — git tag if on a tag, otherwise short SHA
 #   release          — 1
-#   tetragon-version — v1.1.0
+#   tetragon-version — v1.7.0
 #
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024 Your Organisation
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-TETRAGON_VERSION="${TETRAGON_VERSION:-v1.1.0}"
+TETRAGON_VERSION="${TETRAGON_VERSION:-v1.7.0}"
 RPM_RELEASE="${RPM_RELEASE:-1}"
 GRPCIO_VERSION="1.60.1"
 PROTOBUF_VERSION="4.25.3"

@@ -9,7 +9,7 @@ ARG PYTHON_VERSION=311
 
 FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest AS proto-builder
 
-ARG TETRAGON_VERSION=v1.1.0
+ARG TETRAGON_VERSION=v1.7.0
 ARG PIP_INDEX_URL=https://pypi.org/simple/
 ARG PIP_TRUSTED_HOST=pypi.org
 
@@ -63,7 +63,7 @@ FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:lates
 ARG PIP_INDEX_URL=https://pypi.org/simple/
 ARG PIP_TRUSTED_HOST=pypi.org
 # Re-declare so it's available in this stage (top-level ARGs don't cross stages)
-ARG TETRAGON_VERSION=v1.1.0
+ARG TETRAGON_VERSION=v1.7.0
 # Version of the cert-analyzer itself — set from git tag or commit SHA by CI
 ARG VERSION=dev
 
