@@ -10,7 +10,7 @@ pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
 mkdir -p tetragon
 
 # Download Tetragon proto files
-TETRAGON_VERSION="v1.0.0"
+TETRAGON_VERSION="v1.1.0"
 BASE_URL="https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/api/v1"
 
 echo "Downloading Tetragon proto files from version ${TETRAGON_VERSION}..."
