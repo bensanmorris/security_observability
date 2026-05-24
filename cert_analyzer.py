@@ -1245,12 +1245,15 @@ class CertificateAnalyzer:
             return
 
         cert_info.pod_name        = tetragon_pod.name
-        # pod.uid added in Tetragon v1.6.0 — not available when targeting v1.1.0
         cert_info.namespace       = tetragon_pod.namespace
         cert_info.workload_kind   = tetragon_pod.workload_kind
         cert_info.workload_name   = tetragon_pod.workload
         cert_info.pod_labels      = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
-        # pod.pod_annotations added in Tetragon v1.5.0 — not available when targeting v1.1.0
+        # pod.uid available from Tetragon v1.6.0; empty string on older servers
+        if tetragon_pod.uid:
+            cert_info.pod_uid = tetragon_pod.uid
+        # pod.pod_annotations available from Tetragon v1.5.0; empty map on older servers
+        cert_info.pod_annotations = dict(tetragon_pod.pod_annotations) if tetragon_pod.pod_annotations else {}
 
         for key in ["app.kubernetes.io/name", "app", "name"]:
             if key in cert_info.pod_labels:
@@ -1263,7 +1266,9 @@ class CertificateAnalyzer:
         cert_info.container_image            = c.image.name
         cert_info.container_image_id         = c.image.id
         cert_info.container_maybe_exec_probe = c.maybe_exec_probe
-        # container.security_context added in Tetragon v1.5.0 — not available when targeting v1.1.0
+        # container.security_context available from Tetragon v1.5.0; unset on older servers
+        if c.HasField('security_context'):
+            cert_info.container_privileged = c.security_context.privileged
         if c.HasField('pid'):
             cert_info.container_pid = c.pid.value
         if c.HasField('start_time'):
