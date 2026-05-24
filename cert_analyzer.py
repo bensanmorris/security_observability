@@ -785,7 +785,14 @@ class HealthServer:
 
     def start(self) -> None:
         """Start the health server in a background daemon thread."""
-        self._server = HTTPServer(('', self.port), self._make_handler())
+        try:
+            self._server = HTTPServer(('', self.port), self._make_handler())
+        except OSError as e:
+            logger.critical(
+                f"Cannot bind health server to port {self.port}: {e}. "
+                f"Change [health] port in cert-analyzer.conf or set HEALTH_PORT."
+            )
+            sys.exit(1)
 
         thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         thread.name = 'health-server'
@@ -2126,7 +2133,14 @@ def main():
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
-    start_http_server(metrics_port)
+    try:
+        start_http_server(metrics_port)
+    except OSError as e:
+        logger.critical(
+            f"Cannot bind Prometheus metrics server to port {metrics_port}: {e}. "
+            f"Change [metrics] port in cert-analyzer.conf or set METRICS_PORT."
+        )
+        sys.exit(1)
 
     # Initialise optional Kafka publisher before the analyzer so it can be
     # passed in at construction time
