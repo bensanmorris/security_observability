@@ -8,7 +8,7 @@ workflow:
 
 variables:
   IMAGE_REPO: $CI_REGISTRY_IMAGE/cert-analyzer
-  TETRAGON_VERSION: "v1.1.0"
+  TETRAGON_VERSION: "v1.7.0"
 
 stages:
   - lint

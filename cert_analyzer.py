@@ -3,7 +3,6 @@
 TLS Certificate Expiry Monitor for RHEL9/Podman
 Consumes Tetragon events and analyzes certificate expiry dates
 EXTENDED: Now supports multiple certificates per file
-EXTENDED: Kubernetes pod enrichment via k8s_enricher
 """
 
 import os
@@ -36,13 +35,6 @@ try:
 except ImportError:
     print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
     sys.exit(1)
-
-# Import Kubernetes enricher - optional, degrades gracefully if unavailable
-try:
-    from k8s_enricher import KubernetesEnricher
-    K8S_ENRICHER_AVAILABLE = True
-except ImportError:
-    K8S_ENRICHER_AVAILABLE = False
 
 # Import JKS parser - optional, degrades gracefully if unavailable
 # Install with: pip install pyjks
@@ -102,15 +94,22 @@ class CertificateInfo:
     common_name: str = ""
     san_dns_names: list = field(default_factory=list)
     cert_index: int = 0
-    # Workload context sourced directly from Tetragon event (always populated when available)
+    # Kubernetes context sourced directly from the Tetragon event Pod proto
     pod_name: str = ""
+    pod_uid: str = ""
+    pod_labels: dict = None
+    pod_annotations: dict = None
     workload_kind: str = ""
     workload_name: str = ""
-    pod_labels: dict = None
-    # Additional context from Kubernetes API enricher (supplements Tetragon data)
-    app_label: str = ""
+    app_label: str = ""                      # derived from pod_labels
+    container_id: str = ""
     container_name: str = ""
     container_image: str = ""
+    container_image_id: str = ""
+    container_privileged: bool = False
+    container_pid: Optional[int] = None
+    container_start_time: Optional[datetime] = None
+    container_maybe_exec_probe: bool = False
     # SHA-256 of the DER-encoded certificate bytes. Empty string when
     # CERT_CHECKSUM_ENABLED=false (the default).
     checksum: str = ""
@@ -494,13 +493,21 @@ class KafkaPublisher:
             'is_expired':        cert_info.is_expired,
             'process':           cert_info.process,
             'pid':               cert_info.pid,
-            'namespace':         cert_info.namespace,
-            'pod_name':          cert_info.pod_name,
-            'workload_kind':     cert_info.workload_kind,
-            'workload_name':     cert_info.workload_name,
-            'app_label':         cert_info.app_label,
-            'container_name':    cert_info.container_name,
-            'container_image':   cert_info.container_image,
+            'namespace':                  cert_info.namespace,
+            'pod_name':                   cert_info.pod_name,
+            'pod_uid':                    cert_info.pod_uid,
+            'pod_annotations':            cert_info.pod_annotations,
+            'workload_kind':              cert_info.workload_kind,
+            'workload_name':              cert_info.workload_name,
+            'app_label':                  cert_info.app_label,
+            'container_id':               cert_info.container_id,
+            'container_name':             cert_info.container_name,
+            'container_image':            cert_info.container_image,
+            'container_image_id':         cert_info.container_image_id,
+            'container_privileged':       cert_info.container_privileged,
+            'container_pid':              cert_info.container_pid,
+            'container_start_time':       cert_info.container_start_time.isoformat() if cert_info.container_start_time else None,
+            'container_maybe_exec_probe': cert_info.container_maybe_exec_probe,
             'checksum':          cert_info.checksum,
             'key_algorithm':     cert_info.key_algorithm,
             'key_size':          cert_info.key_size,
@@ -778,7 +785,14 @@ class HealthServer:
 
     def start(self) -> None:
         """Start the health server in a background daemon thread."""
-        self._server = HTTPServer(('', self.port), self._make_handler())
+        try:
+            self._server = HTTPServer(('', self.port), self._make_handler())
+        except OSError as e:
+            logger.critical(
+                f"Cannot bind health server to port {self.port}: {e}. "
+                f"Change [health] port in cert-analyzer.conf or set HEALTH_PORT."
+            )
+            sys.exit(1)
 
         thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         thread.name = 'health-server'
@@ -827,16 +841,6 @@ class CertificateAnalyzer:
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
 
-        # Kubernetes enricher - enabled when running in-cluster or locally with kubeconfig
-        if K8S_ENRICHER_AVAILABLE:
-            self.enricher = KubernetesEnricher()
-            if self.enricher.available:
-                logger.info("Kubernetes pod enrichment enabled")
-            else:
-                logger.info("Kubernetes pod enrichment disabled - API unavailable")
-        else:
-            self.enricher = None
-            logger.info("Kubernetes pod enrichment disabled - k8s_enricher not found")
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -1243,45 +1247,47 @@ class CertificateAnalyzer:
         return cert_infos
 
     def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
-        """
-        Apply workload context to a CertificateInfo instance.
+        """Populate all Tetragon Pod proto fields onto cert_info."""
+        if tetragon_pod is None:
+            return
 
-        Primary source: Tetragon event pod proto - provides pod name, namespace,
-        workload kind/name, and pod labels with zero additional API calls.
+        cert_info.pod_name        = tetragon_pod.name
+        cert_info.namespace       = tetragon_pod.namespace
+        cert_info.workload_kind   = tetragon_pod.workload_kind
+        cert_info.workload_name   = tetragon_pod.workload
+        cert_info.pod_labels      = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
+        # pod.uid available from Tetragon v1.6.0; empty string on older servers
+        if tetragon_pod.uid:
+            cert_info.pod_uid = tetragon_pod.uid
+        # pod.pod_annotations available from Tetragon v1.5.0; empty map on older servers
+        cert_info.pod_annotations = dict(tetragon_pod.pod_annotations) if tetragon_pod.pod_annotations else {}
 
-        Secondary source: Kubernetes API enricher - supplements with fields
-        Tetragon does not provide, specifically container name and container image.
-        """
-        # --- Primary: read directly from the Tetragon event proto ---
-        if tetragon_pod is not None:
-            cert_info.pod_name      = tetragon_pod.name
-            cert_info.namespace     = tetragon_pod.namespace
-            cert_info.workload_kind = tetragon_pod.workload_kind
-            cert_info.workload_name = tetragon_pod.workload
-            cert_info.pod_labels    = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
-            # Derive app_label from pod labels using common conventions
-            for key in ["app.kubernetes.io/name", "app", "name"]:
-                if key in cert_info.pod_labels:
-                    cert_info.app_label = cert_info.pod_labels[key]
-                    break
-            logger.debug(
-                f"Tetragon pod context: pod={cert_info.pod_name} "
-                f"namespace={cert_info.namespace} "
-                f"workload={cert_info.workload_kind}/{cert_info.workload_name} "
-                f"labels={cert_info.pod_labels}"
-            )
+        for key in ["app.kubernetes.io/name", "app", "name"]:
+            if key in cert_info.pod_labels:
+                cert_info.app_label = cert_info.pod_labels[key]
+                break
 
-        # --- Secondary: Kubernetes API for fields Tetragon doesn't provide ---
-        # Currently used for: container_name, container_image
-        if self.enricher and self.enricher.available and cert_info.pod_name and cert_info.namespace:
-            pod_ctx = self.enricher.enrich(cert_info.pod_name, cert_info.namespace)
-            if pod_ctx:
-                cert_info.container_name  = pod_ctx.container_name
-                cert_info.container_image = pod_ctx.container_image
-                logger.debug(
-                    f"K8s enricher added: container={cert_info.container_name} "
-                    f"image={cert_info.container_image}"
-                )
+        c = tetragon_pod.container
+        cert_info.container_id               = c.id
+        cert_info.container_name             = c.name
+        cert_info.container_image            = c.image.name
+        cert_info.container_image_id         = c.image.id
+        cert_info.container_maybe_exec_probe = c.maybe_exec_probe
+        # container.security_context available from Tetragon v1.5.0; unset on older servers
+        if c.HasField('security_context'):
+            cert_info.container_privileged = c.security_context.privileged
+        if c.HasField('pid'):
+            cert_info.container_pid = c.pid.value
+        if c.HasField('start_time'):
+            cert_info.container_start_time = c.start_time.ToDatetime()
+
+        logger.debug(
+            f"Tetragon pod context: pod={cert_info.pod_name} uid={cert_info.pod_uid} "
+            f"namespace={cert_info.namespace} "
+            f"workload={cert_info.workload_kind}/{cert_info.workload_name} "
+            f"container={cert_info.container_name} image={cert_info.container_image} "
+            f"privileged={cert_info.container_privileged} labels={cert_info.pod_labels}"
+        )
 
     def log_certificate_status(self, info: CertificateInfo):
         """Log certificate status with appropriate severity"""
@@ -1510,7 +1516,7 @@ class CertificateAnalyzer:
                 return False
 
         # Extract the three uint64 args: session, pTemplate, ulCount
-        uint64_args = [arg.uint64_arg for arg in uprobe.args if arg.HasField('uint64_arg')]
+        uint64_args = [arg.size_arg for arg in uprobe.args if arg.HasField('size_arg')]
         if len(uint64_args) < 3:
             logger.debug("NSC_CreateObject: fewer than 3 uint64 args, skipping")
             return False
@@ -1619,7 +1625,7 @@ class CertificateAnalyzer:
         if self.filter_self_events and pid == os.getpid():
             return False
 
-        uint64_args = [arg.uint64_arg for arg in uprobe.args if arg.HasField('uint64_arg')]
+        uint64_args = [arg.size_arg for arg in uprobe.args if arg.HasField('size_arg')]
         if len(uint64_args) < 3:
             return False
 
@@ -2127,7 +2133,14 @@ def main():
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
-    start_http_server(metrics_port)
+    try:
+        start_http_server(metrics_port)
+    except OSError as e:
+        logger.critical(
+            f"Cannot bind Prometheus metrics server to port {metrics_port}: {e}. "
+            f"Change [metrics] port in cert-analyzer.conf or set METRICS_PORT."
+        )
+        sys.exit(1)
 
     # Initialise optional Kafka publisher before the analyzer so it can be
     # passed in at construction time

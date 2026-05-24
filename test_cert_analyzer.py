@@ -609,6 +609,47 @@ class TestCABundles:
         assert not cert_infos[2].is_expired  # Leaf is valid
 
 
+class MockTetragonContainer:
+    """
+    Minimal mock of the Tetragon Container proto object.
+    Mirrors the fields read in _apply_pod_context (v1.7.0 schema).
+    """
+    def __init__(
+        self,
+        id: str = "abc123",
+        name: str = "",
+        image_name: str = "",
+        image_id: str = "",
+        maybe_exec_probe: bool = False,
+        pid: int = None,
+        start_time=None,
+        privileged: bool = None,
+    ):
+        from types import SimpleNamespace
+        self.id               = id
+        self.name             = name
+        self.image            = SimpleNamespace(name=image_name, id=image_id)
+        self.maybe_exec_probe = maybe_exec_probe
+        self._pid             = pid
+        self._start_time      = start_time
+        self._privileged      = privileged
+        if pid is not None:
+            self.pid = SimpleNamespace(value=pid)
+        if start_time is not None:
+            self.start_time = SimpleNamespace(ToDatetime=lambda: start_time)
+        if privileged is not None:
+            self.security_context = SimpleNamespace(privileged=privileged)
+
+    def HasField(self, name):
+        if name == 'pid':
+            return self._pid is not None
+        if name == 'start_time':
+            return self._start_time is not None
+        if name == 'security_context':
+            return self._privileged is not None
+        return False
+
+
 class MockTetragonPod:
     """
     Minimal mock of the Tetragon pod proto object.
@@ -622,12 +663,18 @@ class MockTetragonPod:
         workload_kind: str = "Deployment",
         workload: str = "test-deployment",
         pod_labels: dict = None,
+        pod_annotations: dict = None,
+        uid: str = "",
+        container: 'MockTetragonContainer' = None,
     ):
-        self.name          = name
-        self.namespace     = namespace
-        self.workload_kind = workload_kind
-        self.workload      = workload
-        self.pod_labels    = pod_labels or {}
+        self.name            = name
+        self.namespace       = namespace
+        self.workload_kind   = workload_kind
+        self.workload        = workload
+        self.pod_labels      = pod_labels or {}
+        self.pod_annotations = pod_annotations or {}
+        self.uid             = uid
+        self.container       = container if container is not None else MockTetragonContainer()
 
 
 class MockK8sEnricher:
@@ -758,36 +805,36 @@ class TestK8sEnricherSecondaryPath:
     that supplements fields Tetragon doesn't provide (container name/image).
     """
 
-    def test_container_fields_populated_by_enricher(self, analyzer):
-        """container_name and container_image are filled in by the k8s enricher."""
-        analyzer.enricher = MockK8sEnricher(
-            container_name="app-container",
-            container_image="myrepo/myapp:v2.3.1",
-        )
+    def test_container_fields_populated_from_tetragon_proto(self, analyzer):
+        """container_name and container_image are read from the Tetragon Container proto."""
         cert_info    = _make_cert_info()
-        tetragon_pod = MockTetragonPod(name="mypod", namespace="default")
+        tetragon_pod = MockTetragonPod(
+            name="mypod",
+            namespace="default",
+            container=MockTetragonContainer(
+                name="app-container",
+                image_name="myrepo/myapp:v2.3.1",
+            ),
+        )
 
         analyzer._apply_pod_context(cert_info, tetragon_pod)
 
         assert cert_info.container_name  == "app-container"
         assert cert_info.container_image == "myrepo/myapp:v2.3.1"
 
-    def test_enricher_not_called_when_unavailable(self, analyzer):
-        """Enricher is skipped when enricher.available is False."""
-        mock           = MockK8sEnricher()
-        mock.available = False
-        analyzer.enricher = mock
+    def test_container_fields_empty_when_container_has_no_data(self, analyzer):
+        """container_name and container_image default to empty when container fields are unset."""
         cert_info    = _make_cert_info()
         tetragon_pod = MockTetragonPod(name="mypod", namespace="default")
+        # Default MockTetragonContainer has empty name/image
 
         analyzer._apply_pod_context(cert_info, tetragon_pod)
 
         assert cert_info.container_name  == ""
         assert cert_info.container_image == ""
 
-    def test_enricher_not_called_when_pod_name_missing(self, analyzer):
-        """Enricher is skipped when pod name is absent (no Tetragon pod context)."""
-        analyzer.enricher = MockK8sEnricher()
+    def test_container_fields_absent_when_no_pod_context(self, analyzer):
+        """Container fields stay empty when there is no Tetragon pod context at all."""
         cert_info = _make_cert_info()
 
         analyzer._apply_pod_context(cert_info, None)
@@ -795,9 +842,8 @@ class TestK8sEnricherSecondaryPath:
         assert cert_info.container_name  == ""
         assert cert_info.container_image == ""
 
-    def test_tetragon_fields_not_overwritten_by_enricher(self, analyzer):
-        """Tetragon-sourced fields (pod_name, workload etc.) are not touched by the enricher."""
-        analyzer.enricher = MockK8sEnricher()
+    def test_tetragon_pod_fields_set_alongside_container(self, analyzer):
+        """Pod-level fields (pod_name, workload etc.) are correctly set from the proto."""
         cert_info    = _make_cert_info()
         tetragon_pod = MockTetragonPod(
             name="original-pod",
@@ -810,6 +856,69 @@ class TestK8sEnricherSecondaryPath:
         assert cert_info.pod_name      == "original-pod"
         assert cert_info.workload_kind == "StatefulSet"
         assert cert_info.workload_name == "my-statefulset"
+
+    def test_pod_uid_populated_when_present(self, analyzer):
+        """pod.uid (Tetragon v1.6.0+) is captured when the server supplies it."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(uid="550e8400-e29b-41d4-a716-446655440000")
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_uid == "550e8400-e29b-41d4-a716-446655440000"
+
+    def test_pod_uid_stays_empty_when_server_is_old(self, analyzer):
+        """pod.uid is left empty when the server returns an empty string (pre-v1.6.0)."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(uid="")
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_uid == ""
+
+    def test_pod_annotations_populated_when_present(self, analyzer):
+        """pod.pod_annotations (Tetragon v1.5.0+) is captured when the server supplies it."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(
+            pod_annotations={"prometheus.io/scrape": "true", "sidecar.istio.io/inject": "false"},
+        )
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_annotations == {
+            "prometheus.io/scrape": "true",
+            "sidecar.istio.io/inject": "false",
+        }
+
+    def test_pod_annotations_empty_dict_when_server_is_old(self, analyzer):
+        """pod.pod_annotations is an empty dict when the server supplies nothing (pre-v1.5.0)."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(pod_annotations={})
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_annotations == {}
+
+    def test_container_privileged_set_when_security_context_present(self, analyzer):
+        """container.security_context.privileged (Tetragon v1.5.0+) is captured when supplied."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(
+            container=MockTetragonContainer(privileged=True),
+        )
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.container_privileged is True
+
+    def test_container_privileged_false_when_security_context_absent(self, analyzer):
+        """container_privileged stays False when the server doesn't send security_context (pre-v1.5.0)."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(
+            container=MockTetragonContainer(privileged=None),
+        )
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.container_privileged is False
 
 
 class TestLogCertificateStatusOutput:
@@ -1129,8 +1238,11 @@ class TestJKSParsing:
                 tried.append(password)
                 raise Exception("wrong password")
 
-        import jks as _jks_mod
-        monkeypatch.setattr(_jks_mod, 'KeyStore', _CapturingKeyStore)
+        import types
+        jks_stub = types.ModuleType('jks')
+        jks_stub.KeyStore = _CapturingKeyStore
+        jks_stub.util = types.SimpleNamespace(BadKeystoreFormatException=Exception)
+        monkeypatch.setattr(_ca, 'jks', jks_stub, raising=False)
 
         jks_path = os.path.join(temp_dir, "pw-list.jks")
         with open(jks_path, 'wb') as f:
@@ -3995,8 +4107,8 @@ class TestJavaNSSFIPSHooking:
     def _make_uint64_arg(value):
         from unittest.mock import MagicMock
         arg = MagicMock()
-        arg.HasField.side_effect = lambda f: f == 'uint64_arg'
-        arg.uint64_arg = value
+        arg.HasField.side_effect = lambda f: f == 'size_arg'
+        arg.size_arg = value
         return arg
 
     @staticmethod
