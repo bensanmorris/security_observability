@@ -101,6 +101,7 @@ class CertificateInfo:
     pod_annotations: dict = None
     workload_kind: str = ""
     workload_name: str = ""
+    node_name: str = ""
     app_label: str = ""                      # derived from pod_labels
     container_id: str = ""
     container_name: str = ""
@@ -159,7 +160,7 @@ class PrometheusMetrics:
             'Days until TLS certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_expiry_timestamp = Gauge(
@@ -167,7 +168,7 @@ class PrometheusMetrics:
             'Unix timestamp of certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_valid_from = Gauge(
@@ -175,7 +176,7 @@ class PrometheusMetrics:
             'Unix timestamp of certificate valid from date',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         # Event counters
@@ -196,21 +197,21 @@ class PrometheusMetrics:
             'tls_certificate_expired',
             'Whether certificate is expired (1=expired, 0=valid)',
             ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name']
+             'workload_kind', 'workload_name', 'node_name']
         )
 
         self.cert_expiring_soon = Gauge(
             'tls_certificate_expiring_soon',
             'Whether certificate expires within threshold (1=yes, 0=no)',
             ['cert_path', 'process', 'threshold_days', 'cert_index', 'pod_name',
-             'namespace', 'workload_kind', 'workload_name']
+             'namespace', 'workload_kind', 'workload_name', 'node_name']
         )
 
         self.cert_fips_compliant = Gauge(
             'tls_certificate_fips_compliant',
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
             ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'key_algorithm', 'signature_hash']
+             'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash']
         )
 
         # System health
@@ -282,6 +283,7 @@ class PrometheusMetrics:
             'namespace':      info.namespace,
             'workload_kind':  info.workload_kind,
             'workload_name':  info.workload_name,
+            'node_name':      info.node_name,
             'app_label':      info.app_label,
             'container_name': info.container_name,
             # Empty string when CERT_CHECKSUM_ENABLED=false — Prometheus
@@ -302,6 +304,7 @@ class PrometheusMetrics:
             namespace=info.namespace,
             workload_kind=info.workload_kind,
             workload_name=info.workload_name,
+            node_name=info.node_name,
         ).set(1 if info.is_expired else 0)
 
         for threshold in [7, 30, 90]:
@@ -314,6 +317,7 @@ class PrometheusMetrics:
                 namespace=info.namespace,
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
+                node_name=info.node_name,
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
 
         if info.key_algorithm:
@@ -325,6 +329,7 @@ class PrometheusMetrics:
                 namespace=info.namespace,
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
+                node_name=info.node_name,
                 key_algorithm=info.key_algorithm,
                 signature_hash=info.signature_hash,
             ).set(1 if info.fips_compliant else 0)
@@ -496,6 +501,7 @@ class KafkaPublisher:
             'namespace':                  cert_info.namespace,
             'pod_name':                   cert_info.pod_name,
             'pod_uid':                    cert_info.pod_uid,
+            'node_name':                  cert_info.node_name,
             'pod_annotations':            cert_info.pod_annotations,
             'workload_kind':              cert_info.workload_kind,
             'workload_name':              cert_info.workload_name,
@@ -1302,9 +1308,12 @@ class CertificateAnalyzer:
         if info.pod_name:
             k8s_ctx = (
                 f" | pod={info.pod_name} namespace={info.namespace}"
+                + (f" node={info.node_name}" if info.node_name else "")
                 + (f" workload={info.workload}" if info.workload else "")
                 + (f" container={info.container_name}" if info.container_name else "")
             )
+        elif info.node_name:
+            k8s_ctx = f" | node={info.node_name}"
 
         if info.is_expired:
             logger.error(
@@ -1594,6 +1603,7 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name = event.node_name
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -1717,6 +1727,7 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name = event.node_name
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -1778,6 +1789,8 @@ class CertificateAnalyzer:
                 if tetragon_pod is not None and not cert_info.pod_name:
                     logger.debug(f"Applying pod context to cached entry for {cert_path}")
                     self._apply_pod_context(cert_info, tetragon_pod)
+                if event.node_name:
+                    cert_info.node_name = event.node_name
                 self.log_certificate_status(cert_info)
                 self.metrics.update_certificate_metrics(cert_info)
             return
@@ -1792,6 +1805,7 @@ class CertificateAnalyzer:
         for cert_info in cert_infos:
             # Apply pod context: Tetragon event first, k8s API for extras
             self._apply_pod_context(cert_info, tetragon_pod)
+            cert_info.node_name = event.node_name
 
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)

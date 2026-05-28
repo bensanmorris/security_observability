@@ -1411,6 +1411,7 @@ class TestProcessEventTimestamp:
                 self.args    = [_MockArg(path)]
 
         class _MockEvent:
+            node_name = ''
             def __init__(self_, path):
                 self_._kprobe = _MockKprobe(path)
             def HasField(self_, name):
@@ -3079,6 +3080,7 @@ class TestKafkaPublisher:
             pod_name='my-pod',
             workload_kind='Deployment',
             workload_name='my-app',
+            node_name='worker-node-1',
             pod_labels={'app': 'my-app'},
             app_label='my-app',
             container_name='main',
@@ -3219,7 +3221,7 @@ class TestKafkaPublisher:
                 'subject', 'issuer', 'serial_number', 'common_name',
                 'san_dns_names', 'not_before', 'not_after',
                 'days_until_expiry', 'is_expired', 'process', 'pid',
-                'namespace', 'pod_name', 'workload_kind', 'workload_name',
+                'namespace', 'pod_name', 'node_name', 'workload_kind', 'workload_name',
                 'app_label', 'container_name', 'container_image', 'checksum',
             ]
             for field in required_fields:
@@ -3248,6 +3250,7 @@ class TestKafkaPublisher:
             assert msg['pid']           == 12345
             assert msg['pod_name']      == 'my-pod'
             assert msg['namespace']     == 'default'
+            assert msg['node_name']     == 'worker-node-1'
             assert msg['workload_kind'] == 'Deployment'
             assert msg['workload_name'] == 'my-app'
             assert msg['san_dns_names'] == ['test.example.com', 'www.test.example.com']
@@ -3388,6 +3391,36 @@ class TestKafkaPublisher:
         mock_publisher.publish.assert_called_once()
         published_cert = mock_publisher.publish.call_args[0][0]
         assert published_cert.path == path
+
+    def test_node_name_propagated_from_event_to_cert_info(
+        self, analyzer, temp_dir
+    ):
+        """node_name from GetEventsResponse is written to CertificateInfo and published."""
+        from unittest.mock import MagicMock
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        cert, _ = TestCertificateGeneration.generate_certificate('node-test.example.com', 365)
+        path = os.path.join(temp_dir, 'node-test.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        mock_event = MagicMock()
+        mock_event.node_name = 'worker-node-42'
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = '/usr/bin/curl'
+        mock_kprobe.process.pid.value = 99
+        mock_kprobe.process.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+
+        analyzer.process_event(mock_event)
+
+        published_cert = mock_publisher.publish.call_args[0][0]
+        assert published_cert.node_name == 'worker-node-42'
 
     def test_analyzer_does_not_publish_redetected_cert(
         self, analyzer, temp_dir, monkeypatch
