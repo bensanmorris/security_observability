@@ -88,3 +88,67 @@ so `cert_analyzer` receives the template *pointer* and *count* as `uint64` args,
 then performs the two-hop dereference in Python via `/proc/<pid>/mem`.  This
 requires `CAP_SYS_PTRACE` (or root), which cert_analyzer holds in the
 security-monitoring context.
+
+---
+
+### cert-agent (Java, non-FIPS)
+
+Exercises the uprobe hook in `java-non-fips-cert.yaml`.  Provides certificate
+visibility for JVMs running **without** FIPS mode, where Java uses pure-Java
+JSSE crypto — no NSS native library calls occur at the cert-loading level, so
+the `java-fips-nss-cert.yaml` hooks have nothing to attach to.
+
+The solution mirrors the approach described in the
+[Coroot Java TLS instrumentation article](https://coroot.com/blog/java-tls-instrumentation-with-ebpf/):
+a Java agent instruments a JCA method, copies certificate DER bytes into a
+thread-local native buffer (avoiding GC-visible array pinning), then calls a
+tiny native stub function that serves as the uprobe target.  Tetragon reads the
+DER bytes atomically at stub entry as a `char_buf` — the same mechanism used
+for `SSL_CTX_use_certificate_ASN1` — so `cert_analyzer` needs no changes.
+
+**Build:**
+```bash
+sudo dnf install java-11-openjdk-devel gcc   # if not already installed
+cd java/cert-agent && ./build.sh
+# Outputs: cert-agent.jar  native/libcert_agent_stub.so
+```
+
+**Update the Tetragon policy path** to match the built `.so` before loading it:
+
+```bash
+# For local testing, edit java-non-fips-cert.yaml and set:
+#   path: /home/benm/security_observability/probe_tests/java/cert-agent/native/libcert_agent_stub.so
+```
+
+**Attach dynamically to a running JVM** (requires `jattach`):
+```bash
+# install: https://github.com/jattach/jattach
+AGENT=$(pwd)/cert-agent.jar
+LIB=$(pwd)/native/libcert_agent_stub.so
+jattach <pid> load instrument false ${AGENT}=${LIB}
+```
+
+**Or inject statically** (requires JVM restart):
+```bash
+java -javaagent:$(pwd)/cert-agent.jar=$(pwd)/native/libcert_agent_stub.so \
+     -jar yourapp.jar
+```
+
+**Automate deployment** across all running JVMs with the deployer:
+```bash
+python3 java_agent_deployer.py \
+    --agent-jar $(pwd)/cert-agent.jar \
+    --native-lib $(pwd)/native/libcert_agent_stub.so
+# Scans /proc every 30s, tries jattach for each new JVM,
+# and prints -javaagent instructions for any that reject dynamic attach.
+```
+
+| Hook | What fires it | How cert bytes reach cert_analyzer |
+|---|---|---|
+| `KeyStore.setCertificateEntry` (instrumented by agent) | Any explicit cert store: `KeyStore.setCertificateEntry(alias, cert)` | Agent calls `cert.getEncoded()` → copies DER to thread-local native buffer → calls `java_cert_agent_write(buf, len)` → Tetragon `char_buf` → `_handle_uprobe_in_memory_cert` |
+
+**Why `char_buf` works here (unlike the FIPS case):**
+The DER bytes are a direct, stable pointer in native memory by the time the
+uprobe fires — no two-hop dereference is needed.  The thread-local buffer
+ensures the GC cannot move the data between the Java copy and the eBPF read.
+No `CAP_SYS_PTRACE` or `/proc/<pid>/mem` access is required.
