@@ -1308,9 +1308,12 @@ class CertificateAnalyzer:
         if info.pod_name:
             k8s_ctx = (
                 f" | pod={info.pod_name} namespace={info.namespace}"
+                + (f" node={info.node_name}" if info.node_name else "")
                 + (f" workload={info.workload}" if info.workload else "")
                 + (f" container={info.container_name}" if info.container_name else "")
             )
+        elif info.node_name:
+            k8s_ctx = f" | node={info.node_name}"
 
         if info.is_expired:
             logger.error(
