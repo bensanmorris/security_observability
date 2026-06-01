@@ -110,32 +110,32 @@ for `SSL_CTX_use_certificate_ASN1` — so `cert_analyzer` needs no changes.
 ```bash
 sudo dnf install java-11-openjdk-devel gcc   # if not already installed
 cd java/cert-agent && ./build.sh
-# Outputs: cert-agent.jar
-#          /opt/cert-agent/libcert_agent_stub.so  (installed by build.sh)
+# Installs both artifacts to /opt/cert-agent/:
+#   /opt/cert-agent/cert-agent.jar
+#   /opt/cert-agent/libcert_agent_stub.so
 ```
 
-`build.sh` installs `libcert_agent_stub.so` to `/opt/cert-agent/` automatically,
-which is the same path `java-non-fips-cert.yaml` expects in production — no yaml
-edits needed for local testing.
+`build.sh` installs both artifacts to `/opt/cert-agent/` automatically — the
+same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
+needed for local testing.
 
 **Attach dynamically to a running JVM** (requires `jattach`):
 ```bash
 # install: https://github.com/jattach/jattach
-AGENT=$(pwd)/cert-agent.jar
-LIB=/opt/cert-agent/libcert_agent_stub.so
-jattach <pid> load instrument false ${AGENT}=${LIB}
+jattach <pid> load instrument false \
+    /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
 ```
 
 **Or inject statically** (requires JVM restart):
 ```bash
-java -javaagent:$(pwd)/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so \
+java -javaagent:/opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so \
      -jar yourapp.jar
 ```
 
 **Automate deployment** across all running JVMs with the deployer:
 ```bash
 python3 java_agent_deployer.py \
-    --agent-jar $(pwd)/cert-agent.jar \
+    --agent-jar /opt/cert-agent/cert-agent.jar \
     --native-lib /opt/cert-agent/libcert_agent_stub.so
 # Scans /proc every 30s, tries jattach for each new JVM,
 # and prints -javaagent instructions for any that reject dynamic attach.
