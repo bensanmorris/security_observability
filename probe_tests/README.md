@@ -110,27 +110,25 @@ for `SSL_CTX_use_certificate_ASN1` — so `cert_analyzer` needs no changes.
 ```bash
 sudo dnf install java-11-openjdk-devel gcc   # if not already installed
 cd java/cert-agent && ./build.sh
-# Outputs: cert-agent.jar  native/libcert_agent_stub.so
+# Outputs: cert-agent.jar
+#          /opt/cert-agent/libcert_agent_stub.so  (installed by build.sh)
 ```
 
-**Update the Tetragon policy path** to match the built `.so` before loading it:
-
-```bash
-# For local testing, edit java-non-fips-cert.yaml and set:
-#   path: /home/benm/security_observability/probe_tests/java/cert-agent/native/libcert_agent_stub.so
-```
+`build.sh` installs `libcert_agent_stub.so` to `/opt/cert-agent/` automatically,
+which is the same path `java-non-fips-cert.yaml` expects in production — no yaml
+edits needed for local testing.
 
 **Attach dynamically to a running JVM** (requires `jattach`):
 ```bash
 # install: https://github.com/jattach/jattach
 AGENT=$(pwd)/cert-agent.jar
-LIB=$(pwd)/native/libcert_agent_stub.so
+LIB=/opt/cert-agent/libcert_agent_stub.so
 jattach <pid> load instrument false ${AGENT}=${LIB}
 ```
 
 **Or inject statically** (requires JVM restart):
 ```bash
-java -javaagent:$(pwd)/cert-agent.jar=$(pwd)/native/libcert_agent_stub.so \
+java -javaagent:$(pwd)/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so \
      -jar yourapp.jar
 ```
 
@@ -138,7 +136,7 @@ java -javaagent:$(pwd)/cert-agent.jar=$(pwd)/native/libcert_agent_stub.so \
 ```bash
 python3 java_agent_deployer.py \
     --agent-jar $(pwd)/cert-agent.jar \
-    --native-lib $(pwd)/native/libcert_agent_stub.so
+    --native-lib /opt/cert-agent/libcert_agent_stub.so
 # Scans /proc every 30s, tries jattach for each new JVM,
 # and prints -javaagent instructions for any that reject dynamic attach.
 ```

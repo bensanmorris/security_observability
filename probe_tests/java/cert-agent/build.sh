@@ -58,13 +58,21 @@ echo "Built $OUTPUT_JAR"
 make -C native JAVA_HOME="$JAVA_HOME"
 echo "Built native/libcert_agent_stub.so"
 
+# ── Install to the path expected by java-non-fips-cert.yaml ─────────────────
+# Both local testing and production use /opt/cert-agent/ so the Tetragon
+# policy path never needs editing.
+INSTALL_DIR="/opt/cert-agent"
+sudo mkdir -p "$INSTALL_DIR"
+sudo cp native/libcert_agent_stub.so "$INSTALL_DIR/libcert_agent_stub.so"
+echo "Installed to $INSTALL_DIR/libcert_agent_stub.so"
+
 echo ""
 echo "Artifacts:"
 echo "  $(pwd)/$OUTPUT_JAR"
-echo "  $(pwd)/native/libcert_agent_stub.so"
+echo "  $INSTALL_DIR/libcert_agent_stub.so"
 echo ""
 echo "Static injection:"
-echo "  java -javaagent:$(pwd)/$OUTPUT_JAR=$(pwd)/native/libcert_agent_stub.so -jar yourapp.jar"
+echo "  java -javaagent:$(pwd)/$OUTPUT_JAR=$INSTALL_DIR/libcert_agent_stub.so -jar yourapp.jar"
 echo ""
 echo "Dynamic attach (requires jattach):"
-echo "  jattach <pid> load instrument false $(pwd)/$OUTPUT_JAR=$(pwd)/native/libcert_agent_stub.so"
+echo "  jattach <pid> load instrument false $(pwd)/$OUTPUT_JAR=$INSTALL_DIR/libcert_agent_stub.so"
