@@ -16,7 +16,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
 
 sys.path.insert(0, os.path.dirname(__file__))
-from fips_compliance_checker import check_certificate, system_fips_enabled, FipsComplianceResult
+from fips_compliance_checker import (
+    check_certificate, system_fips_enabled, FipsComplianceResult,
+    check_cipher_list, check_tls_version, check_ssl_options, HandshakeFipsResult,
+)
 
 
 def _build_cert(private_key, hash_algorithm=None) -> x509.Certificate:
@@ -176,3 +179,176 @@ class TestSystemFipsEnabled:
     def test_permission_denied_returns_false(self):
         with patch('builtins.open', side_effect=PermissionError('denied')):
             assert system_fips_enabled() is False
+
+
+class TestHandshakeFipsResult:
+    def test_compliant_result_has_empty_violations(self):
+        r = HandshakeFipsResult(compliant=True)
+        assert r.compliant is True
+        assert r.violations == []
+
+    def test_non_compliant_result_carries_violations(self):
+        r = HandshakeFipsResult(compliant=False, violations=["bad cipher"])
+        assert r.compliant is False
+        assert "bad cipher" in r.violations
+
+
+class TestCheckCipherList:
+    def test_empty_string_is_compliant(self):
+        assert check_cipher_list("").compliant is True
+
+    def test_explicit_fips_ecdhe_aes_gcm_compliant(self):
+        r = check_cipher_list("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384")
+        assert r.compliant is True
+        assert r.violations == []
+
+    def test_tls13_approved_suites_compliant(self):
+        r = check_cipher_list("TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256")
+        assert r.compliant is True
+
+    def test_rc4_keyword_non_compliant(self):
+        r = check_cipher_list("HIGH:RC4:!aNULL")
+        assert r.compliant is False
+        assert any("RC4" in v for v in r.violations)
+
+    def test_3des_keyword_non_compliant(self):
+        r = check_cipher_list("3DES")
+        assert r.compliant is False
+        assert any("3DES" in v for v in r.violations)
+
+    def test_null_encryption_non_compliant(self):
+        r = check_cipher_list("NULL")
+        assert r.compliant is False
+        assert any("NULL" in v for v in r.violations)
+
+    def test_anull_auth_non_compliant(self):
+        r = check_cipher_list("HIGH:ANULL")
+        assert r.compliant is False
+        assert any("ANULL" in v for v in r.violations)
+
+    def test_md5_mac_non_compliant(self):
+        r = check_cipher_list("HIGH:MD5")
+        assert r.compliant is False
+        assert any("MD5" in v for v in r.violations)
+
+    def test_camellia_non_compliant(self):
+        r = check_cipher_list("CAMELLIA")
+        assert r.compliant is False
+        assert any("CAMELLIA" in v for v in r.violations)
+
+    def test_default_directive_non_compliant(self):
+        r = check_cipher_list("DEFAULT")
+        assert r.compliant is False
+        assert any("DEFAULT" in v for v in r.violations)
+
+    def test_all_directive_non_compliant(self):
+        r = check_cipher_list("ALL:!EXPORT")
+        assert r.compliant is False
+        assert any("ALL" in v for v in r.violations)
+
+    def test_negated_rc4_is_not_a_violation(self):
+        r = check_cipher_list("HIGH:!RC4:!aNULL:!MD5:!CAMELLIA:!SEED:!3DES")
+        assert r.compliant is True, (
+            "Explicitly negated non-FIPS keywords must not be counted as violations"
+        )
+
+    def test_negated_default_is_not_a_violation(self):
+        r = check_cipher_list("ECDHE-RSA-AES256-GCM-SHA384:!DEFAULT")
+        assert r.compliant is True
+
+    def test_multiple_violations_accumulated(self):
+        r = check_cipher_list("RC4:3DES:NULL")
+        assert r.compliant is False
+        assert len(r.violations) >= 3
+
+    def test_colon_and_space_delimited_parse_equally(self):
+        r1 = check_cipher_list("HIGH:RC4")
+        r2 = check_cipher_list("HIGH RC4")
+        assert r1.compliant == r2.compliant
+
+    def test_srp_non_compliant(self):
+        r = check_cipher_list("SRP")
+        assert r.compliant is False
+
+    def test_export_non_compliant(self):
+        r = check_cipher_list("EXPORT")
+        assert r.compliant is False
+
+    def test_case_insensitive_matching(self):
+        r = check_cipher_list("rc4")
+        assert r.compliant is False
+
+
+class TestCheckTlsVersion:
+    def test_unset_zero_is_compliant(self):
+        r = check_tls_version(0)
+        assert r.compliant is True
+        assert r.violations == []
+
+    def test_tls_1_2_is_compliant(self):
+        r = check_tls_version(0x0303)
+        assert r.compliant is True
+
+    def test_tls_1_3_is_compliant(self):
+        r = check_tls_version(0x0304)
+        assert r.compliant is True
+
+    def test_tls_1_1_non_compliant(self):
+        r = check_tls_version(0x0302)
+        assert r.compliant is False
+        assert any("1.1" in v for v in r.violations)
+
+    def test_tls_1_0_non_compliant(self):
+        r = check_tls_version(0x0301)
+        assert r.compliant is False
+        assert any("1.0" in v for v in r.violations)
+
+    def test_ssl_3_0_non_compliant(self):
+        r = check_tls_version(0x0300)
+        assert r.compliant is False
+        assert any("SSL 3.0" in v for v in r.violations)
+
+    def test_violation_message_references_nist_standard(self):
+        r = check_tls_version(0x0301)
+        assert any("800-52" in v for v in r.violations)
+
+    def test_unknown_version_above_floor_is_compliant(self):
+        r = check_tls_version(0x0305)
+        assert r.compliant is True
+
+
+class TestCheckSslOptions:
+    _NO_TLS12 = 0x08000000
+    _NO_TLS13 = 0x20000000
+
+    def test_no_options_compliant(self):
+        r = check_ssl_options(0x0)
+        assert r.compliant is True
+        assert r.violations == []
+
+    def test_no_tls12_only_compliant(self):
+        r = check_ssl_options(self._NO_TLS12)
+        assert r.compliant is True
+
+    def test_no_tls13_only_compliant(self):
+        r = check_ssl_options(self._NO_TLS13)
+        assert r.compliant is True
+
+    def test_both_disabled_non_compliant(self):
+        r = check_ssl_options(self._NO_TLS12 | self._NO_TLS13)
+        assert r.compliant is False
+        assert len(r.violations) == 1
+
+    def test_violation_mentions_both_flags(self):
+        r = check_ssl_options(self._NO_TLS12 | self._NO_TLS13)
+        assert any("TLSv1_2" in v and "TLSv1_3" in v for v in r.violations)
+
+    def test_unrelated_flags_do_not_trigger_violation(self):
+        SSL_OP_NO_COMPRESSION = 0x00020000
+        r = check_ssl_options(SSL_OP_NO_COMPRESSION)
+        assert r.compliant is True
+
+    def test_both_plus_other_flags_still_non_compliant(self):
+        SSL_OP_NO_COMPRESSION = 0x00020000
+        r = check_ssl_options(self._NO_TLS12 | self._NO_TLS13 | SSL_OP_NO_COMPRESSION)
+        assert r.compliant is False

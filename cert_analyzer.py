@@ -27,7 +27,13 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from prometheus_client import Gauge, Counter, Info, start_http_server
-from fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
+from fips_compliance_checker import (
+    check_certificate as _fips_check, FipsComplianceResult,
+    check_cipher_list as _fips_check_cipher_list,
+    check_tls_version as _fips_check_tls_version,
+    check_ssl_options as _fips_check_ssl_options,
+    HandshakeFipsResult,
+)
 
 # Import generated Tetragon protos
 try:
@@ -150,6 +156,48 @@ class CertificateInfo:
         return ""
 
 
+@dataclass
+class HandshakeConfigInfo:
+    """SSL/TLS handshake configuration captured from an OpenSSL SSL_CTX uprobe."""
+    process: str
+    pid: int
+    symbol: str                    # SSL_CTX_set_cipher_list, SSL_CTX_set_ciphersuites,
+                                   # SSL_CTX_set_min_proto_version, SSL_CTX_set_options
+    cipher_list: str = ""          # cipher string (cipher_list / ciphersuites hooks)
+    tls_min_version: int = 0       # raw OpenSSL version int (set_min_proto_version hook)
+    options_mask: int = 0          # raw bitmask (set_options hook)
+    fips_compliant: bool = False
+    fips_violations: list = field(default_factory=list)
+    namespace: str = ""
+    pod_name: str = ""
+    pod_uid: str = ""
+    pod_labels: dict = None
+    workload_kind: str = ""
+    workload_name: str = ""
+    node_name: str = ""
+    app_label: str = ""
+    container_name: str = ""
+    container_image: str = ""
+
+    @property
+    def tls_version_str(self) -> str:
+        _names = {
+            0x0304: 'TLS1.3', 0x0303: 'TLS1.2',
+            0x0302: 'TLS1.1', 0x0301: 'TLS1.0', 0x0300: 'SSLv3',
+        }
+        if not self.tls_min_version:
+            return ""
+        return _names.get(self.tls_min_version, f"0x{self.tls_min_version:04x}")
+
+    @property
+    def unique_key(self) -> str:
+        if self.cipher_list:
+            return f"{self.process}:{self.symbol}:{self.cipher_list}"
+        if self.tls_min_version:
+            return f"{self.process}:{self.symbol}:{self.tls_min_version:04x}"
+        return f"{self.process}:{self.symbol}:{self.options_mask:x}"
+
+
 class PrometheusMetrics:
     """Prometheus metrics for certificate monitoring"""
 
@@ -269,6 +317,26 @@ class PrometheusMetrics:
         )
         self.cache_max_size.set(CACHE_MAX_SIZE)
 
+        self.cache_known_handshakes_size = Gauge(
+            'cert_analyzer_cache_known_handshakes_size',
+            'Number of entries in the known_handshakes LRU cache',
+        )
+
+        # Handshake configuration FIPS metrics (populated when handshake_fips_enabled=true)
+        self.handshake_config_fips_compliant = Gauge(
+            'tls_handshake_config_fips_compliant',
+            'Whether the SSL context cipher/version configuration is FIPS-compliant '
+            '(1=compliant, 0=non-compliant)',
+            ['process', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
+             'node_name', 'symbol', 'cipher_list'],
+        )
+
+        self.handshake_config_events_total = Counter(
+            'tls_handshake_config_events_total',
+            'Total number of SSL handshake configuration events processed',
+            ['symbol', 'fips_compliant'],
+        )
+
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
         labels = {
@@ -335,6 +403,25 @@ class PrometheusMetrics:
             ).set(1 if info.fips_compliant else 0)
 
 
+
+
+    def update_handshake_metrics(self, info: 'HandshakeConfigInfo') -> None:
+        """Update Prometheus metrics for a handshake configuration event."""
+        self.handshake_config_fips_compliant.labels(
+            process=info.process,
+            pod_name=info.pod_name,
+            namespace=info.namespace,
+            workload_kind=info.workload_kind,
+            workload_name=info.workload_name,
+            node_name=info.node_name,
+            symbol=info.symbol,
+            cipher_list=info.cipher_list[:200],
+        ).set(1 if info.fips_compliant else 0)
+
+        self.handshake_config_events_total.labels(
+            symbol=info.symbol,
+            fips_compliant=str(info.fips_compliant),
+        ).inc()
 
 
 _kafka_delivery_errors = Counter(
@@ -559,6 +646,78 @@ class KafkaPublisher:
                 self._producer.close()
             except Exception as e:
                 logger.warning(f"Error closing Kafka producer: {e}")
+
+
+class HandshakeKafkaPublisher(KafkaPublisher):
+    """
+    Publishes SSL/TLS handshake configuration FIPS events to a dedicated Kafka topic.
+
+    Extends KafkaPublisher, inheriting all connection management, reconnect
+    logic, and error handling.  Overrides publish() with the handshake-specific
+    message schema so cert and handshake events land on separate topics and can
+    be consumed independently.
+
+    Message schema (all fields present, empty string when not applicable):
+    {
+        "event_type":       "handshake_config_detected",
+        "detected_at":      "2026-03-31T10:00:00.000000",
+        "process":          "/usr/sbin/nginx",
+        "pid":              12345,
+        "symbol":           "SSL_CTX_set_cipher_list",
+        "cipher_list":      "HIGH:!aNULL:!MD5",
+        "tls_min_version":  "0x0303",
+        "tls_version_str":  "TLS1.2",
+        "options_mask":     "0x0",
+        "fips_compliant":   false,
+        "fips_violations":  ["Non-FIPS cipher keyword 'MD5' present in cipher list"],
+        "namespace":        "default",
+        "pod_name":         "nginx-abc",
+        "workload_kind":    "Deployment",
+        "workload_name":    "nginx",
+        "node_name":        "node-1",
+        "app_label":        "nginx",
+        "container_name":   "nginx",
+        "container_image":  "nginx:1.25"
+    }
+    """
+
+    def publish(self, info: 'HandshakeConfigInfo') -> None:  # type: ignore[override]
+        if not KAFKA_AVAILABLE:
+            return
+        if self._producer is None:
+            if not self._connect():
+                return
+
+        message = {
+            'event_type':      'handshake_config_detected',
+            'detected_at':     datetime.utcnow().isoformat(),
+            'process':         info.process,
+            'pid':             info.pid,
+            'symbol':          info.symbol,
+            'cipher_list':     info.cipher_list,
+            'tls_min_version': f"0x{info.tls_min_version:04x}" if info.tls_min_version else "",
+            'tls_version_str': info.tls_version_str,
+            'options_mask':    f"0x{info.options_mask:x}" if info.options_mask else "",
+            'fips_compliant':  info.fips_compliant,
+            'fips_violations': info.fips_violations,
+            'namespace':       info.namespace,
+            'pod_name':        info.pod_name,
+            'workload_kind':   info.workload_kind,
+            'workload_name':   info.workload_name,
+            'node_name':       info.node_name,
+            'app_label':       info.app_label,
+            'container_name':  info.container_name,
+            'container_image': info.container_image,
+        }
+
+        key = info.unique_key
+        try:
+            self._producer.send(
+                self._topic, key=key, value=message,
+            ).add_errback(self._on_error)
+        except Exception as e:
+            logger.warning(f"Kafka handshake publish failed for {info.process}: {e}")
+            self._producer = None
 
 
 CACHE_MIN_SIZE: int = 10_000
@@ -828,7 +987,9 @@ class CertificateAnalyzer:
                  kafka_publisher: Optional['KafkaPublisher'] = None,
                  checksum_enabled: bool = False,
                  demo_mode: bool = False,
-                 fips_compliance_enabled: bool = True):
+                 fips_compliance_enabled: bool = True,
+                 handshake_fips_enabled: bool = False,
+                 handshake_kafka_publisher: Optional['HandshakeKafkaPublisher'] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -837,6 +998,8 @@ class CertificateAnalyzer:
         self.checksum_enabled = checksum_enabled
         self.demo_mode = demo_mode
         self.fips_compliance_enabled = fips_compliance_enabled
+        self.handshake_fips_enabled = handshake_fips_enabled
+        self.handshake_kafka_publisher = handshake_kafka_publisher
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -845,6 +1008,7 @@ class CertificateAnalyzer:
         # LRU eviction gives previously-failed paths a second chance after enough
         # other activity, which is desirable if JKS_PASSWORD has since been set.
         self.password_failed_paths: LRUCache = LRUCache()
+        self.known_handshakes: LRUCache = LRUCache()
         self.health_server = health_server
 
 
@@ -853,6 +1017,7 @@ class CertificateAnalyzer:
         self.metrics.cache_known_certs_size.set(len(self.known_certs))
         self.metrics.cache_processed_paths_size.set(len(self.processed_paths))
         self.metrics.cache_password_failed_size.set(len(self.password_failed_paths))
+        self.metrics.cache_known_handshakes_size.set(len(self.known_handshakes))
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -1672,6 +1837,222 @@ class CertificateAnalyzer:
                         return True
         return False
 
+    def _apply_pod_context_to_handshake(self, info: HandshakeConfigInfo, tetragon_pod) -> None:
+        """Populate pod context fields on a HandshakeConfigInfo from the Tetragon pod proto."""
+        if tetragon_pod is None:
+            return
+        info.pod_name      = tetragon_pod.name
+        info.namespace     = tetragon_pod.namespace
+        info.workload_kind = tetragon_pod.workload_kind
+        info.workload_name = tetragon_pod.workload
+        labels = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
+        info.pod_labels = labels
+        if tetragon_pod.uid:
+            info.pod_uid = tetragon_pod.uid
+        for key in ["app.kubernetes.io/name", "app", "name"]:
+            if key in labels:
+                info.app_label = labels[key]
+                break
+        c = tetragon_pod.container
+        info.container_name  = c.name
+        info.container_image = c.image.name
+
+    def _log_handshake_status(self, info: HandshakeConfigInfo) -> None:
+        """Log handshake configuration FIPS status at appropriate severity."""
+        k8s_ctx = ""
+        if info.pod_name:
+            k8s_ctx = f" | pod={info.pod_name} namespace={info.namespace}"
+            if info.node_name:
+                k8s_ctx += f" node={info.node_name}"
+            if info.workload_kind and info.workload_name:
+                k8s_ctx += f" workload={info.workload_kind}/{info.workload_name}"
+
+        detail = ""
+        if info.cipher_list:
+            detail = f" cipher_list='{info.cipher_list}'"
+        elif info.tls_min_version:
+            detail = f" min_version={info.tls_version_str}"
+        elif info.options_mask:
+            detail = f" options=0x{info.options_mask:x}"
+
+        if info.fips_compliant:
+            logger.info(
+                f"✅ FIPS handshake config OK: {info.symbol} from {info.process} "
+                f"(PID: {info.pid}){detail}{k8s_ctx}"
+            )
+        else:
+            logger.warning(
+                f"⚠️  FIPS handshake config VIOLATION: {info.symbol} from "
+                f"{info.process} (PID: {info.pid}){detail} — "
+                + " | ".join(info.fips_violations)
+                + k8s_ctx
+            )
+
+    def _handle_ssl_ctx_cipher_config(self, event) -> None:
+        """Handle SSL_CTX_set_cipher_list or SSL_CTX_set_ciphersuites uprobe.
+
+        Extracts the cipher string from arg[1] and checks it for FIPS compliance.
+        Deduplicates by (process, symbol, cipher_list) so the same binary
+        configuring the same cipher list only emits one event.
+        """
+        if not event.HasField('process_uprobe'):
+            return
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+
+        if self.filter_self_events and pid == os.getpid():
+            return
+
+        cipher_str = ""
+        for arg in uprobe.args:
+            if arg.HasField('string_arg'):
+                cipher_str = arg.string_arg
+                break
+
+        if not cipher_str:
+            logger.debug(f"{uprobe.symbol}: no cipher string in event from {process_name}")
+            return
+
+        fips_result = _fips_check_cipher_list(cipher_str)
+
+        info = HandshakeConfigInfo(
+            process=process_name,
+            pid=pid,
+            symbol=uprobe.symbol,
+            cipher_list=cipher_str,
+            fips_compliant=fips_result.compliant,
+            fips_violations=fips_result.violations,
+            namespace=namespace,
+        )
+        self._apply_pod_context_to_handshake(info, tetragon_pod)
+        info.node_name = event.node_name
+
+        if info.unique_key in self.known_handshakes:
+            logger.debug(f"Re-detected known handshake config: {info.unique_key}")
+            return
+
+        self.known_handshakes[info.unique_key] = info
+        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.update_handshake_metrics(info)
+        self._log_handshake_status(info)
+        self._update_cache_metrics()
+
+        if self.handshake_kafka_publisher is not None:
+            self.handshake_kafka_publisher.publish(info)
+
+    def _handle_ssl_ctx_version_config(self, event) -> None:
+        """Handle SSL_CTX_set_min_proto_version uprobe.
+
+        Extracts the version integer from arg[1] and checks it against the
+        FIPS-required minimum of TLS 1.2 (0x0303).
+        """
+        if not event.HasField('process_uprobe'):
+            return
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+
+        if self.filter_self_events and pid == os.getpid():
+            return
+
+        version = 0
+        for arg in uprobe.args:
+            if arg.HasField('int_arg'):
+                version = arg.int_arg
+                break
+
+        fips_result = _fips_check_tls_version(version)
+
+        info = HandshakeConfigInfo(
+            process=process_name,
+            pid=pid,
+            symbol=uprobe.symbol,
+            tls_min_version=version,
+            fips_compliant=fips_result.compliant,
+            fips_violations=fips_result.violations,
+            namespace=namespace,
+        )
+        self._apply_pod_context_to_handshake(info, tetragon_pod)
+        info.node_name = event.node_name
+
+        if info.unique_key in self.known_handshakes:
+            logger.debug(f"Re-detected known handshake version config: {info.unique_key}")
+            return
+
+        self.known_handshakes[info.unique_key] = info
+        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.update_handshake_metrics(info)
+        self._log_handshake_status(info)
+        self._update_cache_metrics()
+
+        if self.handshake_kafka_publisher is not None:
+            self.handshake_kafka_publisher.publish(info)
+
+    def _handle_ssl_ctx_options(self, event) -> None:
+        """Handle SSL_CTX_set_options uprobe.
+
+        Extracts the options bitmask from arg[1] and flags when both TLS 1.2
+        and TLS 1.3 are disabled in a single call.
+        """
+        if not event.HasField('process_uprobe'):
+            return
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+
+        if self.filter_self_events and pid == os.getpid():
+            return
+
+        options_mask = 0
+        for arg in uprobe.args:
+            if arg.HasField('size_arg'):
+                options_mask = arg.size_arg
+                break
+
+        fips_result = _fips_check_ssl_options(options_mask)
+
+        if fips_result.compliant:
+            logger.debug(
+                f"SSL_CTX_set_options from {process_name} (PID: {pid}): "
+                f"mask=0x{options_mask:x} — no FIPS violation"
+            )
+            return
+
+        info = HandshakeConfigInfo(
+            process=process_name,
+            pid=pid,
+            symbol=uprobe.symbol,
+            options_mask=options_mask,
+            fips_compliant=False,
+            fips_violations=fips_result.violations,
+            namespace=namespace,
+        )
+        self._apply_pod_context_to_handshake(info, tetragon_pod)
+        info.node_name = event.node_name
+
+        if info.unique_key in self.known_handshakes:
+            logger.debug(f"Re-detected known handshake options config: {info.unique_key}")
+            return
+
+        self.known_handshakes[info.unique_key] = info
+        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.update_handshake_metrics(info)
+        self._log_handshake_status(info)
+        self._update_cache_metrics()
+
+        if self.handshake_kafka_publisher is not None:
+            self.handshake_kafka_publisher.publish(info)
+
     def _handle_uprobe_in_memory_cert(self, event) -> bool:
         """
         Handle a process_uprobe event where the cert arrives as raw DER bytes
@@ -1747,9 +2128,20 @@ class CertificateAnalyzer:
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
 
         if not cert_path:
-            # Route PKCS11/NSS events (Java FIPS) to dedicated handlers first.
             if event.HasField('process_uprobe'):
                 symbol = event.process_uprobe.symbol
+                # Handshake config hooks — only active when enabled.
+                if self.handshake_fips_enabled:
+                    if symbol in ("SSL_CTX_set_cipher_list", "SSL_CTX_set_ciphersuites"):
+                        self._handle_ssl_ctx_cipher_config(event)
+                        return
+                    if symbol == "SSL_CTX_set_min_proto_version":
+                        self._handle_ssl_ctx_version_config(event)
+                        return
+                    if symbol == "SSL_CTX_set_options":
+                        self._handle_ssl_ctx_options(event)
+                        return
+                # Java FIPS NSS cert hooks.
                 if symbol == "NSC_CreateObject":
                     self._handle_nsc_create_object(event)
                     return
@@ -2111,6 +2503,10 @@ def main():
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
+    # ── Handshake FIPS checking (optional) ────────────────────────────────────
+    handshake_fips_enabled = cfg(cp, 'handshake', 'enabled',     'HANDSHAKE_FIPS_ENABLED', 'false').lower() == 'true'
+    handshake_kafka_topic  = cfg(cp, 'handshake', 'kafka_topic', 'HANDSHAKE_KAFKA_TOPIC',  'tls-handshake-config')
+
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
     kafka_bootstrap        = cfg(cp, 'kafka', 'bootstrap_servers', 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
@@ -2132,6 +2528,7 @@ def main():
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
     logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
     logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
+    logger.info(f"Handshake FIPS:    {'enabled' if handshake_fips_enabled else 'disabled'}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -2144,6 +2541,8 @@ def main():
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
         logger.info(f"Kafka topic:       {kafka_topic}")
         logger.info(f"Kafka security:    {kafka_security}")
+        if handshake_fips_enabled:
+            logger.info(f"Handshake topic:   {handshake_kafka_topic}")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -2156,13 +2555,24 @@ def main():
         )
         sys.exit(1)
 
-    # Initialise optional Kafka publisher before the analyzer so it can be
-    # passed in at construction time
+    # Initialise optional Kafka publishers before the analyzer so they can be
+    # passed in at construction time.
     kafka_publisher = None
     if kafka_enabled:
         kafka_publisher = KafkaPublisher(
             bootstrap_servers=kafka_bootstrap,
             topic=kafka_topic,
+            security_protocol=kafka_security,
+            sasl_mechanism=kafka_sasl_mechanism,
+            sasl_username=kafka_sasl_username,
+            sasl_password=kafka_sasl_password,
+        )
+
+    handshake_kafka_publisher = None
+    if kafka_enabled and handshake_fips_enabled:
+        handshake_kafka_publisher = HandshakeKafkaPublisher(
+            bootstrap_servers=kafka_bootstrap,
+            topic=handshake_kafka_topic,
             security_protocol=kafka_security,
             sasl_mechanism=kafka_sasl_mechanism,
             sasl_username=kafka_sasl_username,
@@ -2180,7 +2590,9 @@ def main():
                                    kafka_publisher=kafka_publisher,
                                    checksum_enabled=checksum_enabled,
                                    demo_mode=demo_mode,
-                                   fips_compliance_enabled=fips_compliance_enabled)
+                                   fips_compliance_enabled=fips_compliance_enabled,
+                                   handshake_fips_enabled=handshake_fips_enabled,
+                                   handshake_kafka_publisher=handshake_kafka_publisher)
 
     health = HealthServer(
         analyzer=analyzer,
@@ -2211,12 +2623,16 @@ def main():
         logger.info("Received interrupt, shutting down...")
         if kafka_publisher is not None:
             kafka_publisher.close()
+        if handshake_kafka_publisher is not None:
+            handshake_kafka_publisher.close()
         health.stop()
         sys.exit(0)
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         if kafka_publisher is not None:
             kafka_publisher.close()
+        if handshake_kafka_publisher is not None:
+            handshake_kafka_publisher.close()
         health.stop()
         sys.exit(1)
 

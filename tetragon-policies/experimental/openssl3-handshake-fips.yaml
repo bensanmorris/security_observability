@@ -1,0 +1,69 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openssl3-handshake-fips
+  # Load this policy when [handshake] enabled = true in cert-analyzer.conf.
+  # Without this policy the cert-analyzer handshake handlers will never fire
+  # regardless of the config setting.
+spec:
+  uprobes:
+  # ── Cipher list configuration ─────────────────────────────────────────────
+  #
+  # SSL_CTX_set_cipher_list(SSL_CTX *ctx, const char *str)
+  # Configures the list of TLS 1.2-and-below cipher suites on an SSL context.
+  # arg[0]: SSL_CTX* (opaque pointer — captured as uint64 for context tracking)
+  # arg[1]: cipher list string, e.g. "HIGH:!aNULL:!MD5" or "ECDHE-RSA-AES256-GCM-SHA384"
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_set_cipher_list"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "string"
+
+  # SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str)
+  # Configures the TLS 1.3 cipher suite list on an SSL context.
+  # arg[1]: colon-separated TLS 1.3 suite names, e.g.
+  #   "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256"
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_set_ciphersuites"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "string"
+
+  # ── Minimum protocol version ──────────────────────────────────────────────
+  #
+  # SSL_CTX_set_min_proto_version(SSL_CTX *ctx, int version)
+  # Sets the minimum TLS protocol version for all connections on the context.
+  # NIST SP 800-52 Rev. 2 requires TLS 1.2 (0x0303) or higher.
+  # arg[1]: version integer — TLS1_2_VERSION=0x0303, TLS1_3_VERSION=0x0304,
+  #   TLS1_1_VERSION=0x0302 (non-FIPS), TLS1_VERSION=0x0301 (non-FIPS)
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_set_min_proto_version"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "int32"
+
+  # ── SSL options bitmask ───────────────────────────────────────────────────
+  #
+  # SSL_CTX_set_options(SSL_CTX *ctx, long options)
+  # Applies a bitmask of SSL_OP_* flags to the context. Relevant FIPS flags:
+  #   SSL_OP_NO_TLSv1_2 = 0x08000000 — disables TLS 1.2
+  #   SSL_OP_NO_TLSv1_3 = 0x20000000 — disables TLS 1.3
+  # A violation is raised when both are set in a single call, leaving no
+  # FIPS-approved TLS version available.
+  - path: "/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_set_options"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "uint64"
