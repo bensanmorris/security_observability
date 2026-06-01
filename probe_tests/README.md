@@ -119,6 +119,23 @@ cd java/cert-agent && ./build.sh
 same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
 needed for local testing.
 
+**Start the test target JVM:**
+
+`CertAgentTest` is a long-running Java program that repeatedly calls
+`KeyStore.setCertificateEntry()` on a delay, giving you a live JVM to attach the
+agent to and a steady stream of uprobe events to observe.
+
+```bash
+cd java
+# build if not already done
+./build.sh
+
+# start the target — prints its PID and loops every 5 seconds
+java -cp . CertAgentTest                    # uses test-certs/valid.crt, 5s interval
+java -cp . CertAgentTest /path/to/cert.pem  # custom cert
+java -cp . CertAgentTest valid.crt 2000     # custom cert, 2s interval
+```
+
 **Attach dynamically to a running JVM:**
 ```bash
 # A prebuilt jattach binary for Linux x86-64 is included at:
