@@ -126,14 +126,13 @@ needed for local testing.
 agent to and a steady stream of uprobe events to observe.
 
 ```bash
-cd java
 # build if not already done
-./build.sh
+cd probe_tests/java && ./build.sh && cd -
 
 # start the target — prints its PID and loops every 5 seconds
-java -cp . CertAgentTest                    # uses test-certs/valid.crt, 5s interval
-java -cp . CertAgentTest /path/to/cert.pem  # custom cert
-java -cp . CertAgentTest valid.crt 2000     # custom cert, 2s interval
+java -cp probe_tests/java CertAgentTest                    # uses test-certs/valid.crt, 5s interval
+java -cp probe_tests/java CertAgentTest /path/to/cert.pem  # custom cert
+java -cp probe_tests/java CertAgentTest valid.crt 2000     # custom cert, 2s interval
 ```
 
 **Attach dynamically to a running JVM:**

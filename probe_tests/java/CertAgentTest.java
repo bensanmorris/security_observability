@@ -32,7 +32,7 @@ import java.security.cert.*;
 public class CertAgentTest {
 
     public static void main(String[] args) throws Exception {
-        String certPath   = "../../test-certs/valid.crt";
+        String certPath   = "test-certs/valid.crt";
         long   intervalMs = 5_000;
 
         for (String a : args) {
