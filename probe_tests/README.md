@@ -119,34 +119,62 @@ cd java/cert-agent && ./build.sh
 same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
 needed for local testing.
 
-**Start the test target JVM:**
+**End-to-end test procedure:**
 
-`CertAgentTest` is a long-running Java program that repeatedly calls
-`KeyStore.setCertificateEntry()` on a delay, giving you a live JVM to attach the
-agent to and a steady stream of uprobe events to observe.
+The order of operations matters: Tetragon's uprobe attaches to processes that
+already have `libcert_agent_stub.so` mapped at policy-load time.  Load the
+policy **after** the agent has been injected into the JVM.
 
+**Step 1 — Load the Tetragon policy** (do this first so it is ready):
 ```bash
-# build if not already done
-cd probe_tests/java && ./build.sh && cd -
-
-# start the target — prints its PID and loops every 5 seconds
-java -cp probe_tests/java CertAgentTest                    # uses test-certs/valid.crt, 5s interval
-java -cp probe_tests/java CertAgentTest /path/to/cert.pem  # custom cert
-java -cp probe_tests/java CertAgentTest valid.crt 2000     # custom cert, 2s interval
+sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
 ```
 
-**Attach dynamically to a running JVM:**
+**Step 2 — Start the target JVM** (from the repo root):
 ```bash
-# A prebuilt jattach binary for Linux x86-64 is included at:
-#   java/cert-agent/jattach-linux-x64/jattach
-./java/cert-agent/jattach-linux-x64/jattach <pid> load instrument false \
+# prints PID and loops every 5 seconds
+java -cp probe_tests/java CertAgentTest
+```
+
+**Step 3 — Inject the agent** using the PID printed in step 2:
+```bash
+probe_tests/java/cert-agent/jattach-linux-x64/jattach <pid> load instrument false \
     /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
 ```
 
-**Or inject statically** (requires JVM restart):
+The JVM terminal should print:
+```
+[cert-agent] Initialized — intercepting KeyStore.setCertificateEntry
+```
+
+**Step 4 — Reload the policy** now that the `.so` is in the JVM's address space:
 ```bash
+sudo tetra tracingpolicy delete java-non-fips-cert
+sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+```
+
+**Step 5 — Watch cert_analyzer** for events (within one 5-second loop interval):
+```bash
+sudo journalctl -u cert-analyzer -f
+# Expected:
+# 🔍 Detected in-memory certificate: uprobe://java_cert_agent_write/<pid>/... by /usr/bin/java
+```
+
+> **Why the policy reload in step 4?**  Tetragon enumerates processes that have
+> the target library mapped when a policy is loaded, and attaches its uprobe to
+> those processes.  If no process has `libcert_agent_stub.so` mapped at load
+> time (because jattach hadn't run yet), the uprobe is not attached.  Reloading
+> after jattach ensures Tetragon finds the JVM and attaches correctly.
+
+**Or inject statically** (skips the policy reload — the `.so` is in the JVM's
+maps from the start, so a single policy load suffices):
+```bash
+# Terminal 1: load policy once
+sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+
+# Terminal 2: start JVM with agent pre-loaded
 java -javaagent:/opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so \
-     -jar yourapp.jar
+     -cp probe_tests/java CertAgentTest
 ```
 
 **Automate deployment** across all running JVMs with the deployer:
@@ -156,6 +184,15 @@ python3 java_agent_deployer.py \
     --native-lib /opt/cert-agent/libcert_agent_stub.so
 # Scans /proc every 30s, tries jattach for each new JVM,
 # and prints -javaagent instructions for any that reject dynamic attach.
+```
+
+**Verify with bpftrace** (independent of Tetragon — confirms the native stub is
+being called before involving cert_analyzer):
+```bash
+sudo bpftrace -e 'uprobe:/opt/cert-agent/libcert_agent_stub.so:java_cert_agent_write {
+    printf("hit pid=%d len=%d\n", pid, arg1);
+}'
+# Should print a line every 5 seconds while CertAgentTest is running with the agent attached.
 ```
 
 | Hook | What fires it | How cert bytes reach cert_analyzer |

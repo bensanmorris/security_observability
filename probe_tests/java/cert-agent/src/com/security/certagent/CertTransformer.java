@@ -48,7 +48,13 @@ public class CertTransformer implements ClassFileTransformer {
 
         try {
             ClassReader cr = new ClassReader(classfileBuffer);
-            ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES);
+            // COMPUTE_MAXS (not COMPUTE_FRAMES) avoids calling getCommonSuperClass,
+            // which fails via Class.forName under the Java 11 module system when the
+            // bootstrap ClassWriter cannot resolve types across named/unnamed module
+            // boundaries during dynamic retransformation.  Existing stack-map frames
+            // are preserved from the ClassReader; only max-stack/max-locals are
+            // recomputed, which is sufficient for inserting a call at method entry.
+            ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
             cr.accept(new KeyStoreVisitor(cw), ClassReader.EXPAND_FRAMES);
             return cw.toByteArray();
         } catch (Exception e) {

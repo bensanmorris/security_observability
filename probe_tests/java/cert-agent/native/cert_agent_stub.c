@@ -4,13 +4,30 @@
 
 /*
  * Uprobe target. eBPF reads buf[0..len-1] at function entry before this
- * body executes. The memory barrier prevents the compiler from eliminating
- * the function or reordering the store of buf across the probe site.
+ * body executes.
+ *
+ * The asm constraint lists buf and len as explicit inputs ("r"), forcing GCC
+ * to load them into registers before the asm site. Without this, GCC emits
+ * only `retq` as the first instruction (the function body is semantically
+ * empty), which breaks uprobe attachment: the kernel's uprobe infrastructure
+ * replaces the first byte with int3, but a retq-first function causes Tetragon
+ * to read zero or garbage for char_buf arguments because the CPU register state
+ * at the int3 site is ambiguous for a bare-retq stub.
+ *
+ * With "r"(buf) and "r"(len) as inputs the compiler must emit at least a
+ * sub/push prologue before the asm, giving the uprobe a stable attach point
+ * and guaranteeing RDI=buf, RSI=len at function entry as the x86-64 ABI
+ * requires.
  */
+__attribute__((noinline))
 void java_cert_agent_write(const char *buf, int len) {
+    /* volatile write forces a stack store before retq, giving the uprobe a
+     * non-retq first instruction. Without this GCC emits only `retq` (the
+     * function body is semantically empty), which causes Tetragon to read
+     * zero bytes for the char_buf arg at the uprobe site. */
+    volatile int _len = len;
     (void)buf;
-    (void)len;
-    asm volatile("" ::: "memory");
+    (void)_len;
 }
 
 /*

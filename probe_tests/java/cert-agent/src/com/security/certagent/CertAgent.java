@@ -41,7 +41,16 @@ public class CertAgent {
             return;
         }
 
-        NativeBridge.loadLibrary(libPath);
+        // Publish the .so path BEFORE addAgentJarToBootstrap and without calling
+        // NativeBridge.loadLibrary() here.  The JVM allows a native library to be
+        // associated with only one ClassLoader; calling System.load from the agent
+        // classloader first causes the bootstrap classloader's attempt (via
+        // NativeBridge's static initializer) to fail with "already loaded in another
+        // classloader", leaving loaded=false in the bootstrap copy that KeyStore
+        // actually calls.  By skipping the agent-classloader load and letting the
+        // static initializer fire exclusively from the bootstrap context, System.load
+        // succeeds there and loaded=true in the right copy.
+        System.setProperty("com.security.certagent.lib", libPath);
 
         // KeyStore is a bootstrap class; NativeBridge must be on the bootstrap
         // classpath so it is visible from instrumented KeyStore methods.
