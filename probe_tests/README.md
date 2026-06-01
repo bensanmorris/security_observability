@@ -119,10 +119,11 @@ cd java/cert-agent && ./build.sh
 same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
 needed for local testing.
 
-**Attach dynamically to a running JVM** (requires `jattach`):
+**Attach dynamically to a running JVM:**
 ```bash
-# install: https://github.com/jattach/jattach
-jattach <pid> load instrument false \
+# A prebuilt jattach binary for Linux x86-64 is included at:
+#   java/cert-agent/jattach-linux-x64/jattach
+./java/cert-agent/jattach-linux-x64/jattach <pid> load instrument false \
     /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
 ```
 
