@@ -82,7 +82,7 @@ PREBUILT_JAR="$JAVA_AGENT_SRC/cert-agent.jar"
 NATIVE_C_SRC="$JAVA_AGENT_SRC/native/cert_agent_stub.c"
 NATIVE_MAKEFILE="$JAVA_AGENT_SRC/native/Makefile"
 JATTACH_BIN="$JAVA_AGENT_SRC/jattach-linux-x64/jattach"
-DEPLOYER_SCRIPT="$REPO_ROOT/java_agent_deployer.py"
+DEPLOYER_SCRIPT="$SCRIPT_DIR/java_agent_deployer.py"
 DEPLOYER_SERVICE="$SCRIPT_DIR/cert-agent-deployer.service"
 LICENSE="$REPO_ROOT/LICENSE"
 

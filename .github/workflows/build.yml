@@ -54,7 +54,7 @@ jobs:
             - '.github/workflows/build.yml'
           java-agent:
             - 'java-agent/**'
-            - 'java_agent_deployer.py'
+            - 'java-agent/java_agent_deployer.py'
             - 'probe_tests/java/cert-agent/**'
             - '.github/workflows/build.yml'
 

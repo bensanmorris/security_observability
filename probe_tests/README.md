@@ -179,7 +179,7 @@ java -javaagent:/opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stu
 
 **Automate deployment** across all running JVMs with the deployer:
 ```bash
-python3 java_agent_deployer.py \
+python3 java-agent/java_agent_deployer.py \
     --agent-jar /opt/cert-agent/cert-agent.jar \
     --native-lib /opt/cert-agent/libcert_agent_stub.so
 # Scans /proc every 30s, tries jattach for each new JVM,
