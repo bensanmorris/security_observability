@@ -61,6 +61,24 @@ sudo cp tetragon-policies/certificate-file-access.yaml /etc/tetragon/tetragon.tp
 sudo systemctl restart tetragon
 ```
 
+**Java agent (non-FIPS JVMs):**
+
+For JVMs running without FIPS mode, install the two Java agent RPMs from the [latest release](../../releases/latest) and enable the deployer service:
+
+```bash
+sudo dnf install ./cert-agent-jni-<version>.el9.x86_64.rpm
+sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
+sudo systemctl enable --now cert-agent-deployer
+```
+
+The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. Once the `.so` is mapped into a JVM process, load the policy:
+
+```bash
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+```
+
+> **Note:** the policy must be loaded _after_ the deployer has attached to at least one JVM. Tetragon enumerates processes with `libcert_agent_stub.so` mapped at policy-load time — if no JVM has it mapped yet, the uprobe will not attach to JVMs that load it later.
+
 ---
 
 ## Post-install
