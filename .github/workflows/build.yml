@@ -553,7 +553,7 @@ jobs:
     steps:
     - name: Install build prerequisites
       run: |
-        dnf install -y \
+        dnf install -y --allowerasing \
           java-11-openjdk-devel \
           gcc \
           make \
