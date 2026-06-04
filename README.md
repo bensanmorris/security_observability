@@ -79,6 +79,28 @@ sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-
 
 > **Note:** the policy must be loaded _after_ the deployer has attached to at least one JVM. Tetragon enumerates processes with `libcert_agent_stub.so` mapped at policy-load time — if no JVM has it mapped yet, the uprobe will not attach to JVMs that load it later.
 
+**Verifying with the probe-tests archive:**
+
+The `probe-tests-<version>.tar.gz` artifact (attached to each release) includes `CertAgentTest` — a small program that continuously loads certificates into a JCA `KeyStore`, giving the uprobe a repeating target to fire on.
+
+```bash
+tar -xzf probe-tests-<version>.tar.gz
+
+# Start the test program (loads a cert every 5 s, runs until killed)
+java -cp java CertAgentTest &
+
+# Wait for the deployer to attach — confirm with:
+sudo journalctl -u cert-agent-deployer -f
+
+# Once attached, load (or reload) the policy:
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+
+# Confirm detection in cert-analyzer:
+sudo journalctl -u cert-analyzer -f | grep java_cert_agent_write
+```
+
+See [probe_tests/README.md](probe_tests/README.md#cert-agent-java-non-fips) for the full test procedure and static-agent injection alternative.
+
 ---
 
 ## Post-install
