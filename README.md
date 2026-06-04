@@ -87,7 +87,8 @@ The `probe-tests-<version>.tar.gz` artifact (attached to each release) includes 
 tar -xzf probe-tests-<version>.tar.gz
 
 # Start the test program (loads a cert every 5 s, runs until killed)
-java -cp java CertAgentTest &
+# Pass any PEM/DER certificate — e.g. one from your existing PKI or /etc/ssl
+java -cp java CertAgentTest /path/to/cert.pem &
 
 # Wait for the deployer to attach — confirm with:
 sudo journalctl -u cert-agent-deployer -f
