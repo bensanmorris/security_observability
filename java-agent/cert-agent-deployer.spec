@@ -48,15 +48,15 @@ When dynamic attach is rejected (e.g. the JVM requires
 Requires cert-agent-jni to be installed for the JAR and native stub.
 
 
-%global selinux_pp %{deploy_dir}/cert-agent-deployer.pp
+%global selinux_pp %{deploy_dir}/cert_agent_deployer.pp
 
 %prep
 %setup -q
 
 
 %build
-checkmodule -M -m -o cert-agent-deployer.mod cert-agent-deployer.te
-semodule_package -o cert-agent-deployer.pp -m cert-agent-deployer.mod
+checkmodule -M -m -o cert_agent_deployer.mod cert-agent-deployer.te
+semodule_package -o cert_agent_deployer.pp -m cert_agent_deployer.mod
 
 
 %install
@@ -74,7 +74,7 @@ install -m 0755 jattach %{buildroot}%{deploy_dir}/jattach
 install -m 0644 cert-agent-deployer.service \
     %{buildroot}%{_unitdir}/cert-agent-deployer.service
 
-install -m 0644 cert-agent-deployer.pp \
+install -m 0644 cert_agent_deployer.pp \
     %{buildroot}%{selinux_pp}
 
 
