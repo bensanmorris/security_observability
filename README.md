@@ -71,7 +71,7 @@ sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
 sudo systemctl enable --now cert-agent-deployer
 ```
 
-The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. Once the `.so` is mapped into a JVM process, load the policy:
+The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). Once the `.so` is mapped into a JVM process, load the policy:
 
 ```bash
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
