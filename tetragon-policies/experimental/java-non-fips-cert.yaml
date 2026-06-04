@@ -1,0 +1,40 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: java-non-fips-cert
+spec:
+  uprobes:
+  # java_cert_agent_write(const char *buf, int len)
+  #
+  # Stub function in libcert_agent_stub.so that the Java agent calls after
+  # copying a certificate's DER encoding into a thread-local native buffer.
+  # The eBPF uprobe fires at function entry and reads buf[0..len-1] before
+  # the function body executes — the bytes are guaranteed stable because the
+  # Java agent uses a thread-local malloc'd buffer rather than a pinned Java
+  # heap array (which GC could move).
+  #
+  # How the chain works:
+  #   1. Java agent instruments KeyStore.setCertificateEntry via ASM
+  #   2. At method entry the agent calls cert.getEncoded() → DER byte[]
+  #   3. NativeBridge JNI copies DER into thread-local native buffer
+  #   4. NativeBridge calls java_cert_agent_write(buf, len)
+  #   5. This uprobe fires and captures the DER bytes as bytes_arg
+  #   6. cert_analyzer._handle_uprobe_in_memory_cert() parses and emits metrics
+  #
+  # cert_analyzer routes this event via the generic _handle_uprobe_in_memory_cert
+  # handler — the same path used for SSL_CTX_use_certificate_ASN1 — so no
+  # cert_analyzer changes are needed.
+  #
+  # sizeArgIndex uses 1-based counting: sizeArgIndex: 2 means arg at index 1 (len).
+  #
+  # build.sh installs libcert_agent_stub.so here for both local testing and
+  # production — no path edits needed when loading this policy.
+  - path: "/opt/cert-agent/libcert_agent_stub.so"
+    symbols:
+    - "java_cert_agent_write"
+    args:
+    - index: 0
+      type: "char_buf"
+      sizeArgIndex: 2
+    - index: 1
+      type: "int32"

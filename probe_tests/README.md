@@ -88,3 +88,119 @@ so `cert_analyzer` receives the template *pointer* and *count* as `uint64` args,
 then performs the two-hop dereference in Python via `/proc/<pid>/mem`.  This
 requires `CAP_SYS_PTRACE` (or root), which cert_analyzer holds in the
 security-monitoring context.
+
+---
+
+### cert-agent (Java, non-FIPS)
+
+Exercises the uprobe hook in `java-non-fips-cert.yaml`.  Provides certificate
+visibility for JVMs running **without** FIPS mode, where Java uses pure-Java
+JSSE crypto — no NSS native library calls occur at the cert-loading level, so
+the `java-fips-nss-cert.yaml` hooks have nothing to attach to.
+
+The solution mirrors the approach described in the
+[Coroot Java TLS instrumentation article](https://coroot.com/blog/java-tls-instrumentation-with-ebpf/):
+a Java agent instruments a JCA method, copies certificate DER bytes into a
+thread-local native buffer (avoiding GC-visible array pinning), then calls a
+tiny native stub function that serves as the uprobe target.  Tetragon reads the
+DER bytes atomically at stub entry as a `char_buf` — the same mechanism used
+for `SSL_CTX_use_certificate_ASN1` — so `cert_analyzer` needs no changes.
+
+**Build:**
+```bash
+sudo dnf install java-11-openjdk-devel gcc   # if not already installed
+cd java/cert-agent && ./build.sh
+# Installs both artifacts to /opt/cert-agent/:
+#   /opt/cert-agent/cert-agent.jar
+#   /opt/cert-agent/libcert_agent_stub.so
+```
+
+`build.sh` installs both artifacts to `/opt/cert-agent/` automatically — the
+same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
+needed for local testing.
+
+**End-to-end test procedure:**
+
+The order of operations matters: Tetragon's uprobe attaches to processes that
+already have `libcert_agent_stub.so` mapped at policy-load time.  Load the
+policy **after** the agent has been injected into the JVM.
+
+**Step 1 — Load the Tetragon policy** (do this first so it is ready):
+```bash
+sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+```
+
+**Step 2 — Start the target JVM** (from the repo root):
+```bash
+# prints PID and loops every 5 seconds
+java -cp probe_tests/java CertAgentTest
+```
+
+**Step 3 — Inject the agent** using the PID printed in step 2:
+```bash
+probe_tests/java/cert-agent/jattach-linux-x64/jattach <pid> load instrument false \
+    /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
+```
+
+The JVM terminal should print:
+```
+[cert-agent] Initialized — intercepting KeyStore.setCertificateEntry
+```
+
+**Step 4 — Reload the policy** now that the `.so` is in the JVM's address space:
+```bash
+sudo tetra tracingpolicy delete java-non-fips-cert
+sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+```
+
+**Step 5 — Watch cert_analyzer** for events (within one 5-second loop interval):
+```bash
+sudo journalctl -u cert-analyzer -f
+# Expected:
+# 🔍 Detected in-memory certificate: uprobe://java_cert_agent_write/<pid>/... by /usr/bin/java
+```
+
+> **Why the policy reload in step 4?**  Tetragon enumerates processes that have
+> the target library mapped when a policy is loaded, and attaches its uprobe to
+> those processes.  If no process has `libcert_agent_stub.so` mapped at load
+> time (because jattach hadn't run yet), the uprobe is not attached.  Reloading
+> after jattach ensures Tetragon finds the JVM and attaches correctly.
+
+**Or inject statically** (skips the policy reload — the `.so` is in the JVM's
+maps from the start, so a single policy load suffices):
+```bash
+# Terminal 1: load policy once
+sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
+
+# Terminal 2: start JVM with agent pre-loaded
+java -javaagent:/opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so \
+     -cp probe_tests/java CertAgentTest
+```
+
+**Automate deployment** across all running JVMs with the deployer:
+```bash
+python3 java-agent/java_agent_deployer.py \
+    --agent-jar /opt/cert-agent/cert-agent.jar \
+    --native-lib /opt/cert-agent/libcert_agent_stub.so
+# Scans /proc every 30s, tries jattach for each new JVM,
+# and prints -javaagent instructions for any that reject dynamic attach.
+```
+
+**Verify with bpftrace** (independent of Tetragon — confirms the native stub is
+being called before involving cert_analyzer):
+```bash
+sudo bpftrace -e 'uprobe:/opt/cert-agent/libcert_agent_stub.so:java_cert_agent_write {
+    printf("hit pid=%d len=%d\n", pid, arg1);
+}'
+# Should print a line every 5 seconds while CertAgentTest is running with the agent attached.
+```
+
+| Hook | What fires it | How cert bytes reach cert_analyzer |
+|---|---|---|
+| `KeyStore.setCertificateEntry` (instrumented by agent) | Any explicit cert store: `KeyStore.setCertificateEntry(alias, cert)` | Agent calls `cert.getEncoded()` → copies DER to thread-local native buffer → calls `java_cert_agent_write(buf, len)` → Tetragon `char_buf` → `_handle_uprobe_in_memory_cert` |
+
+**Why `char_buf` works here (unlike the FIPS case):**
+The DER bytes are a direct, stable pointer in native memory by the time the
+uprobe fires — no two-hop dereference is needed.  The thread-local buffer
+ensures the GC cannot move the data between the Java copy and the eBPF read.
+No `CAP_SYS_PTRACE` or `/proc/<pid>/mem` access is required.

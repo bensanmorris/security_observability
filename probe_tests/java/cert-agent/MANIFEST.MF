@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Premain-Class: com.security.certagent.CertAgent
+Agent-Class: com.security.certagent.CertAgent
+Can-Retransform-Classes: true
+Can-Redefine-Classes: true
