@@ -13,6 +13,11 @@ Type=simple
 User=root
 Group=root
 
+# Pin to unconfined_service_t so the bundled SELinux policy module covers all
+# required permissions (ptrace, signal, /proc reads, /tmp socket access).
+# The cert-agent-deployer.pp module installed by the RPM grants these.
+SELinuxContext=system_u:system_r:unconfined_service_t:s0
+
 ExecStart=/usr/bin/python3 /opt/cert-agent-deployer/java_agent_deployer.py \
     --agent-jar  /opt/cert-agent/cert-agent.jar \
     --native-lib /opt/cert-agent/libcert_agent_stub.so \

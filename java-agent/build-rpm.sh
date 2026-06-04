@@ -84,10 +84,11 @@ NATIVE_MAKEFILE="$JAVA_AGENT_SRC/native/Makefile"
 JATTACH_BIN="$JAVA_AGENT_SRC/jattach-linux-x64/jattach"
 DEPLOYER_SCRIPT="$SCRIPT_DIR/java_agent_deployer.py"
 DEPLOYER_SERVICE="$SCRIPT_DIR/cert-agent-deployer.service"
+DEPLOYER_TE="$SCRIPT_DIR/cert-agent-deployer.te"
 LICENSE="$REPO_ROOT/LICENSE"
 
 for f in "$NATIVE_C_SRC" "$NATIVE_MAKEFILE" "$JATTACH_BIN" \
-          "$DEPLOYER_SCRIPT" "$DEPLOYER_SERVICE" "$LICENSE"; do
+          "$DEPLOYER_SCRIPT" "$DEPLOYER_SERVICE" "$DEPLOYER_TE" "$LICENSE"; do
     if [[ ! -f "$f" ]]; then
         echo "ERROR: Required source file not found: $f" >&2
         exit 1
@@ -162,6 +163,7 @@ if [[ "$BUILD_DEPLOYER" -eq 1 ]]; then
     cp "$DEPLOYER_SCRIPT"  "$DEP_STAGING/java_agent_deployer.py"
     cp "$JATTACH_BIN"      "$DEP_STAGING/jattach"
     cp "$DEPLOYER_SERVICE" "$DEP_STAGING/cert-agent-deployer.service"
+    cp "$DEPLOYER_TE"      "$DEP_STAGING/cert-agent-deployer.te"
     cp "$LICENSE"          "$DEP_STAGING/LICENSE"
 
     tar -czf "$DEP_TARBALL" -C "$TMPDIR_SRC" "$DEP_TARNAME"

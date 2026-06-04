@@ -25,6 +25,8 @@ URL:      https://github.com/your-org/cert-analyzer
 Source0:  %{name}-%{version}.tar.gz
 
 BuildRequires: systemd-rpm-macros
+BuildRequires: checkpolicy
+BuildRequires: policycoreutils
 
 # python3 is used to run the deployer script; stdlib only, no venv needed.
 Requires: python3
@@ -46,8 +48,15 @@ When dynamic attach is rejected (e.g. the JVM requires
 Requires cert-agent-jni to be installed for the JAR and native stub.
 
 
+%global selinux_pp %{deploy_dir}/cert_agent_deployer.pp
+
 %prep
 %setup -q
+
+
+%build
+checkmodule -M -m -o cert_agent_deployer.mod cert-agent-deployer.te
+semodule_package -o cert_agent_deployer.pp -m cert_agent_deployer.mod
 
 
 %install
@@ -65,13 +74,20 @@ install -m 0755 jattach %{buildroot}%{deploy_dir}/jattach
 install -m 0644 cert-agent-deployer.service \
     %{buildroot}%{_unitdir}/cert-agent-deployer.service
 
+install -m 0644 cert_agent_deployer.pp \
+    %{buildroot}%{selinux_pp}
+
 
 %post
 %systemd_post cert-agent-deployer.service
+semodule -i %{selinux_pp} 2>/dev/null || true
 
 
 %preun
 %systemd_preun cert-agent-deployer.service
+if [ $1 -eq 0 ]; then
+    semodule -r cert_agent_deployer 2>/dev/null || true
+fi
 
 
 %postun
@@ -84,6 +100,7 @@ install -m 0644 cert-agent-deployer.service \
 %dir %{deploy_dir}
 %attr(0755, root, root) %{deploy_dir}/java_agent_deployer.py
 %attr(0755, root, root) %{deploy_dir}/jattach
+%attr(0644, root, root) %{selinux_pp}
 
 %{_unitdir}/cert-agent-deployer.service
 

@@ -32,7 +32,7 @@ import java.security.cert.*;
 public class CertAgentTest {
 
     public static void main(String[] args) throws Exception {
-        String certPath   = "test-certs/valid.crt";
+        String certPath   = null;
         long   intervalMs = 5_000;
 
         for (String a : args) {
@@ -40,6 +40,18 @@ public class CertAgentTest {
                 intervalMs = Long.parseLong(a);
             } else if (!a.startsWith("--")) {
                 certPath = a;
+            }
+        }
+
+        if (certPath == null) {
+            String defaultPath = "test-certs/valid.crt";
+            if (new File(defaultPath).exists()) {
+                certPath = defaultPath;
+            } else {
+                System.err.println("No certificate found at default path '" + defaultPath + "'.");
+                System.err.println("Usage: java -cp java CertAgentTest <cert.pem> [interval_ms]");
+                System.err.println("  cert.pem  — path to a PEM or DER certificate to load on each loop iteration");
+                System.exit(1);
             }
         }
 

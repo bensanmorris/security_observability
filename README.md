@@ -71,7 +71,7 @@ sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
 sudo systemctl enable --now cert-agent-deployer
 ```
 
-The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. Once the `.so` is mapped into a JVM process, load the policy:
+The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). Once the `.so` is mapped into a JVM process, load the policy:
 
 ```bash
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
@@ -87,10 +87,16 @@ The `probe-tests-<version>.tar.gz` artifact (attached to each release) includes 
 tar -xzf probe-tests-<version>.tar.gz
 
 # Start the test program (loads a cert every 5 s, runs until killed)
-java -cp java CertAgentTest &
+# Pass any PEM/DER certificate — e.g. one from your existing PKI or /etc/ssl
+java -cp java CertAgentTest /path/to/cert.pem &
 
 # Wait for the deployer to attach — confirm with:
 sudo journalctl -u cert-agent-deployer -f
+
+# If the deployer logs "Could not dynamically attach" (e.g. on systems where the
+# bundled SELinux module has not yet taken effect), attach manually as a one-off:
+sudo jattach <pid> load instrument false \
+    /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
 
 # Once attached, load (or reload) the policy:
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml

@@ -565,7 +565,9 @@ jobs:
           git \
           curl \
           findutils \
-          which
+          which \
+          checkpolicy \
+          policycoreutils
 
     - name: Checkout code
       uses: actions/checkout@v4
