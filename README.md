@@ -93,6 +93,11 @@ java -cp java CertAgentTest /path/to/cert.pem &
 # Wait for the deployer to attach — confirm with:
 sudo journalctl -u cert-agent-deployer -f
 
+# If the deployer logs "Could not dynamically attach" (e.g. on systems where the
+# bundled SELinux module has not yet taken effect), attach manually as a one-off:
+sudo jattach <pid> load instrument false \
+    /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
+
 # Once attached, load (or reload) the policy:
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
 
