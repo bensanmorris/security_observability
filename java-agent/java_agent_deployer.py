@@ -72,7 +72,7 @@ def attach_agent(pid: int, agent_jar: str, native_lib: str, jattach: str) -> boo
             log.info("Attached cert-agent to PID %d", pid)
             return True
         else:
-            log.debug(
+            log.warning(
                 "jattach failed for PID %d (exit %d): %s",
                 pid, result.returncode, (result.stderr or result.stdout).strip(),
             )

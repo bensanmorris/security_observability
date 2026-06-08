@@ -33,12 +33,15 @@ StandardError=journal
 SyslogIdentifier=cert-agent-deployer
 
 # Harden where possible given the root requirement.
-# CAP_SYS_PTRACE is needed to read /proc/<pid>/exe for JVMs owned by other users.
-# CAP_DAC_READ_SEARCH is needed to open /proc/<pid>/cmdline for any UID.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+# CAP_SYS_PTRACE: read /proc/<pid>/exe for JVMs owned by other users.
+# CAP_DAC_READ_SEARCH: open /proc/<pid>/cmdline for any UID.
+# CAP_KILL: send SIGQUIT to JVMs owned by a different user.
+# CAP_SETUID/CAP_SETGID: jattach switches credentials to match the target JVM
+#   before connecting to its attach socket; setresuid/setresgid require these
+#   even for UID 0 once they are absent from the capability bounding set.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETUID CAP_SETGID
 NoNewPrivileges=true
-PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
