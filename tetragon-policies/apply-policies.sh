@@ -9,8 +9,32 @@ if [[ ! -x "$TETRA" ]]; then
     exit 1
 fi
 
+# Detect RHEL major version to select the correct OpenSSL policy variant.
+# RHEL 8 ships OpenSSL 1.1 (libssl.so.1.1); RHEL 9 ships OpenSSL 3 (libssl.so.3).
+RHEL_MAJOR=0
+if [[ -f /etc/os-release ]]; then
+    VERSION_ID=$(. /etc/os-release && echo "$VERSION_ID")
+    RHEL_MAJOR="${VERSION_ID%%.*}"
+fi
+
+case "$RHEL_MAJOR" in
+    8)
+        echo "Detected: RHEL 8 — using OpenSSL 1.1 policy"
+        OPENSSL_SKIP="openssl3-cert-load.yaml"
+        ;;
+    9)
+        echo "Detected: RHEL 9 — using OpenSSL 3 policy"
+        OPENSSL_SKIP="openssl1_1-cert-load.yaml"
+        ;;
+    *)
+        echo "Warning: could not detect RHEL major version (got '${RHEL_MAJOR}'). Applying all OpenSSL policies." >&2
+        OPENSSL_SKIP=""
+        ;;
+esac
+
 declare -a SUCCEEDED=()
 declare -a FAILED=()
+declare -a SKIPPED=()
 
 apply_policy() {
     local policy_file="$1"
@@ -27,6 +51,7 @@ apply_policy() {
     fi
 }
 
+echo ""
 echo "Applying Tetragon policies from: $SCRIPT_DIR"
 echo ""
 
@@ -46,7 +71,13 @@ if [[ ${#EXPERIMENTAL_POLICIES[@]} -gt 0 ]]; then
     echo ""
     echo "Experimental policies:"
     for policy in "${EXPERIMENTAL_POLICIES[@]}"; do
-        apply_policy "$policy" "experimental/$(basename "$policy")"
+        local_name="$(basename "$policy")"
+        if [[ -n "$OPENSSL_SKIP" && "$local_name" == "$OPENSSL_SKIP" ]]; then
+            printf "  %-55s SKIPPED (wrong RHEL version)\n" "experimental/$local_name"
+            SKIPPED+=("experimental/$local_name")
+            continue
+        fi
+        apply_policy "$policy" "experimental/$local_name"
     done
 fi
 
@@ -58,10 +89,13 @@ echo " Summary: ${#SUCCEEDED[@]}/${TOTAL} policies applied successfully"
 echo "================================================"
 
 for label in "${SUCCEEDED[@]}"; do
-    echo "  [OK]   $label"
+    echo "  [OK]      $label"
 done
 for label in "${FAILED[@]}"; do
-    echo "  [FAIL] $label"
+    echo "  [FAIL]    $label"
+done
+for label in "${SKIPPED[@]}"; do
+    echo "  [SKIPPED] $label"
 done
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
