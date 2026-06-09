@@ -28,6 +28,7 @@ jobs:
       relevant: ${{ steps.filter.outputs.relevant }}
       test-generator: ${{ steps.filter.outputs.test-generator }}
       probe-tests: ${{ steps.filter.outputs.probe-tests }}
+      java-agent: ${{ steps.filter.outputs.java-agent }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -50,6 +51,11 @@ jobs:
             - '.github/workflows/build.yml'
           probe-tests:
             - 'probe_tests/**'
+            - '.github/workflows/build.yml'
+          java-agent:
+            - 'java-agent/**'
+            - 'java-agent/java_agent_deployer.py'
+            - 'probe_tests/java/cert-agent/**'
             - '.github/workflows/build.yml'
 
   build:
@@ -492,8 +498,10 @@ jobs:
         cmake -S probe_tests -B probe_tests/build
         cmake --build probe_tests/build
 
-    - name: Build Java probe test
-      run: javac -encoding UTF-8 probe_tests/java/FipsJavaCertLoad.java
+    - name: Build Java probe tests
+      run: |
+        javac -encoding UTF-8 probe_tests/java/FipsJavaCertLoad.java
+        javac -encoding UTF-8 probe_tests/java/CertAgentTest.java
 
     - name: Package probe tests archive
       id: archive
@@ -503,6 +511,8 @@ jobs:
         cp probe_tests/build/test_openssl3_cert_load    probe-tests-stage/
         cp probe_tests/java/FipsJavaCertLoad.class      probe-tests-stage/java/
         cp probe_tests/java/FipsJavaCertLoad.java       probe-tests-stage/java/
+        cp probe_tests/java/CertAgentTest.class         probe-tests-stage/java/
+        cp probe_tests/java/CertAgentTest.java          probe-tests-stage/java/
         cp probe_tests/README.md                        probe-tests-stage/
         tar -czf "${ARCHIVE_NAME}" -C probe-tests-stage .
         echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
@@ -527,11 +537,130 @@ jobs:
         tar -tzf "${{ steps.archive.outputs.path }}" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
 
+  build-java-agent-rpms:
+    name: Build Java Agent RPMs (RHEL ${{ matrix.ubi-version }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: |
+      github.ref_type == 'tag' ||
+      github.event_name == 'pull_request' ||
+      needs.changes.outputs.java-agent == 'true'
+    container:
+      image: registry.access.redhat.com/ubi${{ matrix.ubi-version }}/ubi:latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ubi-version: ["8", "9"]
+
+    steps:
+    - name: Install build prerequisites
+      run: |
+        dnf install -y --allowerasing \
+          java-11-openjdk-devel \
+          gcc \
+          make \
+          rpm-build \
+          git \
+          curl \
+          findutils \
+          which \
+          checkpolicy \
+          policycoreutils
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Fix git safe directory
+      run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          VERSION="${{ github.ref_name }}"
+          echo "value=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        else
+          SHA=$(git rev-parse --short HEAD)
+          echo "value=0.0.0~git${SHA}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build cert-agent.jar
+      run: |
+        cd probe_tests/java/cert-agent
+        JAVA_HOME=$(readlink -f /usr/bin/javac | sed 's|/bin/javac||')
+        export JAVA_HOME
+        ASM_VER="9.7"
+        MAVEN="https://repo1.maven.org/maven2/org/ow2/asm"
+        mkdir -p .deps
+        curl -sSfL "${MAVEN}/asm/${ASM_VER}/asm-${ASM_VER}.jar"             -o ".deps/asm-${ASM_VER}.jar"
+        curl -sSfL "${MAVEN}/asm-commons/${ASM_VER}/asm-commons-${ASM_VER}.jar" -o ".deps/asm-commons-${ASM_VER}.jar"
+        mkdir -p classes fat/asm_extract
+        javac -source 11 -target 11 -encoding UTF-8 \
+            -cp ".deps/asm-${ASM_VER}.jar:.deps/asm-commons-${ASM_VER}.jar" \
+            -d classes \
+            src/com/security/certagent/*.java
+        (cd fat/asm_extract \
+            && jar xf "../../.deps/asm-${ASM_VER}.jar" \
+            && jar xf "../../.deps/asm-commons-${ASM_VER}.jar")
+        rm -rf fat/asm_extract/META-INF
+        cp -r classes/. fat/asm_extract/
+        jar cfm cert-agent.jar MANIFEST.MF -C fat/asm_extract .
+        echo "Built cert-agent.jar ($(du -sh cert-agent.jar | cut -f1))"
+
+    - name: Set up rpmbuild tree
+      run: mkdir -p "${HOME}/rpmbuild/"{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+
+    - name: Build RPMs
+      run: |
+        bash java-agent/build-rpm.sh \
+          --version "${{ steps.version.outputs.value }}" \
+          --release "${{ steps.version.outputs.release }}"
+
+    - name: Locate built RPMs
+      id: rpms
+      run: |
+        JNI_RPM=$(find "${HOME}/rpmbuild/RPMS" -name "cert-agent-jni-*.rpm" | head -1)
+        DEP_RPM=$(find "${HOME}/rpmbuild/RPMS" -name "cert-agent-deployer-*.rpm" | head -1)
+        echo "jni_path=${JNI_RPM}"        >> $GITHUB_OUTPUT
+        echo "jni_name=$(basename ${JNI_RPM})" >> $GITHUB_OUTPUT
+        echo "dep_path=${DEP_RPM}"        >> $GITHUB_OUTPUT
+        echo "dep_name=$(basename ${DEP_RPM})" >> $GITHUB_OUTPUT
+
+    - name: Upload cert-agent-jni RPM
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpms.outputs.jni_name }}
+        path: ${{ steps.rpms.outputs.jni_path }}
+        retention-days: 30
+
+    - name: Upload cert-agent-deployer RPM
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpms.outputs.dep_name }}
+        path: ${{ steps.rpms.outputs.dep_path }}
+        retention-days: 30
+
+    - name: Build summary
+      run: |
+        echo "## Java Agent RPMs (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Packages:**" >> $GITHUB_STEP_SUMMARY
+        echo "- \`${{ steps.rpms.outputs.jni_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- \`${{ steps.rpms.outputs.dep_name }}\`" >> $GITHUB_STEP_SUMMARY
+
   release:
     name: Publish Release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests ]
+    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms ]
     permissions:
       contents: write
 
@@ -571,6 +700,13 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download Java agent RPM artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: cert-agent-*.rpm
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Locate release assets
       id: assets
       run: |
@@ -597,6 +733,8 @@ jobs:
         draft: false
         files: |
           ./release-assets/cert-analyzer*.rpm
+          ./release-assets/cert-agent-jni-*.rpm
+          ./release-assets/cert-agent-deployer-*.rpm
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
@@ -626,9 +764,19 @@ jobs:
 
           RPMs for RHEL 8 (`.el8`) and RHEL 9 (`.el9`) are attached below.
 
+          **cert-analyzer** (Tetragon event consumer):
           ```bash
           sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
           sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm   # RHEL 9
+          ```
+
+          **Java agent** (JVM certificate interception — install on hosts running JVMs):
+          ```bash
+          # Install the JNI stub and agent JAR
+          sudo dnf install ./cert-agent-jni-<version>.el9.x86_64.rpm
+          # Install the deployer daemon (attaches the agent to running JVMs)
+          sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
+          sudo systemctl enable --now cert-agent-deployer
           ```
 
           ### Tetragon Policies (tar.gz)

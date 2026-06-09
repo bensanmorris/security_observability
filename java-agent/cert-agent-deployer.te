@@ -1,0 +1,40 @@
+module cert_agent_deployer 1.0;
+
+# Minimum permissions for cert-agent-deployer to attach to running JVMs via
+# jattach.  The service is pinned to unconfined_service_t via SELinuxContext=
+# in the unit file; this policy covers the permissions that remain restricted
+# even for that domain on confined RHEL9 systems.
+#
+# jattach attach sequence:
+#   1. Reads /proc/<pid>/exe and /proc/<pid>/cmdline for JVM discovery
+#   2. Sends SIGQUIT to the target JVM to wake the attach listener
+#   3. Creates /tmp/.attach_pid<N> as a trigger file
+#   4. Connects to /tmp/.java_pid<N> UNIX socket created by the JVM
+#   5. Loads the agent JAR over that socket
+
+require {
+    attribute domain;
+    type unconfined_service_t;
+    type proc_t;
+    type tmp_t;
+    class process { ptrace signal signull };
+    class file { read open getattr create write unlink };
+    class dir { read write search open getattr add_name remove_name };
+    class lnk_file { read getattr };
+    class sock_file { write read getattr };
+}
+
+# ptrace and signal are needed to trigger the JVM attach listener.
+# Target is the domain attribute (all process types) because the JVM may run
+# as java_t, unconfined_t, or a site-specific type depending on the policy.
+allow unconfined_service_t domain:process { ptrace signal signull };
+
+# /proc/<pid>/ traversal for JVM discovery and attach
+allow unconfined_service_t proc_t:file { read open getattr };
+allow unconfined_service_t proc_t:dir { read search open getattr };
+allow unconfined_service_t proc_t:lnk_file { read getattr };
+
+# jattach creates .attach_pid<N> and connects to .java_pid<N> socket in /tmp
+allow unconfined_service_t tmp_t:file { read write create getattr open unlink };
+allow unconfined_service_t tmp_t:dir { read write search open getattr add_name remove_name };
+allow unconfined_service_t tmp_t:sock_file { write read getattr };
