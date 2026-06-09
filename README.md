@@ -48,28 +48,19 @@ Policies are not bundled in the RPM — they are shipped separately so they can 
 ```bash
 tar -xzf tetragon-policies-<version>.tar.gz
 
-# Load immediately (active until Tetragon restarts):
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-
-# RHEL 9 (OpenSSL 3):
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl3-cert-load.yaml
-# RHEL 9 (FIPS / NSS):
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-fips-nss-cert.yaml
-#
-# NOTE: the FIPS/NSS policy hooks NSC_CreateObject and NSC_FindObjectsInit inside
-# libsoftokn3.so.  These functions are not exported as dynamic symbols in the
-# stripped RHEL package, so Tetragon resolves them via build-ID debuginfo lookup.
-# Install the debuginfo package before loading this policy or the uprobe will
-# fail to attach:
-#
-#   sudo dnf debuginfo-install nss-softokn
-# RHEL 8 (OpenSSL 1.1):
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/openssl1_1-cert-load.yaml
+# Load all policies immediately (active until Tetragon restarts):
+sudo ./tetragon-policies/apply-policies.sh
 
 # Or install persistently (loaded automatically on Tetragon start):
-sudo cp tetragon-policies/certificate-file-access.yaml /etc/tetragon/tetragon.tp.d/
+sudo cp tetragon-policies/*.yaml /etc/tetragon/tetragon.tp.d/
+sudo cp tetragon-policies/experimental/*.yaml /etc/tetragon/tetragon.tp.d/
 sudo systemctl restart tetragon
 ```
+
+> **Note:** `experimental/java-fips-nss-cert.yaml` hooks `NSC_CreateObject` and `NSC_FindObjectsInit` inside `libsoftokn3.so`. These symbols are not exported in the stripped RHEL package, so Tetragon resolves them via build-ID debuginfo lookup. Install the debuginfo package before loading this policy or the uprobe will fail to attach:
+> ```bash
+> sudo dnf debuginfo-install nss-softokn
+> ```
 
 **Java agent (non-FIPS JVMs):**
 
