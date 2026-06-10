@@ -6,6 +6,21 @@ SHA-256 certificate checksumming) relative to a vanilla baseline.
 
 ---
 
+## Scope and limitations
+
+These tests deliberately mock the Tetragon event stream to isolate the
+cert-analysis cost. All four configurations receive events via the same mock
+path, so the relative comparison between them is unaffected by gRPC or socket
+overhead. Running under a real Tetragon instance would add constant overhead
+to all configurations equally and would not change the relative conclusions.
+
+For the complementary question — what is the end-to-end throughput ceiling of
+the full pipeline including Tetragon's gRPC stream, proto deserialisation, and
+kprobe event generation — see the three-scenario evaluation in
+[extras/LOADTEST-README.md](../extras/LOADTEST-README.md).
+
+---
+
 ## What is measured
 
 Two passes are run per configuration:
