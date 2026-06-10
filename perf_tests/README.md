@@ -90,9 +90,11 @@ python perf_tests/cert_analyzer_perf_comparison.py --workers 4
 
 | | |
 |---|---|
-| **OS** | RHEL 9.7 — kernel 5.14.0-611.13.1.el9_7.x86_64 |
-| **CPU** | 13th Gen Intel Core i7-1360P, 4 vCPUs (KVM guest, VT-x) |
-| **Memory** | 16 GiB total, ~12 GiB available during tests |
+| **Host OS** | Ubuntu 22.04 |
+| **Host CPU** | 13th Gen Intel Core i7-1360P |
+| **Guest OS** | RHEL 9.7 under QEMU/KVM — kernel 5.14.0-611.13.1.el9_7.x86_64 |
+| **Guest vCPUs** | 4 |
+| **Guest memory** | 16 GiB total, ~12 GiB available during tests |
 | **Python** | 3.9.25 |
 | **Workers** | 1 (single-threaded) |
 
