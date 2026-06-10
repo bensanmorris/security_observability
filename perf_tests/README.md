@@ -124,43 +124,94 @@ Run with defaults: 10 000 events × 3 reps, 50-cert pool (50% FIPS-compliant /
 
 | Configuration | events/s | mean ms | p99 ms |
 |---|---|---|---|
-| Vanilla | ~50 000 | 0.020 | 0.055 |
-| FIPS only | ~52 000 | 0.018 | 0.028 |
-| Checksum only | ~49 000 | 0.019 | 0.039 |
-| FIPS + Checksum | ~53 000 | 0.018 | 0.028 |
+| Vanilla | ~6 600 | 0.144 | 0.208 |
+| FIPS only | ~4 000 | 0.243 | 0.321 |
+| Checksum only | ~6 400 | 0.149 | 0.204 |
+| FIPS + Checksum | ~3 700 | 0.262 | 0.335 |
 
-All four configurations deliver **~50 000 events/second** single-threaded.
-The small run-to-run variation (± 5 000 events/s) is measurement noise from
-OS scheduling and GC; it is not a real difference between configurations.
-The pipeline bottleneck is cert-file I/O and X.509 parsing, not the optional
-features.
+The pipeline mean per-event time (~144 μs for vanilla) is higher than the
+analysis-only latency (~65 μs) because `process_event()` also updates
+Prometheus metric labels and runs the full event-routing logic.
 
 ### Analysis-only latency
 
 | Configuration | mean ms | p99 ms | vs vanilla |
 |---|---|---|---|
-| Vanilla | 0.060 | 0.080 | baseline |
-| FIPS only | 0.068 | 0.091 | +0.008 ms (+13%) |
-| Checksum only | 0.068 | 0.093 | +0.008 ms (+13%) |
-| FIPS + Checksum | 0.076 | 0.103 | +0.016 ms (+26%) |
+| Vanilla | 0.065 | 0.092 | baseline |
+| FIPS only | 0.140 | 0.186 | +0.075 ms (+115%) |
+| Checksum only | 0.071 | 0.095 | +0.006 ms (+9%) |
+| FIPS + Checksum | 0.154 | 0.210 | +0.089 ms (+137%) |
 
-FIPS compliance checking inspects attributes of the already-parsed cert object
-and adds approximately **+13%** to per-cert analysis time (~8 μs).
+**FIPS compliance checking** is the dominant cost. It calls `cert.public_key()`
+on every analysed certificate to inspect algorithm, key size, and curve. This
+is a second OpenSSL key-extraction pass — separate from the initial
+`load_pem_x509_certificate()` — and costs roughly as much as the cert parse
+itself, adding approximately **+115%** (~75 μs per cert).
 
-SHA-256 checksumming re-serialises the cert to DER and hashes it, also adding
-approximately **+13%** (~8 μs).
+**SHA-256 checksumming** re-serialises the cert to DER and hashes it. This is
+cheap: approximately **+9%** (~6 μs per cert).
 
-The two features are largely independent: enabling both adds approximately
-**+26%** (~16 μs), which is the near-exact sum of the individual overheads.
+With both enabled, FIPS dominates: **+137%** total (~89 μs per cert).
+
+> **Note on caching:** this test deliberately clears the `known_certs` LRU
+> cache before every event (worst-case scenario — every unique cert triggers
+> full re-analysis). In production, each distinct certificate path is analysed
+> once; subsequent accesses are cache hits and cost a map lookup, not a full
+> parse. Sustained per-event cost at production cache-hit rates is near-zero.
+
+### Where the time goes
+
+The ~65 μs vanilla analysis-only cost breaks down into three main buckets,
+derived from profiler runs against `analyze_certificate()`:
+
+| Cost source | Approx. μs | Code location |
+|---|---|---|
+| File I/O (`open` + `read` + pathlib) | ~15 μs | `cert_analyzer.py` → `parse_certificates()` |
+| PEM → X.509 parse (`load_pem_x509_certificate`) | ~25 μs | `cert_analyzer.py` → `parse_certificates()` |
+| Attribute extraction (subject, issuer, SANs, serial, validity) | ~25 μs | `cert_analyzer.py` → `extract_certificate_info()` |
+
+`load_pem_x509_certificate` is a C extension call into OpenSSL's ASN.1 decoder
+that builds the full certificate struct in memory. The attribute extraction
+phase invokes multiple Python properties on the resulting object, each of which
+makes a small round-trip back into OpenSSL.
+
+**FIPS adds a fourth bucket:**
+
+| Cost source | Approx. μs | Code location |
+|---|---|---|
+| `cert.public_key()` (OpenSSL key extraction) | ~65–75 μs | `fips_compliance_checker.py:94` |
+
+Even though the certificate was already fully parsed, calling `public_key()`
+triggers a separate `X509_get_pubkey()` → `EVP_PKEY` extraction in OpenSSL.
+This is roughly as expensive as the initial `load_pem_x509_certificate()` call
+and is the reason FIPS checking doubles the per-cert cost. The key object is
+then inspected for algorithm, key size, and (for EC keys) approved curve; those
+attribute reads are cheap once the key object exists.
+
+**Checksum adds a fifth bucket:**
+
+| Cost source | Approx. μs | Code location |
+|---|---|---|
+| `cert.public_bytes(DER)` + `sha256()` | ~6 μs | `cert_analyzer.py:1172` |
+
+DER serialisation is fast because it works from the already-in-memory cert
+struct with no further OpenSSL parsing. SHA-256 over a few hundred bytes is
+negligible.
+
+---
 
 ### Conclusions
 
-- The cert-analyzer processes **~50 000 cert events/second** single-threaded.
-- Enabling FIPS checking or checksumming does **not meaningfully reduce
-  throughput** — all four configs perform within noise of each other at the
-  pipeline level.
-- At the analysis level, each optional feature adds ~8 μs per cert (~13%),
-  with both features together adding ~16 μs (~26%).
+- Single-threaded vanilla throughput is approximately **6 600 events/second**
+  (cache-miss worst case, every event triggers a full cert parse and
+  Prometheus update).
+- **Checksum has negligible throughput impact** — only ~9% overhead at the
+  analysis level and indistinguishable from vanilla at the pipeline level.
+- **FIPS compliance checking is expensive**: +115% analysis overhead, reducing
+  pipeline throughput from ~6 600 to ~4 000 events/second. The cost comes from
+  an additional `cert.public_key()` OpenSSL call per certificate.
+- In practice the LRU cache absorbs most of this cost — only newly-seen cert
+  paths incur the full analysis overhead.
 - The cert-analyzer is an **out-of-band observer** and does not sit in the
   critical path of TLS connections. Enabling these features has no impact on
   application TLS latency.
