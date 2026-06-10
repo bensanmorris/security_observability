@@ -1917,9 +1917,9 @@ class TestFipsComplianceEnabled:
         import cert_analyzer as _ca
         from fips_compliance_checker import check_certificate as _real
 
-        def _spy(cert):
+        def _spy(cert, **kwargs):
             calls.append(cert)
-            return _real(cert)
+            return _real(cert, **kwargs)
 
         monkeypatch.setattr(_ca, '_fips_check', _spy)
 
@@ -1939,9 +1939,9 @@ class TestFipsComplianceEnabled:
         import cert_analyzer as _ca
         from fips_compliance_checker import check_certificate as _real
 
-        def _spy(cert):
+        def _spy(cert, **kwargs):
             calls.append(cert)
-            return _real(cert)
+            return _real(cert, **kwargs)
 
         monkeypatch.setattr(_ca, '_fips_check', _spy)
 
@@ -1956,7 +1956,7 @@ class TestFipsComplianceEnabled:
         """If _fips_check() raises, extract_certificate_info still returns CertificateInfo."""
         import cert_analyzer as _ca
 
-        def _raising(cert):
+        def _raising(cert, **kwargs):
             raise RuntimeError("simulated fips error")
 
         monkeypatch.setattr(_ca, '_fips_check', _raising)

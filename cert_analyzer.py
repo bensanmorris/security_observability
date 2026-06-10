@@ -1180,7 +1180,11 @@ class CertificateAnalyzer:
         fips_result = None
         if self.fips_compliance_enabled:
             try:
-                fips_result = _fips_check(cert)
+                pub_key = cert.public_key()
+            except Exception:
+                pub_key = None
+            try:
+                fips_result = _fips_check(cert, pub_key=pub_key)
             except Exception as e:
                 logger.debug(f"FIPS check failed for cert {cert_index} in {cert_path}: {e}")
                 fips_result = FipsComplianceResult(

@@ -179,14 +179,22 @@ makes a small round-trip back into OpenSSL.
 
 | Cost source | Approx. μs | Code location |
 |---|---|---|
-| `cert.public_key()` (OpenSSL key extraction) | ~65–75 μs | `fips_compliance_checker.py:94` |
+| `cert.public_key()` (OpenSSL key extraction) | ~65–75 μs | `fips_compliance_checker.py` |
 
-Even though the certificate was already fully parsed, calling `public_key()`
-triggers a separate `X509_get_pubkey()` → `EVP_PKEY` extraction in OpenSSL.
-This is roughly as expensive as the initial `load_pem_x509_certificate()` call
-and is the reason FIPS checking doubles the per-cert cost. The key object is
-then inspected for algorithm, key size, and (for EC keys) approved curve; those
-attribute reads are cheap once the key object exists.
+The FIPS checker calls `cert.public_key()` to inspect algorithm, key size, and
+(for EC keys) approved curve. Even though the certificate struct is already in
+memory from the initial `load_pem_x509_certificate()` call, `public_key()`
+triggers a separate `X509_get_pubkey()` → `EVP_PKEY` extraction in OpenSSL —
+it does not return a cached object. This single call costs roughly as much as
+the initial cert parse and is the reason FIPS checking roughly doubles the
+per-cert cost.
+
+This overhead is inherent to the current design: `cert.public_key()` is called
+exactly once per certificate, but it cannot be avoided without replacing it with
+lower-level ASN.1 inspection. A future optimisation could use
+`cert.public_key_algorithm_oid` (cryptography ≥ 42.0.0) to determine the key
+algorithm and read the key size from the SubjectPublicKeyInfo bit string
+directly, avoiding the full `EVP_PKEY` object construction entirely.
 
 **Checksum adds a fifth bucket:**
 
@@ -208,8 +216,10 @@ negligible.
 - **Checksum has negligible throughput impact** — only ~9% overhead at the
   analysis level and indistinguishable from vanilla at the pipeline level.
 - **FIPS compliance checking is expensive**: +115% analysis overhead, reducing
-  pipeline throughput from ~6 600 to ~4 000 events/second. The cost comes from
-  an additional `cert.public_key()` OpenSSL call per certificate.
+  pipeline throughput from ~6 600 to ~4 000 events/second. The cost is a single
+  `cert.public_key()` OpenSSL call per certificate that is required to inspect
+  the key algorithm and size, and is not currently cached or avoidable within
+  the cryptography library's public API.
 - In practice the LRU cache absorbs most of this cost — only newly-seen cert
   paths incur the full analysis overhead.
 - The cert-analyzer is an **out-of-band observer** and does not sit in the
