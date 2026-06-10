@@ -59,7 +59,7 @@ except ImportError as e:
     sys.exit(1)
 
 import logging as _logging
-_logging.getLogger("cert_analyzer").setLevel(_logging.WARNING)
+_logging.getLogger("cert_analyzer").setLevel(_logging.ERROR)
 
 
 # ── Configuration table ───────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ class _MockEvent:
     node_name = ""
 
     def __init__(self, path: str) -> None:
-        self._host_path = "/host" + path if not path.startswith("/host") else path
+        self._host_path = path
         self._disk_path = path
         self._kprobe = _MockKprobe(self._host_path)
 
@@ -185,21 +185,6 @@ def _fresh_analyzer(fips_enabled: bool, checksum_enabled: bool) -> CertificateAn
         fips_compliance_enabled=fips_enabled,
         checksum_enabled=checksum_enabled,
     )
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _setup_host_symlink(cert_dir: str) -> bool:
-    """Create /host/<cert_dir> symlink; return True if created (caller must clean up)."""
-    host_cert_dir = "/host" + cert_dir
-    try:
-        os.makedirs(os.path.dirname(host_cert_dir) or "/", exist_ok=True)
-        if not os.path.exists(host_cert_dir):
-            os.symlink(cert_dir, host_cert_dir)
-            return True
-    except (OSError, PermissionError):
-        pass
-    return False
 
 
 # ── Throughput measurement (process_event pipeline) ───────────────────────────
@@ -261,9 +246,6 @@ def measure_throughput(
     reps: int,
 ) -> Tuple[float, float, float]:
     """Return median (events_per_sec, mean_ms, p99_ms) across reps."""
-    cert_dir = os.path.dirname(pool[0][0])
-    created_symlink = _setup_host_symlink(cert_dir)
-
     all_eps, all_mean, all_p99 = [], [], []
     for _ in range(reps):
         analyzer = _fresh_analyzer(cfg["fips"], cfg["checksum"])
@@ -276,11 +258,6 @@ def measure_throughput(
         all_eps.append(n / dur if dur > 0 else 0.0)
         all_mean.append(statistics.mean(s) if s else 0.0)
         all_p99.append(s[int(n * 0.99)] if n > 1 else 0.0)
-
-    if created_symlink:
-        host_cert_dir = "/host" + cert_dir
-        if os.path.islink(host_cert_dir):
-            os.unlink(host_cert_dir)
 
     return (statistics.median(all_eps), statistics.median(all_mean), statistics.median(all_p99))
 
