@@ -86,6 +86,18 @@ python perf_tests/cert_analyzer_perf_comparison.py --workers 4
 
 ---
 
+## Test machine specification
+
+| | |
+|---|---|
+| **OS** | RHEL 9.7 — kernel 5.14.0-611.13.1.el9_7.x86_64 |
+| **CPU** | 13th Gen Intel Core i7-1360P, 4 vCPUs (KVM guest, VT-x) |
+| **Memory** | 16 GiB total, ~12 GiB available during tests |
+| **Python** | 3.9.25 |
+| **Workers** | 1 (single-threaded) |
+
+---
+
 ## Results (RHEL 9, single-threaded, June 2026)
 
 Run with defaults: 10 000 events × 3 reps, 50-cert pool (50% FIPS-compliant /
