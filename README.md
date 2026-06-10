@@ -225,6 +225,7 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Linux capabilities reference](linux-capabilities.md) - Required Linux capabilities for each component
 - [Uprobe hook tests](probe_tests/README.md) - Programs for verifying Tetragon uprobe policies fire correctly
 - [Performance tests](perf_tests/README.md) - Throughput and latency comparison across cert-analyzer configurations
+- [Surfaced fields reference](extras/FIELDS-README.md) - All Prometheus metrics and Kafka event fields
 - [Quick start demo](extras/README-QUICKSTART.md)
 - [Kubernetes / pod enrichment demo](extras/POD-ENRICHMENT-DEMO-README.md)
 - [Deployment guide](extras/DEPLOYMENT-README.md)
