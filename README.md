@@ -13,7 +13,7 @@ Java certificate visibility is supported in both FIPS and non-FIPS environments.
 
 Instructions are below but if you prefer to watch video guides:
 
-- [CertSight - Installation & Configuration](https://youtu.be/9QpfuU0TKec)
+- [CertSight - Installation & Operation](https://youtu.be/9QpfuU0TKec)
 
 ---
 
