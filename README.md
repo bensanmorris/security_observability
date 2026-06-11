@@ -11,6 +11,10 @@ Each detected certificate is automatically checked for FIPS 140-2/140-3 algorith
 
 Java certificate visibility is supported in both FIPS and non-FIPS environments. In FIPS mode, uprobe hooks on NSS (`libsoftokn3.so`) capture certificates at the native layer. In non-FIPS mode, a lightweight Java agent instruments the JCA `KeyStore` API and reports certificates via a native stub hooked by Tetragon — see the [cert-agent (Java, non-FIPS)](probe_tests/README.md#cert-agent-java-non-fips) test for details.
 
+Instructions are below but if you prefer to watch video guides:
+
+- [CertSight - Installation & Configuration](https://youtu.be/9QpfuU0TKec)
+
 ---
 
 ## Prerequisites
