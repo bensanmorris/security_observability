@@ -2124,6 +2124,166 @@ class TestFipsComplianceEnabled:
         assert result.lower() == 'true'
 
 
+class TestRFC5280Extensions:
+    """Tests for Key Usage, Extended Key Usage, and Basic Constraints extraction."""
+
+    @staticmethod
+    def _build_cert(key_usage_ext=None, eku_ext=None, bc_ext=None):
+        """Return a signed x509.Certificate with the given optional extensions."""
+        private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048, backend=default_backend()
+        )
+        now = datetime.utcnow()
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")]))
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=365))
+        )
+        if key_usage_ext is not None:
+            builder = builder.add_extension(key_usage_ext, critical=True)
+        if eku_ext is not None:
+            builder = builder.add_extension(eku_ext, critical=False)
+        if bc_ext is not None:
+            builder = builder.add_extension(bc_ext, critical=True)
+        return builder.sign(private_key, hashes.SHA256(), backend=default_backend())
+
+    def _analyze(self, analyzer, temp_dir, cert):
+        path = os.path.join(temp_dir, "ext-test.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        infos = analyzer.analyze_certificate(path, "test", 0)
+        assert len(infos) == 1
+        return infos[0]
+
+    # ── Key Usage ────────────────────────────────────────────────────────────
+
+    def test_key_usage_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage is None
+
+    def test_key_usage_digital_signature_and_key_encipherment(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=True, content_commitment=False, key_encipherment=True,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage == ['digital_signature', 'key_encipherment']
+
+    def test_key_usage_ca_flags(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=True,
+            crl_sign=True, encipher_only=False, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage == ['key_cert_sign', 'crl_sign']
+
+    def test_key_usage_empty_bitstring(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage == []
+
+    def test_key_usage_encipher_only_included_when_key_agreement_set(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=True, key_cert_sign=False,
+            crl_sign=False, encipher_only=True, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert 'key_agreement' in info.key_usage
+        assert 'encipher_only' in info.key_usage
+
+    # ── Extended Key Usage ───────────────────────────────────────────────────
+
+    def test_extended_key_usage_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage is None
+
+    def test_extended_key_usage_server_and_client_auth(self, analyzer, temp_dir):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH])
+        cert = self._build_cert(eku_ext=eku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage == ['server_auth', 'client_auth']
+
+    def test_extended_key_usage_code_signing(self, analyzer, temp_dir):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING])
+        cert = self._build_cert(eku_ext=eku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage == ['code_signing']
+
+    def test_extended_key_usage_unknown_oid_falls_back_to_dotted_string(self, analyzer, temp_dir):
+        # 1.3.6.1.4.1.311.10.3.4 is Microsoft EFS — not in _EKU_NAMES
+        unknown_oid = x509.ObjectIdentifier('1.3.6.1.4.1.311.10.3.4')
+        eku = x509.ExtendedKeyUsage([unknown_oid])
+        cert = self._build_cert(eku_ext=eku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage == ['1.3.6.1.4.1.311.10.3.4']
+
+    # ── Basic Constraints ────────────────────────────────────────────────────
+
+    def test_basic_constraints_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is None
+        assert info.basic_constraints_path_length is None
+
+    def test_basic_constraints_end_entity(self, analyzer, temp_dir):
+        bc = x509.BasicConstraints(ca=False, path_length=None)
+        cert = self._build_cert(bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is False
+        assert info.basic_constraints_path_length is None
+
+    def test_basic_constraints_ca_no_path_length(self, analyzer, temp_dir):
+        bc = x509.BasicConstraints(ca=True, path_length=None)
+        cert = self._build_cert(bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is True
+        assert info.basic_constraints_path_length is None
+
+    def test_basic_constraints_ca_with_path_length(self, analyzer, temp_dir):
+        bc = x509.BasicConstraints(ca=True, path_length=0)
+        cert = self._build_cert(bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is True
+        assert info.basic_constraints_path_length == 0
+
+    # ── All three extensions present together ────────────────────────────────
+
+    def test_all_three_extensions_extracted_together(self, analyzer, temp_dir):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        ku = x509.KeyUsage(
+            digital_signature=True, content_commitment=False, key_encipherment=True,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        )
+        eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
+        bc = x509.BasicConstraints(ca=False, path_length=None)
+        cert = self._build_cert(key_usage_ext=ku, eku_ext=eku, bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+
+        assert info.key_usage == ['digital_signature', 'key_encipherment']
+        assert info.extended_key_usage == ['server_auth']
+        assert info.is_ca is False
+        assert info.basic_constraints_path_length is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

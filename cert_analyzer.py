@@ -78,6 +78,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Friendly names for the most common Extended Key Usage OIDs (RFC 5280 §4.2.1.12).
+# Unknown OIDs fall back to their dotted-string representation.
+_EKU_NAMES = {
+    '1.3.6.1.5.5.7.3.1': 'server_auth',
+    '1.3.6.1.5.5.7.3.2': 'client_auth',
+    '1.3.6.1.5.5.7.3.3': 'code_signing',
+    '1.3.6.1.5.5.7.3.4': 'email_protection',
+    '1.3.6.1.5.5.7.3.8': 'time_stamping',
+    '1.3.6.1.5.5.7.3.9': 'ocsp_signing',
+}
+
 
 @dataclass
 class CertificateInfo:
@@ -121,6 +132,11 @@ class CertificateInfo:
     curve_name: str = ""       # secp256r1 etc. (EC only)
     fips_compliant: bool = False
     fips_violations: list = field(default_factory=list)
+    # RFC 5280 extension fields — None means the extension is absent from the certificate
+    key_usage: Optional[list] = None
+    extended_key_usage: Optional[list] = None
+    is_ca: Optional[bool] = None
+    basic_constraints_path_length: Optional[int] = None
 
     @property
     def days_until_expiry(self) -> float:
@@ -386,7 +402,11 @@ class KafkaPublisher:
         "signature_hash":   "sha256",
         "curve_name":       "",
         "fips_compliant":   true,
-        "fips_violations":  []
+        "fips_violations":  [],
+        "key_usage":                     ["digital_signature", "key_encipherment"],
+        "extended_key_usage":            ["server_auth", "client_auth"],
+        "is_ca":                         false,
+        "basic_constraints_path_length": null
     }
     """
 
@@ -521,6 +541,10 @@ class KafkaPublisher:
             'curve_name':        cert_info.curve_name,
             'fips_compliant':    cert_info.fips_compliant,
             'fips_violations':   cert_info.fips_violations,
+            'key_usage':                     cert_info.key_usage,
+            'extended_key_usage':            cert_info.extended_key_usage,
+            'is_ca':                         cert_info.is_ca,
+            'basic_constraints_path_length': cert_info.basic_constraints_path_length,
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
@@ -1166,6 +1190,54 @@ class CertificateAnalyzer:
         except Exception as e:
             logger.debug(f"Error extracting SAN: {e}")
 
+        key_usage = None
+        try:
+            ku_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.KEY_USAGE
+            )
+            ku = ku_ext.value
+            flags = [
+                'digital_signature', 'content_commitment', 'key_encipherment',
+                'data_encipherment', 'key_agreement', 'key_cert_sign', 'crl_sign',
+            ]
+            key_usage = [f for f in flags if getattr(ku, f)]
+            if ku.key_agreement:
+                if ku.encipher_only:
+                    key_usage.append('encipher_only')
+                if ku.decipher_only:
+                    key_usage.append('decipher_only')
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Key Usage: {e}")
+
+        extended_key_usage = None
+        try:
+            eku_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.EXTENDED_KEY_USAGE
+            )
+            extended_key_usage = [
+                _EKU_NAMES.get(oid.dotted_string, oid.dotted_string)
+                for oid in eku_ext.value
+            ]
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Extended Key Usage: {e}")
+
+        is_ca = None
+        basic_constraints_path_length = None
+        try:
+            bc_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.BASIC_CONSTRAINTS
+            )
+            is_ca = bc_ext.value.ca
+            basic_constraints_path_length = bc_ext.value.path_length
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Basic Constraints: {e}")
+
         # Compute SHA-256 of DER-encoded certificate when enabled.
         # Uses public_bytes() which is always available for a parsed cert object.
         checksum = ""
@@ -1213,6 +1285,10 @@ class CertificateAnalyzer:
             curve_name=fips_result.curve_name if fips_result is not None else '',
             fips_compliant=fips_result.compliant if fips_result is not None else False,
             fips_violations=fips_result.violations if fips_result is not None else [],
+            key_usage=key_usage,
+            extended_key_usage=extended_key_usage,
+            is_ca=is_ca,
+            basic_constraints_path_length=basic_constraints_path_length,
         )
 
     def analyze_certificate(
@@ -1360,6 +1436,15 @@ class CertificateAnalyzer:
         )
         if info.san_dns_names:
             detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+        if info.key_usage is not None or info.extended_key_usage is not None:
+            ku  = ', '.join(info.key_usage)         if info.key_usage         else '—'
+            eku = ', '.join(info.extended_key_usage) if info.extended_key_usage else '—'
+            detail_log(f"   Key Usage: {ku} | EKU: {eku}")
+        if info.is_ca is not None:
+            bc = "CA" if info.is_ca else "end-entity"
+            if info.is_ca and info.basic_constraints_path_length is not None:
+                bc += f" (path length {info.basic_constraints_path_length})"
+            detail_log(f"   Basic Constraints: {bc}")
         if info.fips_compliant:
             alg = info.key_algorithm
             if info.key_size:
