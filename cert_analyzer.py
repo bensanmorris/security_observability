@@ -1436,6 +1436,15 @@ class CertificateAnalyzer:
         )
         if info.san_dns_names:
             detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+        if info.key_usage is not None or info.extended_key_usage is not None:
+            ku  = ', '.join(info.key_usage)         if info.key_usage         else '—'
+            eku = ', '.join(info.extended_key_usage) if info.extended_key_usage else '—'
+            detail_log(f"   Key Usage: {ku} | EKU: {eku}")
+        if info.is_ca is not None:
+            bc = "CA" if info.is_ca else "end-entity"
+            if info.is_ca and info.basic_constraints_path_length is not None:
+                bc += f" (path length {info.basic_constraints_path_length})"
+            detail_log(f"   Basic Constraints: {bc}")
         if info.fips_compliant:
             alg = info.key_algorithm
             if info.key_size:
