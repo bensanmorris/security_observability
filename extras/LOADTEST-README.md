@@ -5,7 +5,7 @@ Measures analysis latency per certificate format and sustained event throughput,
 without requiring a live Tetragon instance.
 
 > **TL;DR** — cert-analyzer and Tetragon together add no measurable performance
-> overhead on RHEL9. See the [Results Summary](#results-summary-rhel9-evaluation--march-2026)
+> overhead on RHEL9. See the [Results Summary](#results-summary-rhel9-evaluation--june-2026)
 > for full findings.
 
 ---
@@ -127,6 +127,28 @@ diff <(python -m json.tool before.json) <(python -m json.tool after.json)
 **Large CA bundle (e.g. simulating /etc/pki/ca-trust):**
 ```bash
 python cert_analyzer_load_test.py --bundle-size 50 --samples 200
+```
+
+---
+
+## Updating cert-analyzer Before Running Scenarios
+
+Scenarios 2 and 3 require a running cert-analyzer container. If you have
+local changes to `cert_analyzer.py`, rebuild and redeploy before running them:
+
+```bash
+# From the repo root — rebuilds the image and restarts the container
+sudo bash extras/build.sh
+
+# Start the updated container in rootful mode
+sudo bash extras/run-rootful.sh
+```
+
+Confirm it's healthy before proceeding:
+
+```bash
+sudo podman ps --filter name=cert-analyzer
+sudo podman logs cert-analyzer 2>&1 | tail -20
 ```
 
 ---
