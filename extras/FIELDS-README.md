@@ -142,7 +142,12 @@ unique per certificate, and rotated when the cert at a path changes.
   "signature_hash":  "sha256",
   "curve_name":      "",
   "fips_compliant":  true,
-  "fips_violations": []
+  "fips_violations": [],
+
+  "key_usage":                     ["digital_signature", "key_encipherment"],
+  "extended_key_usage":            ["server_auth"],
+  "is_ca":                         false,
+  "basic_constraints_path_length": null
 }
 ```
 
@@ -222,3 +227,16 @@ All fields are empty strings / null on bare-metal deployments.
 > `key_size`, `signature_hash`, `curve_name`) are empty / zero and `fips_compliant`
 > is `false`. Consumers should check `fips_compliance_enabled` configuration rather
 > than treating `fips_compliant=false` as a violation signal in that case.
+
+#### RFC 5280 certificate extensions
+
+These fields are extracted unconditionally — no configuration flag required.
+`null` means the extension is absent from the certificate; an empty array means
+the extension is present but no values are set.
+
+| Field | Type | Description |
+|---|---|---|
+| `key_usage` | string[]\|null | Key Usage bits set on the certificate. `null` if the extension is absent. Possible values: `digital_signature`, `content_commitment`, `key_encipherment`, `data_encipherment`, `key_agreement`, `key_cert_sign`, `crl_sign`, `encipher_only`, `decipher_only` |
+| `extended_key_usage` | string[]\|null | Extended Key Usage OIDs. `null` if the extension is absent. Common values: `server_auth`, `client_auth`, `code_signing`, `email_protection`, `time_stamping`, `ocsp_signing`. Unknown OIDs appear as dotted strings e.g. `1.3.6.1.4.1.311.10.3.4` |
+| `is_ca` | bool\|null | `true` if the Basic Constraints extension is present and `CA` is set; `false` if the extension is present but `CA` is not set; `null` if the extension is absent |
+| `basic_constraints_path_length` | int\|null | Maximum CA chain depth from the Basic Constraints extension. `null` if the extension is absent or no path length constraint is specified |
