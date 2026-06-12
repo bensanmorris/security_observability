@@ -45,6 +45,26 @@ The Tetragon protobuf stubs are **not** required — the throughput test uses
 a mock event object that mirrors the proto interface so the full processing
 pipeline runs without a live socket.
 
+### /host symlink (required for full pipeline throughput)
+
+The throughput test drives `process_event()` end-to-end, which resolves cert
+paths through `/host` (the container's view of the host filesystem). Without
+this symlink the test falls back to direct `analyze_certificate()` calls and
+throughput numbers will not reflect the real pipeline cost.
+
+Create the symlink once before running any load test:
+
+```bash
+sudo mkdir -p /host/tmp
+sudo ln -s /tmp/loadtest-certs /host/tmp/loadtest-certs
+```
+
+To clean up afterwards:
+
+```bash
+sudo rm /host/tmp/loadtest-certs && sudo rmdir /host/tmp /host
+```
+
 ---
 
 ## Quick Start
@@ -301,67 +321,43 @@ Console output:
 
 ---
 
-## Results Summary (RHEL9 Evaluation — March 2026)
+## Results Summary (RHEL9 Evaluation — June 2026)
 
 Results from running the three-scenario evaluation on a personal RHEL9
 environment with Tetragon and cert-analyzer deployed via Podman, using
-5000 events per throughput test.
-
-> **Note:** The throughput test fell back to `analyze_certificate()` direct
-> calls in all three scenarios due to a `/host` symlink permission restriction.
-> This affects the absolute throughput numbers but not the latency results or
-> the relative comparison between scenarios, since the fallback was consistent
-> across all three runs.
+5000 events per throughput test. The `/host` symlink was in place for all
+runs, so throughput figures reflect the full `process_event()` pipeline.
 
 ### Latency Results
 
 | Scenario | Single PEM | PEM bundle | PKCS12 | PKCS12 chain | Expired | JKS |
 |---|---|---|---|---|---|---|
-| 1 — Baseline | 0.1ms | 0.6ms | 40.6ms | 40.7ms | 0.1ms | 0.1ms |
-| 2 — Tetragon only | 0.1ms | 0.6ms | 40.7ms | 40.6ms | 0.1ms | 0.1ms |
-| 3 — Both running | 0.1ms | 0.6ms | 40.7ms | 40.8ms | 0.1ms | 0.1ms |
-| **Delta (1 → 3)** | **0ms** | **0ms** | **+0.1ms** | **+0.1ms** | **0ms** | **0ms** |
+| 1 — Baseline | 0.2ms | 1.2ms | 40.8ms | 41.3ms | 0.2ms | 0.2ms |
+| 2 — Tetragon only | — | — | — | — | — | — |
+| 3 — Both running | — | — | — | — | — | — |
+| **Delta (1 → 3)** | **—** | **—** | **—** | **—** | **—** | **—** |
 
-### Throughput and Memory
+> Scenarios 2 and 3 pending re-run with Tetragon active.
 
-| Scenario | Duration | events/sec | Memory growth |
-|---|---|---|---|
-| 1 — Baseline | 0.40s | 12,416 | 1.7MB |
-| 2 — Tetragon only | 0.39s | 12,687 | 1.5MB |
-| 3 — Both running | 0.38s | 13,136 | 1.7MB |
+### Throughput and Memory (full `process_event()` pipeline)
+
+| Scenario | Events | Duration | events/sec | Mean latency | p99 latency | Memory growth |
+|---|---|---|---|---|---|---|
+| 1 — Baseline | 5000 | 1.25s | 3,989 | 0.25ms | 0.40ms | 0.4MB |
+| 2 — Tetragon only | — | — | — | — | — | — |
+| 3 — Both running | — | — | — | — | — | — |
+
+> Scenarios 2 and 3 pending re-run with Tetragon active.
 
 ### Conclusions
 
-**cert-analyzer adds negligible overhead.** The mean latency delta across all
-certificate formats from baseline to full production configuration is at most
-0.1ms — entirely within measurement noise. PEM, JKS, and expired certificate
-handling are completely unaffected across all scenarios.
+**cert-analyzer adds negligible analysis latency.** PEM and JKS parsing
+complete in ~0.2ms; PKCS12 takes ~41ms (dominated by OpenSSL key derivation,
+not cert-analyzer overhead). Expired certificate handling shows no slow path.
 
-**Tetragon's eBPF kprobe hooks add no measurable latency** to certificate file
-access. The delta between Scenario 1 and Scenario 2 is zero across all formats.
-
-**Throughput is unaffected by Tetragon or cert-analyzer.** All three scenarios
-delivered ~12,000–13,000 events/sec with the variation being run-to-run noise
-rather than any real overhead. Scenario 3 (both running) was marginally the
-fastest of the three, confirming no degradation.
+**Full pipeline throughput is ~4,000 events/sec at 1 worker** against the
+real `process_event()` pipeline (path extraction, Prometheus updates,
+deduplication). This is the production-representative number.
 
 **Memory footprint is minimal and stable.** RSS growth over 5000 events was
-consistently ~1.6MB across all three scenarios, showing no signs of unbounded
-accumulation.
-
-**The performance case against deploying cert-analyzer is not supported by
-the data.** On this RHEL9 host, running Tetragon and cert-analyzer together
-has no measurable impact on certificate file access latency for other processes.
-
-### Outstanding
-
-- Full `process_event()` pipeline throughput was not measured due to the
-  `/host` symlink permission restriction. To obtain this, create the symlink
-  manually as root before running the test:
-
-```bash
-sudo mkdir /host
-sudo ln -s /tmp/loadtest-certs /host/tmp/loadtest-certs
-python cert_analyzer_load_test.py --events 5000 --output full_pipeline.json
-sudo rm /host/tmp/loadtest-certs && sudo rmdir /host
-```
+0.4MB, showing no signs of unbounded accumulation.
