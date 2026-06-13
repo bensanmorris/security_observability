@@ -19,7 +19,7 @@ Instructions are below but if you prefer to watch video guides:
 
 ## Prerequisites
 
-- RHEL 8 or RHEL 9 (x86_64)
+- RHEL >= 8 (x86_64)
 - [Tetragon](https://tetragon.io) installed and running
 
 ---
