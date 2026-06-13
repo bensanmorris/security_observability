@@ -49,6 +49,7 @@ All three share the same label set:
 | `tls_certificate_expired` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name` | `1` if expired, `0` if valid |
 | `tls_certificate_expiring_soon` | Gauge | above + `threshold_days` | `1` if expiring within threshold, `0` otherwise. Emitted for thresholds `7`, `30`, and `90` days |
 | `tls_certificate_fips_compliant` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `key_algorithm`, `signature_hash` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
+| `tls_certificate_self_signed` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `is_ca` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
 
 ### Event and error counters
 
@@ -147,7 +148,8 @@ unique per certificate, and rotated when the cert at a path changes.
   "key_usage":                     ["digital_signature", "key_encipherment"],
   "extended_key_usage":            ["server_auth"],
   "is_ca":                         false,
-  "basic_constraints_path_length": null
+  "basic_constraints_path_length": null,
+  "is_self_signed":                false
 }
 ```
 
@@ -240,3 +242,13 @@ the extension is present but no values are set.
 | `extended_key_usage` | string[]\|null | Extended Key Usage OIDs. `null` if the extension is absent. Common values: `server_auth`, `client_auth`, `code_signing`, `email_protection`, `time_stamping`, `ocsp_signing`. Unknown OIDs appear as dotted strings e.g. `1.3.6.1.4.1.311.10.3.4` |
 | `is_ca` | bool\|null | `true` if the Basic Constraints extension is present and `CA` is set; `false` if the extension is present but `CA` is not set; `null` if the extension is absent |
 | `basic_constraints_path_length` | int\|null | Maximum CA chain depth from the Basic Constraints extension. `null` if the extension is absent or no path length constraint is specified |
+
+#### Certificate trust
+
+| Field | Type | Description |
+|---|---|---|
+| `is_self_signed` | bool | `true` if the certificate's subject and issuer names are identical **and** the signature verifies against its own public key. Root CA certificates are legitimately self-signed; self-signed leaf certificates are typically a misconfiguration risk. Always populated — no configuration flag required |
+
+> **Alert guidance**: filter `is_ca="false"` on `tls_certificate_self_signed == 1` to target non-CA self-signed certificates — the genuinely risky case. Root CA certificates (`is_ca="true"`) are legitimately self-signed and can be excluded. `is_ca="unknown"` means the certificate has no Basic Constraints extension, which itself is unusual for a modern cert and worth alerting on alongside `is_self_signed=1`.
+>
+> Example PromQL: `tls_certificate_self_signed{is_ca="false"} == 1`
