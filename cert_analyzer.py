@@ -137,6 +137,10 @@ class CertificateInfo:
     extended_key_usage: Optional[list] = None
     is_ca: Optional[bool] = None
     basic_constraints_path_length: Optional[int] = None
+    # True when the certificate is self-signed (subject == issuer and signature
+    # verifies against its own public key). Root CA certificates are legitimately
+    # self-signed; self-signed leaf certificates are typically a configuration risk.
+    is_self_signed: bool = False
 
     @property
     def days_until_expiry(self) -> float:
@@ -228,6 +232,13 @@ class PrometheusMetrics:
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
             ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash']
+        )
+
+        self.cert_self_signed = Gauge(
+            'tls_certificate_self_signed',
+            'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
+            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+             'workload_kind', 'workload_name', 'node_name']
         )
 
         # System health
@@ -350,6 +361,17 @@ class PrometheusMetrics:
                 signature_hash=info.signature_hash,
             ).set(1 if info.fips_compliant else 0)
 
+        self.cert_self_signed.labels(
+            cert_path=info.path,
+            process=info.process,
+            cert_index=str(info.cert_index),
+            pod_name=info.pod_name,
+            namespace=info.namespace,
+            workload_kind=info.workload_kind,
+            workload_name=info.workload_name,
+            node_name=info.node_name,
+        ).set(1 if info.is_self_signed else 0)
+
 
 
 
@@ -406,7 +428,8 @@ class KafkaPublisher:
         "key_usage":                     ["digital_signature", "key_encipherment"],
         "extended_key_usage":            ["server_auth", "client_auth"],
         "is_ca":                         false,
-        "basic_constraints_path_length": null
+        "basic_constraints_path_length": null,
+        "is_self_signed":                false
     }
     """
 
@@ -545,6 +568,7 @@ class KafkaPublisher:
             'extended_key_usage':            cert_info.extended_key_usage,
             'is_ca':                         cert_info.is_ca,
             'basic_constraints_path_length': cert_info.basic_constraints_path_length,
+            'is_self_signed':                cert_info.is_self_signed,
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
@@ -1238,6 +1262,17 @@ class CertificateAnalyzer:
         except Exception as e:
             logger.debug(f"Error extracting Basic Constraints: {e}")
 
+        # A certificate is self-signed when its subject name matches its issuer
+        # and the signature verifies against its own public key.
+        # verify_directly_issued_by() (cryptography ≥40) performs both checks atomically;
+        # any exception means it is not self-signed.
+        is_self_signed = False
+        try:
+            cert.verify_directly_issued_by(cert)
+            is_self_signed = True
+        except Exception:
+            pass
+
         # Compute SHA-256 of DER-encoded certificate when enabled.
         # Uses public_bytes() which is always available for a parsed cert object.
         checksum = ""
@@ -1289,6 +1324,7 @@ class CertificateAnalyzer:
             extended_key_usage=extended_key_usage,
             is_ca=is_ca,
             basic_constraints_path_length=basic_constraints_path_length,
+            is_self_signed=is_self_signed,
         )
 
     def analyze_certificate(
@@ -1458,6 +1494,12 @@ class CertificateAnalyzer:
             logger.warning(
                 f"⚠️  FIPS NON-COMPLIANT: {display_path} — "
                 + " | ".join(info.fips_violations)
+            )
+        if info.is_self_signed:
+            logger.warning(
+                f"⚠️  SELF-SIGNED: {display_path} "
+                f"(process={info.process} CN={info.common_name})"
+                f"{k8s_ctx}"
             )
         if info.pod_name:
             detail_log(f"   Pod: {info.namespace}/{info.pod_name}")

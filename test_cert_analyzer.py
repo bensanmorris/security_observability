@@ -4710,3 +4710,196 @@ class TestResolveProcessBinary:
         with mock.patch('os.readlink', side_effect=OSError('no such process')):
             result = analyzer._resolve_process_binary('/some/build/dir', 42)
         assert result == '/some/build/dir'
+
+
+def _generate_ca_signed_certificate(common_name: str, days_valid: int, ca_cert, ca_key):
+    """Generate a certificate issued by a separate CA (not self-signed)."""
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend(),
+    )
+    not_valid_before = datetime.utcnow()
+    not_valid_after  = datetime.utcnow() + timedelta(days=days_valid)
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TestOrg"),
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+    ])
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_valid_before)
+        .not_valid_after(not_valid_after)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(common_name)]),
+            critical=False,
+        )
+    )
+    cert = builder.sign(ca_key, hashes.SHA256(), backend=default_backend())
+    return cert, private_key
+
+
+class TestSelfSignedDetection:
+    """
+    Tests for is_self_signed detection in extract_certificate_info().
+
+    Note: TestCertificateGeneration.generate_certificate() always creates
+    self-signed certificates (issuer == subject, signed with own key).
+    CA-signed certificates require _generate_ca_signed_certificate().
+    """
+
+    def test_self_signed_cert_detected(self, analyzer, temp_dir):
+        """A self-signed certificate has is_self_signed=True."""
+        cert, _ = TestCertificateGeneration.generate_certificate("self.example.com", 365)
+        path = os.path.join(temp_dir, "self.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is True
+
+    def test_ca_signed_cert_not_self_signed(self, analyzer, temp_dir):
+        """A certificate signed by a separate CA has is_self_signed=False."""
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("leaf.example.com", 365, ca_cert, ca_key)
+
+        path = os.path.join(temp_dir, "leaf.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is False
+
+    def test_root_ca_is_self_signed(self, analyzer, temp_dir):
+        """A self-signed root CA certificate is correctly identified as self-signed."""
+        ca_cert, _ = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        path = os.path.join(temp_dir, "root_ca.pem")
+        TestCertificateGeneration.save_certificate_pem(ca_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is True
+
+    def test_intermediate_ca_is_not_self_signed(self, analyzer, temp_dir):
+        """An intermediate CA signed by a root CA is not self-signed."""
+        root_cert, root_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        inter_cert, _       = _generate_ca_signed_certificate("Intermediate CA", 1825, root_cert, root_key)
+
+        path = os.path.join(temp_dir, "intermediate.pem")
+        TestCertificateGeneration.save_certificate_pem(inter_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is False
+
+    def test_prometheus_metric_set_for_self_signed(self, analyzer, temp_dir):
+        """tls_certificate_self_signed gauge is 1 for a self-signed certificate."""
+        cert, _ = TestCertificateGeneration.generate_certificate("metric-self.example.com", 365)
+        path = os.path.join(temp_dir, "metric-self.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        val = analyzer.metrics.cert_self_signed.labels(
+            cert_path=path,
+            process="test",
+            cert_index="0",
+            pod_name="",
+            namespace="",
+            workload_kind="",
+            workload_name="",
+            node_name="",
+        )._value.get()
+        assert val == 1.0
+
+    def test_prometheus_metric_set_for_ca_signed(self, analyzer, temp_dir):
+        """tls_certificate_self_signed gauge is 0 for a CA-signed certificate."""
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("metric-leaf.example.com", 365, ca_cert, ca_key)
+
+        path = os.path.join(temp_dir, "metric-leaf.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        val = analyzer.metrics.cert_self_signed.labels(
+            cert_path=path,
+            process="test",
+            cert_index="0",
+            pod_name="",
+            namespace="",
+            workload_kind="",
+            workload_name="",
+            node_name="",
+        )._value.get()
+        assert val == 0.0
+
+    def test_self_signed_logs_warning(self, analyzer, temp_dir, caplog):
+        """A self-signed certificate triggers a WARNING log with SELF-SIGNED in the message."""
+        cert, _ = TestCertificateGeneration.generate_certificate("warn.example.com", 365)
+        path = os.path.join(temp_dir, "warn.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        assert any("SELF-SIGNED" in r.message for r in caplog.records)
+        assert any(r.levelno == logging.WARNING for r in caplog.records
+                   if "SELF-SIGNED" in r.message)
+
+    def test_ca_signed_does_not_log_self_signed_warning(self, analyzer, temp_dir, caplog):
+        """A CA-signed certificate does not produce a SELF-SIGNED warning."""
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("no-warn.example.com", 365, ca_cert, ca_key)
+
+        path = os.path.join(temp_dir, "no-warn.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        assert not any("SELF-SIGNED" in r.message for r in caplog.records)
+
+    def test_is_self_signed_field_defaults_to_false(self):
+        """CertificateInfo.is_self_signed defaults to False."""
+        info = CertificateInfo(
+            path="/tmp/test.crt",
+            subject="CN=test",
+            issuer="CN=ca",
+            serial_number="1",
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process="test",
+            pid=1,
+        )
+        assert info.is_self_signed is False
+
+    def test_bundle_mixed_self_signed_and_ca_signed(self, analyzer, temp_dir):
+        """In a bundle, each cert is independently classified as self-signed or not."""
+        self_signed, _  = TestCertificateGeneration.generate_certificate("self.example.com", 365)
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        ca_signed, _    = _generate_ca_signed_certificate("leaf.example.com", 365, ca_cert, ca_key)
+
+        bundle_path = os.path.join(temp_dir, "mixed.pem")
+        TestCertificateGeneration.save_multi_certificate_pem([self_signed, ca_signed], bundle_path)
+
+        cert_infos = analyzer.analyze_certificate(bundle_path, "test", 1)
+
+        assert len(cert_infos) == 2
+        by_cn = {info.common_name: info for info in cert_infos}
+        assert by_cn["self.example.com"].is_self_signed is True
+        assert by_cn["leaf.example.com"].is_self_signed is False
