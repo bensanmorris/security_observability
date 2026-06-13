@@ -238,7 +238,7 @@ class PrometheusMetrics:
             'tls_certificate_self_signed',
             'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
             ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name']
+             'workload_kind', 'workload_name', 'node_name', 'is_ca']
         )
 
         # System health
@@ -370,6 +370,7 @@ class PrometheusMetrics:
             workload_kind=info.workload_kind,
             workload_name=info.workload_name,
             node_name=info.node_name,
+            is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
         ).set(1 if info.is_self_signed else 0)
 
 

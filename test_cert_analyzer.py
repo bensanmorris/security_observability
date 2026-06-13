@@ -4818,6 +4818,7 @@ class TestSelfSignedDetection:
             workload_kind="",
             workload_name="",
             node_name="",
+            is_ca="unknown",  # generate_certificate without is_ca=True adds no BasicConstraints
         )._value.get()
         assert val == 1.0
 
@@ -4841,8 +4842,42 @@ class TestSelfSignedDetection:
             workload_kind="",
             workload_name="",
             node_name="",
+            is_ca="unknown",  # _generate_ca_signed_certificate adds no BasicConstraints
         )._value.get()
         assert val == 0.0
+
+    def test_is_ca_label_values(self, analyzer, temp_dir):
+        """is_ca label is 'true' for a CA cert, 'false' for an explicit non-CA, 'unknown' when absent."""
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+        def _cert_with_bc(is_ca_value):
+            """Build a minimal self-signed cert with an explicit BasicConstraints extension."""
+            key = _rsa.generate_private_key(65537, 2048, backend=default_backend())
+            subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "bc-test")])
+            builder = (
+                x509.CertificateBuilder()
+                .subject_name(subject).issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(datetime.utcnow())
+                .not_valid_after(datetime.utcnow() + timedelta(days=1))
+                .add_extension(x509.BasicConstraints(ca=is_ca_value, path_length=None), critical=True)
+            )
+            return builder.sign(key, hashes.SHA256(), backend=default_backend())
+
+        def _label(cert_obj, fname):
+            path = os.path.join(temp_dir, fname)
+            TestCertificateGeneration.save_certificate_pem(cert_obj, path)
+            infos = analyzer.analyze_certificate(path, "test", 1)
+            analyzer.metrics.update_certificate_metrics(infos[0])
+            return infos[0].is_ca
+
+        assert _label(_cert_with_bc(True),  "bc_true.pem")  is True
+        assert _label(_cert_with_bc(False), "bc_false.pem") is False
+
+        # No BasicConstraints extension → is_ca is None → label 'unknown'
+        no_bc_cert, _ = TestCertificateGeneration.generate_certificate("no-bc.example.com", 365)
+        assert _label(no_bc_cert, "no_bc.pem") is None
 
     def test_self_signed_logs_warning(self, analyzer, temp_dir, caplog):
         """A self-signed certificate triggers a WARNING log with SELF-SIGNED in the message."""

@@ -49,7 +49,7 @@ All three share the same label set:
 | `tls_certificate_expired` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name` | `1` if expired, `0` if valid |
 | `tls_certificate_expiring_soon` | Gauge | above + `threshold_days` | `1` if expiring within threshold, `0` otherwise. Emitted for thresholds `7`, `30`, and `90` days |
 | `tls_certificate_fips_compliant` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `key_algorithm`, `signature_hash` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
-| `tls_certificate_self_signed` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted |
+| `tls_certificate_self_signed` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `is_ca` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
 
 ### Event and error counters
 
@@ -249,4 +249,6 @@ the extension is present but no values are set.
 |---|---|---|
 | `is_self_signed` | bool | `true` if the certificate's subject and issuer names are identical **and** the signature verifies against its own public key. Root CA certificates are legitimately self-signed; self-signed leaf certificates are typically a misconfiguration risk. Always populated — no configuration flag required |
 
-> **Alert guidance**: `is_self_signed=true` on a certificate with `is_ca=false` is the high-signal condition to alert on. Root CA certificates (`is_ca=true`) are expected to be self-signed and are usually not a concern.
+> **Alert guidance**: filter `is_ca="false"` on `tls_certificate_self_signed == 1` to target non-CA self-signed certificates — the genuinely risky case. Root CA certificates (`is_ca="true"`) are legitimately self-signed and can be excluded. `is_ca="unknown"` means the certificate has no Basic Constraints extension, which itself is unusual for a modern cert and worth alerting on alongside `is_self_signed=1`.
+>
+> Example PromQL: `tls_certificate_self_signed{is_ca="false"} == 1`
