@@ -22,7 +22,7 @@ Instructions are below but if you prefer to watch video guides:
 ## Prerequisites
 
 - Linux x86_64, kernel >= 4.18 (eBPF kprobe/uprobe support required)
-- [Tetragon](https://tetragon.io) installed and running
+- [Tetragon](https://tetragon.io) installed and running (for policy-based eBPF hooking support)
 
 ---
 
