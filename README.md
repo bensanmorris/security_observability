@@ -37,7 +37,7 @@ sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
 
 The installer will fail with a clear error if Tetragon is not found.
 
-**Applying Tetragon policies:**
+**Applying our certificate-related Tetragon policies:**
 
 | Policy | Purpose | RHEL |
 |---|---|---|
