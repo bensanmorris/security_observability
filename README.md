@@ -224,6 +224,26 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 
 ---
 
+## Grafana dashboard
+
+A pre-built dashboard is included at [`extras/examples/grafana-dashboard.json`](extras/examples/grafana-dashboard.json).
+
+**Import:** Grafana → Dashboards → Import → upload the JSON file. Select your Prometheus datasource when prompted.
+
+The dashboard requires Grafana 9.0+ and is organised into five sections:
+
+| Section | Panels |
+|---|---|
+| **Overview** | Analyzer health, total certificates, expired, expiring ≤7/30 days, FIPS non-compliant, self-signed, last event age |
+| **Certificate Inventory** | Filterable/sortable table of all certificates with colour-coded expiry; expiry distribution donut; soonest-expiring bar gauge |
+| **FIPS Compliance** | Compliant vs non-compliant donut; key algorithm distribution; table of non-compliant certificates with algorithm and hash details |
+| **Security** | Self-signed certificate table; Tetragon build/runtime version match; Kafka delivery error rate; self-signed breakdown by namespace |
+| **Operational Health** | Event processing rate; analysis error rate by type; cache occupancy time series (vs configured cap); per-cache utilisation % bar gauge |
+
+Template variables at the top of the dashboard let you filter all panels by **Namespace** and **Node** simultaneously. Both default to "All", which also matches bare-metal deployments where namespace is empty.
+
+---
+
 ## Further reading
 
 - [Linux capabilities reference](linux-capabilities.md) - Required Linux capabilities for each component
