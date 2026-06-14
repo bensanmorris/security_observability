@@ -21,7 +21,7 @@ Instructions are below but if you prefer to watch video guides:
 
 ## Prerequisites
 
-- RHEL >= 8 (x86_64)
+- Linux x86_64, kernel >= 4.19 (eBPF kprobe/uprobe support required; driven by Tetragon)
 - [Tetragon](https://tetragon.io) installed and running
 
 ---
