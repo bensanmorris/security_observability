@@ -15,6 +15,8 @@ Instructions are below but if you prefer to watch video guides:
 
 - [CertSight - Installation & Operation](https://youtu.be/9QpfuU0TKec)
 
+![CertSight Grafana dashboard](extras/dashboard.png)
+
 ---
 
 ## Prerequisites
