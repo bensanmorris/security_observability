@@ -3,6 +3,34 @@
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 
+CertSight provides real-time runtime certificate observability for Linux via eBPF — without private keys, CA impersonation, or application changes.
+
+---
+
+## The problem
+
+Certificate expiry causes outages that are entirely preventable. At scale with hundreds of machines and thousands of certificates tracking what's actually running in your estate is hard, especially when certificates are loaded dynamically, passed in memory between TLS stack components, or processed by runtimes that never call system crypto libraries.
+
+## How CertSight differs from existing approaches
+
+| Approach | What it sees | What it misses |
+|---|---|---|
+| Network scanner | Certs on open ports | In-memory certs, internal services, file-only loads |
+| Binary scanner | Vulnerable components in artefacts at build time | Runtime execution paths, dynamically loaded certs |
+| Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
+| **CertSight** | Every cert access at runtime with process and k8s context | Statically linked crypto that never calls system libs |
+
+A binary scanner tells you what vulnerabilities exist in a single artifact at build time (an artifact in reality is just part of a binary tree of shared libraries). CertSight tells you which certificate operations are actually happening in your running estate right now. They answer different questions and are complementary — a clean binary scan does not mean your running certificates are healthy.
+
+An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
+
+## What CertSight detects
+
+- Every certificate file access system-wide via eBPF fd_install kprobe — PEM, DER, JKS, PKCS12
+- In-memory certificates post-handshake via OpenSSL and NSS uprobes — no private keys required
+- Java certificate operations in both FIPS and non-FIPS environments via the Java agent
+- Which process accessed which certificate, when, and from which Kubernetes pod
+
 Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of certificate accesses in realtime. Parses and surfaces certificate, process and k8s data (where applicable) as both Prometheus metrics and Kafka topics.
 
 Supports PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`).
@@ -141,8 +169,6 @@ sudo journalctl -u cert-analyzer -f
 # Metrics
 curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 ```
-
----
 
 ## Further reading
 
