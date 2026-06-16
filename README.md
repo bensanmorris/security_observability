@@ -26,7 +26,7 @@ An application is not a single binary. It is a tree of executables and shared li
 
 - Every certificate file access system-wide via eBPF fd_install kprobe (PEM, DER, JKS, PKCS12)
 - In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
-- Java certificate operations in both FIPS and non-FIPS environments via our Java agent / JNI to eBPF bridge
+- Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
 - Which process accessed which certificate, when, and from which Kubernetes pod
 
 Instructions are below but if you prefer to watch video guides:
