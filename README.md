@@ -20,8 +20,6 @@ Certificate expiry causes outages that are entirely preventable. At scale with h
 | Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
 | **CertSight** | Every cert access at runtime with process and k8s context | Statically linked crypto that never calls system libs |
 
-A binary scanner tells you what vulnerabilities exist in a single artifact at build time (an artifact in reality is just part of a binary tree of shared libraries). CertSight tells you which certificate operations are actually happening in your running estate right now. They answer different questions and are complementary — a clean binary scan does not mean your running certificates are healthy.
-
 An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
 
 ## What CertSight detects
