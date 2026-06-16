@@ -18,7 +18,7 @@ Certificate expiry causes outages that are entirely preventable. At scale with h
 | Network scanner | Certs on open ports | In-memory certs, internal services, file-only loads |
 | Binary scanner | Vulnerable components in artefacts at build time | Runtime execution paths, dynamically loaded certs |
 | Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
-| **CertSight** | Every cert access at runtime with process and k8s context | Statically linked crypto that never calls system libs (excluding Java / JCA - we've got that covered) |
+| **CertSight** | Every cert access at runtime with process and k8s context | Statically linked crypto that never calls system crypto libs (excluding Java / JCA - we've got that covered) |
 
 An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
 
