@@ -78,13 +78,13 @@ sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
 sudo systemctl enable --now cert-agent-deployer
 ```
 
-The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). Once the `.so` is mapped into a JVM process, load the policy:
+The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). Load the Tetragon policy after the RPMs are installed (no ordering constraint relative to the deployer or any running JVM):
 
 ```bash
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
 ```
 
-> **Note:** the policy must be loaded _after_ the deployer has attached to at least one JVM. Tetragon enumerates processes with `libcert_agent_stub.so` mapped at policy-load time — if no JVM has it mapped yet, the uprobe will not attach to JVMs that load it later.
+The uprobe is installed on the `libcert_agent_stub.so` file inode, so it automatically fires for any JVM that subsequently loads the library — including those the deployer attaches to after the policy is loaded.
 
 **Verifying with the probe-tests archive:**
 
@@ -104,9 +104,6 @@ sudo journalctl -u cert-agent-deployer -f
 # bundled SELinux module has not yet taken effect), attach manually as a one-off:
 sudo jattach <pid> load instrument false \
     /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
-
-# Once attached, load (or reload) the policy:
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
 
 # Confirm detection in cert-analyzer:
 sudo journalctl -u cert-analyzer -f | grep java_cert_agent_write
