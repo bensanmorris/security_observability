@@ -104,6 +104,7 @@ class CertificateInfo:
     namespace: str = ""
     common_name: str = ""
     san_dns_names: list = field(default_factory=list)
+    san_ip_addresses: list = field(default_factory=list)
     cert_index: int = 0
     # Kubernetes context sourced directly from the Tetragon event Pod proto
     pod_name: str = ""
@@ -179,6 +180,7 @@ class PrometheusMetrics:
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum']
         )
@@ -187,6 +189,7 @@ class PrometheusMetrics:
             'tls_certificate_expiry_timestamp',
             'Unix timestamp of certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum']
         )
@@ -195,6 +198,7 @@ class PrometheusMetrics:
             'tls_certificate_valid_from_timestamp',
             'Unix timestamp of certificate valid from date',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum']
         )
@@ -299,24 +303,26 @@ class PrometheusMetrics:
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
         labels = {
-            'cert_path':      info.path,
-            'subject':        info.subject[:100],
-            'issuer':         info.issuer[:100],
-            'serial':         info.serial_number,
-            'process':        info.process,
-            'common_name':    info.common_name,
-            'cert_index':     str(info.cert_index),
-            'pod_name':       info.pod_name,
-            'namespace':      info.namespace,
-            'workload_kind':  info.workload_kind,
-            'workload_name':  info.workload_name,
-            'node_name':      info.node_name,
-            'app_label':      info.app_label,
-            'container_name': info.container_name,
+            'cert_path':        info.path,
+            'subject':          info.subject[:100],
+            'issuer':           info.issuer[:100],
+            'serial':           info.serial_number,
+            'process':          info.process,
+            'common_name':      info.common_name,
+            'san_dns_names':    ','.join(info.san_dns_names),
+            'san_ip_addresses': ','.join(info.san_ip_addresses),
+            'cert_index':       str(info.cert_index),
+            'pod_name':         info.pod_name,
+            'namespace':        info.namespace,
+            'workload_kind':    info.workload_kind,
+            'workload_name':    info.workload_name,
+            'node_name':        info.node_name,
+            'app_label':        info.app_label,
+            'container_name':   info.container_name,
             # Empty string when CERT_CHECKSUM_ENABLED=false — Prometheus
             # handles empty label values cleanly and the label is simply
             # omitted from query results when filtering
-            'checksum':       info.checksum,
+            'checksum':         info.checksum,
         }
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
@@ -406,6 +412,7 @@ class KafkaPublisher:
         "serial_number":    "abc123",
         "common_name":      "example.com",
         "san_dns_names":    ["example.com", "www.example.com"],
+        "san_ip_addresses": ["10.96.0.1", "192.168.1.1"],
         "not_before":       "2024-01-01T00:00:00",
         "not_after":        "2025-01-01T00:00:00",
         "days_until_expiry": 44.9,
@@ -536,6 +543,7 @@ class KafkaPublisher:
             'serial_number':     cert_info.serial_number,
             'common_name':       cert_info.common_name,
             'san_dns_names':     cert_info.san_dns_names,
+            'san_ip_addresses':  cert_info.san_ip_addresses,
             'not_before':        cert_info.not_before.isoformat(),
             'not_after':         cert_info.not_after.isoformat(),
             'days_until_expiry': round(cert_info.days_until_expiry, 2),
@@ -1205,11 +1213,15 @@ class CertificateAnalyzer:
             common_name = ""
 
         san_dns_names = []
+        san_ip_addresses = []
         try:
             san_ext = cert.extensions.get_extension_for_oid(
                 x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
             )
             san_dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+            san_ip_addresses = [
+                str(ip) for ip in san_ext.value.get_values_for_type(x509.IPAddress)
+            ]
         except x509.ExtensionNotFound:
             pass
         except Exception as e:
@@ -1316,6 +1328,7 @@ class CertificateAnalyzer:
             namespace=namespace,
             common_name=common_name,
             san_dns_names=san_dns_names,
+            san_ip_addresses=san_ip_addresses,
             cert_index=cert_index,
             checksum=checksum,
             key_algorithm=fips_result.key_algorithm if fips_result is not None else '',
@@ -1476,6 +1489,8 @@ class CertificateAnalyzer:
         )
         if info.san_dns_names:
             detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+        if info.san_ip_addresses:
+            detail_log(f"   SAN IP:  {', '.join(info.san_ip_addresses[:5])}")
         if info.key_usage is not None or info.extended_key_usage is not None:
             ku  = ', '.join(info.key_usage)         if info.key_usage         else '—'
             eku = ', '.join(info.extended_key_usage) if info.extended_key_usage else '—'

@@ -32,6 +32,8 @@ All three share the same label set:
 | `serial` | X.509 | Decimal serial number as string |
 | `process` | Tetragon event | Binary path of the process that accessed the cert |
 | `common_name` | X.509 | CN from the Subject, empty if absent |
+| `san_dns_names` | X.509 | Comma-joined DNS SANs; empty string if none |
+| `san_ip_addresses` | X.509 | Comma-joined IP SANs; empty string if none |
 | `cert_index` | Internal | 0-based index within a multi-cert PEM file |
 | `pod_name` | Tetragon / k8s | Empty on bare metal |
 | `namespace` | Tetragon / k8s | Empty on bare metal |
@@ -110,6 +112,7 @@ unique per certificate, and rotated when the cert at a path changes.
   "serial_number":     "123456789",
   "common_name":       "my-service",
   "san_dns_names":     ["my-service.example.com", "my-service"],
+  "san_ip_addresses":  ["10.96.0.1", "192.168.1.100"],
 
   "not_before":        "2025-01-01T00:00:00",
   "not_after":         "2026-01-01T00:00:00",
@@ -173,6 +176,7 @@ unique per certificate, and rotated when the cert at a path changes.
 | `serial_number` | string | Decimal serial number |
 | `common_name` | string | CN from Subject; empty if absent |
 | `san_dns_names` | string[] | DNS SANs; empty list if none |
+| `san_ip_addresses` | string[] | IP SANs as strings (IPv4 or IPv6); empty list if none |
 
 #### Validity
 

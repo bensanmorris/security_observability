@@ -81,7 +81,7 @@
   "timezone": "browser",
   "title": "CertSight",
   "uid": "certsight-v1",
-  "version": 1,
+  "version": 2,
   "templating": {
     "list": [
       {
@@ -473,25 +473,29 @@
             },
             "indexByName": {
               "common_name": 0,
-              "cert_path": 1,
-              "issuer": 2,
-              "namespace": 3,
-              "workload_kind": 4,
-              "workload_name": 5,
-              "pod_name": 6,
-              "container_name": 7,
-              "node_name": 8,
-              "process": 9,
-              "app_label": 10,
-              "cert_index": 11,
-              "serial": 12,
-              "subject": 13,
-              "Value": 14
+              "san_dns_names": 1,
+              "san_ip_addresses": 2,
+              "cert_path": 3,
+              "issuer": 4,
+              "namespace": 5,
+              "workload_kind": 6,
+              "workload_name": 7,
+              "pod_name": 8,
+              "container_name": 9,
+              "node_name": 10,
+              "process": 11,
+              "app_label": 12,
+              "cert_index": 13,
+              "serial": 14,
+              "subject": 15,
+              "Value": 16
             },
             "renameByName": {
               "Value": "Days Until Expiry",
               "cert_path": "Path",
               "common_name": "Common Name",
+              "san_dns_names": "DNS SANs",
+              "san_ip_addresses": "IP SANs",
               "issuer": "Issuer",
               "namespace": "Namespace",
               "workload_kind": "Workload Kind",
@@ -988,18 +992,129 @@
       "fieldConfig": {"defaults": {}, "overrides": []}
     },
     {
+      "id": 27,
+      "title": "Certificates with IP SANs",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 41},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\",san_ip_addresses!=\"\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "checksum": true,
+              "cert_index": true,
+              "serial": true,
+              "subject": true,
+              "issuer": true,
+              "app_label": true,
+              "workload_kind": true,
+              "container_name": true
+            },
+            "indexByName": {
+              "common_name": 0,
+              "san_ip_addresses": 1,
+              "san_dns_names": 2,
+              "cert_path": 3,
+              "namespace": 4,
+              "workload_name": 5,
+              "pod_name": 6,
+              "node_name": 7,
+              "process": 8,
+              "Value": 9
+            },
+            "renameByName": {
+              "Value": "Days Until Expiry",
+              "common_name": "Common Name",
+              "san_ip_addresses": "IP SANs",
+              "san_dns_names": "DNS SANs",
+              "cert_path": "Path",
+              "namespace": "Namespace",
+              "workload_name": "Workload",
+              "pod_name": "Pod",
+              "node_name": "Node",
+              "process": "Process"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [{"displayName": "Days Until Expiry", "desc": false}]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{"displayName": "Days Until Expiry", "desc": false}]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "IP SANs"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background"},
+              {"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Days Until Expiry"},
+            "properties": [
+              {"id": "unit", "value": "none"},
+              {"id": "decimals", "value": 1},
+              {"id": "custom.displayMode", "value": "color-background"},
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "dark-red", "value": null},
+                    {"color": "red", "value": 0},
+                    {"color": "orange", "value": 7},
+                    {"color": "yellow", "value": 30},
+                    {"color": "green", "value": 90}
+                  ]
+                }
+              },
+              {"id": "color", "value": {"mode": "thresholds"}}
+            ]
+          }
+        ]
+      }
+    },
+    {
       "id": 22,
       "title": "Operational Health",
       "type": "row",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 41},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 49},
       "panels": []
     },
     {
       "id": 23,
       "title": "Certificate Event Rate",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "targets": [
         {
@@ -1032,7 +1147,7 @@
       "id": 24,
       "title": "Analysis Error Rate by Type",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 50},
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "targets": [
         {
@@ -1070,7 +1185,7 @@
       "id": 25,
       "title": "Cache Occupancy",
       "type": "timeseries",
-      "gridPos": {"h": 6, "w": 16, "x": 0, "y": 50},
+      "gridPos": {"h": 6, "w": 16, "x": 0, "y": 58},
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "targets": [
         {
@@ -1129,7 +1244,7 @@
       "id": 26,
       "title": "Cache Utilization",
       "type": "bargauge",
-      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 50},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 58},
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "targets": [
         {
