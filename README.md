@@ -24,8 +24,8 @@ An application is not a single binary. It is a tree of executables and shared li
 
 ## What CertSight detects
 
-- Every certificate file access system-wide via eBPF fd_install kprobe — PEM, DER, JKS, PKCS12
-- In-memory certificates post-handshake via OpenSSL and NSS uprobes — no private keys required
+- Every certificate file access system-wide via eBPF fd_install kprobe (PEM, DER, JKS, PKCS12)
+- In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
 - Java certificate operations in both FIPS and non-FIPS environments via the Java agent
 - Which process accessed which certificate, when, and from which Kubernetes pod
 
