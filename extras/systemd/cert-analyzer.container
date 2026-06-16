@@ -1,0 +1,37 @@
+[Unit]
+Description=TLS Certificate Expiry Monitor (Quadlet)
+Documentation=https://github.com/your-org/cert-expiry-monitor
+After=tetragon.service
+Requires=tetragon.service
+
+[Container]
+Image=localhost/cert-analyzer:latest
+ContainerName=cert-analyzer
+AutoUpdate=registry
+
+# Network and PID
+Network=host
+PodmanArgs=--pid=host
+
+# Volumes
+Volume=/run/cilium/tetragon/tetragon.sock:/var/run/cilium/tetragon/tetragon.sock:Z
+Volume=/:/host:ro,rslave
+
+# Environment variables
+Environment=TETRAGON_ADDR=unix:///var/run/cilium/tetragon/tetragon.sock
+Environment=METRICS_PORT=9090
+Environment=ALERT_THRESHOLD_DAYS=30
+Environment=LOG_LEVEL=INFO
+Environment=CERT_SCAN_PATHS=/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki
+Environment=SCAN_INTERVAL_SECONDS=3600
+
+# Security
+SecurityLabelDisable=false
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target default.target

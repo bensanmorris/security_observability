@@ -30,6 +30,10 @@ SyslogIdentifier=cert-analyzer
 
 # Security hardening
 NoNewPrivileges=true
+# CAP_SYS_PTRACE is required to read /proc/{pid}/exe for processes owned by
+# other users, so that truncated Tetragon binary paths can be fully resolved.
+AmbientCapabilities=CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_SYS_PTRACE
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true

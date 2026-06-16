@@ -1,0 +1,58 @@
+[Unit]
+Description=cert-agent JVM Deployer
+Documentation=https://github.com/your-org/cert-analyzer
+# Start after the network is up; no hard dependency on cert-analyzer since
+# the deployer and analyzer are independent consumers of the agent.
+After=network.target
+
+[Service]
+Type=simple
+
+# jattach requires the same UID as the target JVM or CAP_SYS_PTRACE to attach
+# to processes owned by other users.  Running as root satisfies both.
+User=root
+Group=root
+
+# Pin to unconfined_service_t so the bundled SELinux policy module covers all
+# required permissions (ptrace, signal, /proc reads, /tmp socket access).
+# The cert-agent-deployer.pp module installed by the RPM grants these.
+SELinuxContext=system_u:system_r:unconfined_service_t:s0
+
+ExecStart=/usr/bin/python3 /opt/cert-agent-deployer/java_agent_deployer.py \
+    --agent-jar  /opt/cert-agent/cert-agent.jar \
+    --native-lib /opt/cert-agent/libcert_agent_stub.so \
+    --jattach    /opt/cert-agent-deployer/jattach
+
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cert-agent-deployer
+
+# Harden where possible given the root requirement.
+# CAP_SYS_PTRACE: read /proc/<pid>/exe for JVMs owned by other users.
+# CAP_DAC_READ_SEARCH: open /proc/<pid>/cmdline for any UID.
+# CAP_KILL: send SIGQUIT to JVMs owned by a different user.
+# CAP_SETUID/CAP_SETGID: jattach switches credentials to match the target JVM
+#   before connecting to its attach socket; setresuid/setresgid require these
+#   even for UID 0 once they are absent from the capability bounding set.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETUID CAP_SETGID
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Needs read access to /proc, /opt/cert-agent (JAR + .so), and the deployer dir.
+ReadOnlyPaths=/opt/cert-agent /opt/cert-agent-deployer
+
+LimitNOFILE=4096
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

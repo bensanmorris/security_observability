@@ -609,6 +609,47 @@ class TestCABundles:
         assert not cert_infos[2].is_expired  # Leaf is valid
 
 
+class MockTetragonContainer:
+    """
+    Minimal mock of the Tetragon Container proto object.
+    Mirrors the fields read in _apply_pod_context (v1.7.0 schema).
+    """
+    def __init__(
+        self,
+        id: str = "abc123",
+        name: str = "",
+        image_name: str = "",
+        image_id: str = "",
+        maybe_exec_probe: bool = False,
+        pid: int = None,
+        start_time=None,
+        privileged: bool = None,
+    ):
+        from types import SimpleNamespace
+        self.id               = id
+        self.name             = name
+        self.image            = SimpleNamespace(name=image_name, id=image_id)
+        self.maybe_exec_probe = maybe_exec_probe
+        self._pid             = pid
+        self._start_time      = start_time
+        self._privileged      = privileged
+        if pid is not None:
+            self.pid = SimpleNamespace(value=pid)
+        if start_time is not None:
+            self.start_time = SimpleNamespace(ToDatetime=lambda: start_time)
+        if privileged is not None:
+            self.security_context = SimpleNamespace(privileged=privileged)
+
+    def HasField(self, name):
+        if name == 'pid':
+            return self._pid is not None
+        if name == 'start_time':
+            return self._start_time is not None
+        if name == 'security_context':
+            return self._privileged is not None
+        return False
+
+
 class MockTetragonPod:
     """
     Minimal mock of the Tetragon pod proto object.
@@ -622,12 +663,18 @@ class MockTetragonPod:
         workload_kind: str = "Deployment",
         workload: str = "test-deployment",
         pod_labels: dict = None,
+        pod_annotations: dict = None,
+        uid: str = "",
+        container: 'MockTetragonContainer' = None,
     ):
-        self.name          = name
-        self.namespace     = namespace
-        self.workload_kind = workload_kind
-        self.workload      = workload
-        self.pod_labels    = pod_labels or {}
+        self.name            = name
+        self.namespace       = namespace
+        self.workload_kind   = workload_kind
+        self.workload        = workload
+        self.pod_labels      = pod_labels or {}
+        self.pod_annotations = pod_annotations or {}
+        self.uid             = uid
+        self.container       = container if container is not None else MockTetragonContainer()
 
 
 class MockK8sEnricher:
@@ -758,36 +805,36 @@ class TestK8sEnricherSecondaryPath:
     that supplements fields Tetragon doesn't provide (container name/image).
     """
 
-    def test_container_fields_populated_by_enricher(self, analyzer):
-        """container_name and container_image are filled in by the k8s enricher."""
-        analyzer.enricher = MockK8sEnricher(
-            container_name="app-container",
-            container_image="myrepo/myapp:v2.3.1",
-        )
+    def test_container_fields_populated_from_tetragon_proto(self, analyzer):
+        """container_name and container_image are read from the Tetragon Container proto."""
         cert_info    = _make_cert_info()
-        tetragon_pod = MockTetragonPod(name="mypod", namespace="default")
+        tetragon_pod = MockTetragonPod(
+            name="mypod",
+            namespace="default",
+            container=MockTetragonContainer(
+                name="app-container",
+                image_name="myrepo/myapp:v2.3.1",
+            ),
+        )
 
         analyzer._apply_pod_context(cert_info, tetragon_pod)
 
         assert cert_info.container_name  == "app-container"
         assert cert_info.container_image == "myrepo/myapp:v2.3.1"
 
-    def test_enricher_not_called_when_unavailable(self, analyzer):
-        """Enricher is skipped when enricher.available is False."""
-        mock           = MockK8sEnricher()
-        mock.available = False
-        analyzer.enricher = mock
+    def test_container_fields_empty_when_container_has_no_data(self, analyzer):
+        """container_name and container_image default to empty when container fields are unset."""
         cert_info    = _make_cert_info()
         tetragon_pod = MockTetragonPod(name="mypod", namespace="default")
+        # Default MockTetragonContainer has empty name/image
 
         analyzer._apply_pod_context(cert_info, tetragon_pod)
 
         assert cert_info.container_name  == ""
         assert cert_info.container_image == ""
 
-    def test_enricher_not_called_when_pod_name_missing(self, analyzer):
-        """Enricher is skipped when pod name is absent (no Tetragon pod context)."""
-        analyzer.enricher = MockK8sEnricher()
+    def test_container_fields_absent_when_no_pod_context(self, analyzer):
+        """Container fields stay empty when there is no Tetragon pod context at all."""
         cert_info = _make_cert_info()
 
         analyzer._apply_pod_context(cert_info, None)
@@ -795,9 +842,8 @@ class TestK8sEnricherSecondaryPath:
         assert cert_info.container_name  == ""
         assert cert_info.container_image == ""
 
-    def test_tetragon_fields_not_overwritten_by_enricher(self, analyzer):
-        """Tetragon-sourced fields (pod_name, workload etc.) are not touched by the enricher."""
-        analyzer.enricher = MockK8sEnricher()
+    def test_tetragon_pod_fields_set_alongside_container(self, analyzer):
+        """Pod-level fields (pod_name, workload etc.) are correctly set from the proto."""
         cert_info    = _make_cert_info()
         tetragon_pod = MockTetragonPod(
             name="original-pod",
@@ -810,6 +856,69 @@ class TestK8sEnricherSecondaryPath:
         assert cert_info.pod_name      == "original-pod"
         assert cert_info.workload_kind == "StatefulSet"
         assert cert_info.workload_name == "my-statefulset"
+
+    def test_pod_uid_populated_when_present(self, analyzer):
+        """pod.uid (Tetragon v1.6.0+) is captured when the server supplies it."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(uid="550e8400-e29b-41d4-a716-446655440000")
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_uid == "550e8400-e29b-41d4-a716-446655440000"
+
+    def test_pod_uid_stays_empty_when_server_is_old(self, analyzer):
+        """pod.uid is left empty when the server returns an empty string (pre-v1.6.0)."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(uid="")
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_uid == ""
+
+    def test_pod_annotations_populated_when_present(self, analyzer):
+        """pod.pod_annotations (Tetragon v1.5.0+) is captured when the server supplies it."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(
+            pod_annotations={"prometheus.io/scrape": "true", "sidecar.istio.io/inject": "false"},
+        )
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_annotations == {
+            "prometheus.io/scrape": "true",
+            "sidecar.istio.io/inject": "false",
+        }
+
+    def test_pod_annotations_empty_dict_when_server_is_old(self, analyzer):
+        """pod.pod_annotations is an empty dict when the server supplies nothing (pre-v1.5.0)."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(pod_annotations={})
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.pod_annotations == {}
+
+    def test_container_privileged_set_when_security_context_present(self, analyzer):
+        """container.security_context.privileged (Tetragon v1.5.0+) is captured when supplied."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(
+            container=MockTetragonContainer(privileged=True),
+        )
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.container_privileged is True
+
+    def test_container_privileged_false_when_security_context_absent(self, analyzer):
+        """container_privileged stays False when the server doesn't send security_context (pre-v1.5.0)."""
+        cert_info    = _make_cert_info()
+        tetragon_pod = MockTetragonPod(
+            container=MockTetragonContainer(privileged=None),
+        )
+
+        analyzer._apply_pod_context(cert_info, tetragon_pod)
+
+        assert cert_info.container_privileged is False
 
 
 class TestLogCertificateStatusOutput:
@@ -1129,8 +1238,11 @@ class TestJKSParsing:
                 tried.append(password)
                 raise Exception("wrong password")
 
-        import jks as _jks_mod
-        monkeypatch.setattr(_jks_mod, 'KeyStore', _CapturingKeyStore)
+        import types
+        jks_stub = types.ModuleType('jks')
+        jks_stub.KeyStore = _CapturingKeyStore
+        jks_stub.util = types.SimpleNamespace(BadKeystoreFormatException=Exception)
+        monkeypatch.setattr(_ca, 'jks', jks_stub, raising=False)
 
         jks_path = os.path.join(temp_dir, "pw-list.jks")
         with open(jks_path, 'wb') as f:
@@ -1299,6 +1411,7 @@ class TestProcessEventTimestamp:
                 self.args    = [_MockArg(path)]
 
         class _MockEvent:
+            node_name = ''
             def __init__(self_, path):
                 self_._kprobe = _MockKprobe(path)
             def HasField(self_, name):
@@ -1718,6 +1831,457 @@ class TestChecksum:
         # Must still return cert info — checksum failure is non-fatal
         assert len(cert_infos) == 1
         assert cert_infos[0].checksum == ""
+
+
+class TestFipsComplianceEnabled:
+    """
+    Tests for the fips_compliance_enabled config option.
+
+    When True (the default): FIPS compliance is checked per-certificate and the
+    results are stored in CertificateInfo fields and emitted as Prometheus metrics.
+
+    When False: the check is skipped entirely — FIPS fields stay at empty defaults,
+    the cert_fips_compliant metric is not emitted, and no FIPS log lines appear.
+    """
+
+    # ── Default / instance behaviour ──────────────────────────────────────────
+
+    def test_fips_compliance_enabled_by_default(self, analyzer):
+        """fips_compliance_enabled defaults to True on a new analyzer instance."""
+        assert analyzer.fips_compliance_enabled is True
+
+    def test_fips_fields_populated_when_enabled(self, analyzer, temp_dir):
+        """FIPS fields on CertificateInfo are populated when fips_compliance_enabled=True."""
+        assert analyzer.fips_compliance_enabled is True
+
+        cert, _ = TestCertificateGeneration.generate_certificate("fips-on.example.com", 365)
+        path = os.path.join(temp_dir, "fips-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        # generate_certificate produces RSA-2048 / SHA-256 — always compliant
+        assert info.key_algorithm == 'RSA'
+        assert info.key_size == 2048
+        assert info.signature_hash == 'sha256'
+        assert info.fips_compliant is True
+        assert info.fips_violations == []
+
+    def test_fips_fields_empty_when_disabled(self, analyzer, temp_dir):
+        """FIPS fields are at empty defaults when fips_compliance_enabled=False."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("fips-off.example.com", 365)
+        path = os.path.join(temp_dir, "fips-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.key_algorithm == ''
+        assert info.key_size == 0
+        assert info.signature_hash == ''
+        assert info.curve_name == ''
+        assert info.fips_compliant is False
+        assert info.fips_violations == []
+
+    def test_multi_cert_bundle_all_skipped_when_disabled(self, analyzer, temp_dir):
+        """All certs in a multi-cert bundle have empty FIPS fields when disabled."""
+        analyzer.fips_compliance_enabled = False
+
+        certs_and_keys = [
+            TestCertificateGeneration.generate_certificate(f"multi{i}.example.com", 365)
+            for i in range(3)
+        ]
+        path = os.path.join(temp_dir, "bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(
+            [c for c, _ in certs_and_keys], path
+        )
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 3
+        for info in cert_infos:
+            assert info.key_algorithm == ''
+            assert info.fips_compliant is False
+            assert info.fips_violations == []
+
+    # ── _fips_check() call gating ──────────────────────────────────────────────
+
+    def test_fips_check_not_called_when_disabled(self, analyzer, temp_dir, monkeypatch):
+        """_fips_check() is never invoked when fips_compliance_enabled=False."""
+        analyzer.fips_compliance_enabled = False
+
+        calls = []
+
+        import cert_analyzer as _ca
+        from fips_compliance_checker import check_certificate as _real
+
+        def _spy(cert, **kwargs):
+            calls.append(cert)
+            return _real(cert, **kwargs)
+
+        monkeypatch.setattr(_ca, '_fips_check', _spy)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("skip.example.com", 365)
+        path = os.path.join(temp_dir, "skip.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer.analyze_certificate(path, "test", 1)
+        assert calls == [], "_fips_check must not be called when fips_compliance_enabled=False"
+
+    def test_fips_check_called_when_enabled(self, analyzer, temp_dir, monkeypatch):
+        """_fips_check() is called once per certificate when fips_compliance_enabled=True."""
+        assert analyzer.fips_compliance_enabled is True
+
+        calls = []
+
+        import cert_analyzer as _ca
+        from fips_compliance_checker import check_certificate as _real
+
+        def _spy(cert, **kwargs):
+            calls.append(cert)
+            return _real(cert, **kwargs)
+
+        monkeypatch.setattr(_ca, '_fips_check', _spy)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("check.example.com", 365)
+        path = os.path.join(temp_dir, "check.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer.analyze_certificate(path, "test", 1)
+        assert len(calls) == 1, "_fips_check must be called exactly once when enabled"
+
+    def test_fips_check_error_is_non_fatal(self, analyzer, temp_dir, monkeypatch):
+        """If _fips_check() raises, extract_certificate_info still returns CertificateInfo."""
+        import cert_analyzer as _ca
+
+        def _raising(cert, **kwargs):
+            raise RuntimeError("simulated fips error")
+
+        monkeypatch.setattr(_ca, '_fips_check', _raising)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("fips-err.example.com", 365)
+        path = os.path.join(temp_dir, "fips-err.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.fips_compliant is False
+        assert 'FIPS check error' in info.fips_violations
+
+    # ── Prometheus metric gating ───────────────────────────────────────────────
+
+    def test_prometheus_metric_emitted_when_enabled(self, analyzer, temp_dir):
+        """cert_fips_compliant metric has samples after update_certificate_metrics when enabled."""
+        assert analyzer.fips_compliance_enabled is True
+
+        cert, _ = TestCertificateGeneration.generate_certificate("metric-on.example.com", 365)
+        path = os.path.join(temp_dir, "metric-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        samples = list(analyzer.metrics.cert_fips_compliant.collect()[0].samples)
+        assert len(samples) > 0, \
+            "cert_fips_compliant must have at least one sample when FIPS checking is enabled"
+
+    def test_prometheus_metric_not_emitted_when_disabled(self, analyzer, temp_dir):
+        """cert_fips_compliant metric has no samples after update_certificate_metrics when disabled."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("metric-off.example.com", 365)
+        path = os.path.join(temp_dir, "metric-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        samples = list(analyzer.metrics.cert_fips_compliant.collect()[0].samples)
+        assert len(samples) == 0, \
+            "cert_fips_compliant must have no samples when FIPS checking is disabled"
+
+    def test_prometheus_metric_value_one_for_compliant_cert(self, analyzer, temp_dir):
+        """cert_fips_compliant metric is set to 1.0 for a FIPS-compliant certificate."""
+        cert, _ = TestCertificateGeneration.generate_certificate("compliant.example.com", 365)
+        path = os.path.join(temp_dir, "compliant.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        samples = list(analyzer.metrics.cert_fips_compliant.collect()[0].samples)
+        assert len(samples) == 1
+        assert samples[0].value == 1.0
+
+    # ── Logging output ─────────────────────────────────────────────────────────
+
+    def test_compliant_cert_fips_line_logged_when_enabled(self, analyzer, temp_dir, caplog):
+        """A FIPS-compliant cert produces a 'FIPS: compliant' log line when enabled."""
+        cert, _ = TestCertificateGeneration.generate_certificate("log-on.example.com", 365)
+        path = os.path.join(temp_dir, "log-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+
+        with caplog.at_level(logging.DEBUG):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        assert any(
+            'FIPS' in r.message and 'compliant' in r.message
+            for r in caplog.records
+        ), "Expected a FIPS compliant log line when fips_compliance_enabled=True"
+
+    def test_no_fips_log_lines_when_disabled(self, analyzer, temp_dir, caplog):
+        """No FIPS log lines appear when fips_compliance_enabled=False."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("log-off.example.com", 365)
+        path = os.path.join(temp_dir, "log-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+
+        with caplog.at_level(logging.DEBUG):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        fips_lines = [r for r in caplog.records if 'FIPS' in r.message]
+        assert fips_lines == [], \
+            f"Expected no FIPS log lines when disabled, got: {[r.message for r in fips_lines]}"
+
+    def test_fips_violation_logged_as_warning_when_enabled(self, analyzer, temp_dir, caplog):
+        """FIPS violations are logged as WARNING when fips_compliance_enabled=True."""
+        cert, _ = TestCertificateGeneration.generate_certificate("warn.example.com", 365)
+        path = os.path.join(temp_dir, "warn.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert cert_infos
+        info = cert_infos[0]
+        # Inject a violation to simulate a non-compliant cert
+        info.fips_compliant = False
+        info.fips_violations = ["Signature hash 'sha1' is not FIPS-approved (use SHA-256 or stronger)"]
+
+        with caplog.at_level(logging.WARNING):
+            analyzer.log_certificate_status(info)
+
+        assert any('FIPS NON-COMPLIANT' in r.message for r in caplog.records), \
+            "Expected a FIPS NON-COMPLIANT warning when violations are present"
+
+    # ── Config file / env var resolution ──────────────────────────────────────
+
+    def test_disabled_via_config_file(self):
+        """cfg() resolves to 'false' when config file sets fips_compliance_enabled = false."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'fips_compliance_enabled': 'false'}})
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'false'
+
+    def test_enabled_via_config_file(self):
+        """cfg() resolves to 'true' when config file sets fips_compliance_enabled = true."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'fips_compliance_enabled': 'true'}})
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'true'
+
+    def test_disabled_via_env_var(self, monkeypatch):
+        """cfg() resolves to 'false' from FIPS_COMPLIANCE_ENABLED=false when no config entry."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.setenv('FIPS_COMPLIANCE_ENABLED', 'false')
+        cp = configparser.ConfigParser()
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'false'
+
+    def test_config_file_takes_precedence_over_env_var(self, monkeypatch):
+        """Config file value overrides env var — config enabled wins over env disabled."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.setenv('FIPS_COMPLIANCE_ENABLED', 'false')  # env says disabled
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'fips_compliance_enabled': 'true'}})  # config says enabled
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'true'  # config file wins
+
+    def test_default_is_enabled_when_no_config_or_env(self, monkeypatch):
+        """fips_compliance_enabled defaults to 'true' when neither config nor env var is set."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.delenv('FIPS_COMPLIANCE_ENABLED', raising=False)
+        cp = configparser.ConfigParser()
+        result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
+        assert result.lower() == 'true'
+
+
+class TestRFC5280Extensions:
+    """Tests for Key Usage, Extended Key Usage, and Basic Constraints extraction."""
+
+    @staticmethod
+    def _build_cert(key_usage_ext=None, eku_ext=None, bc_ext=None):
+        """Return a signed x509.Certificate with the given optional extensions."""
+        private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048, backend=default_backend()
+        )
+        now = datetime.utcnow()
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")]))
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=365))
+        )
+        if key_usage_ext is not None:
+            builder = builder.add_extension(key_usage_ext, critical=True)
+        if eku_ext is not None:
+            builder = builder.add_extension(eku_ext, critical=False)
+        if bc_ext is not None:
+            builder = builder.add_extension(bc_ext, critical=True)
+        return builder.sign(private_key, hashes.SHA256(), backend=default_backend())
+
+    def _analyze(self, analyzer, temp_dir, cert):
+        path = os.path.join(temp_dir, "ext-test.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        infos = analyzer.analyze_certificate(path, "test", 0)
+        assert len(infos) == 1
+        return infos[0]
+
+    # ── Key Usage ────────────────────────────────────────────────────────────
+
+    def test_key_usage_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage is None
+
+    def test_key_usage_digital_signature_and_key_encipherment(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=True, content_commitment=False, key_encipherment=True,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage == ['digital_signature', 'key_encipherment']
+
+    def test_key_usage_ca_flags(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=True,
+            crl_sign=True, encipher_only=False, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage == ['key_cert_sign', 'crl_sign']
+
+    def test_key_usage_empty_bitstring(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.key_usage == []
+
+    def test_key_usage_encipher_only_included_when_key_agreement_set(self, analyzer, temp_dir):
+        ku = x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=True, key_cert_sign=False,
+            crl_sign=False, encipher_only=True, decipher_only=False,
+        )
+        cert = self._build_cert(key_usage_ext=ku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert 'key_agreement' in info.key_usage
+        assert 'encipher_only' in info.key_usage
+
+    # ── Extended Key Usage ───────────────────────────────────────────────────
+
+    def test_extended_key_usage_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage is None
+
+    def test_extended_key_usage_server_and_client_auth(self, analyzer, temp_dir):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH])
+        cert = self._build_cert(eku_ext=eku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage == ['server_auth', 'client_auth']
+
+    def test_extended_key_usage_code_signing(self, analyzer, temp_dir):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING])
+        cert = self._build_cert(eku_ext=eku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage == ['code_signing']
+
+    def test_extended_key_usage_unknown_oid_falls_back_to_dotted_string(self, analyzer, temp_dir):
+        # 1.3.6.1.4.1.311.10.3.4 is Microsoft EFS — not in _EKU_NAMES
+        unknown_oid = x509.ObjectIdentifier('1.3.6.1.4.1.311.10.3.4')
+        eku = x509.ExtendedKeyUsage([unknown_oid])
+        cert = self._build_cert(eku_ext=eku)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.extended_key_usage == ['1.3.6.1.4.1.311.10.3.4']
+
+    # ── Basic Constraints ────────────────────────────────────────────────────
+
+    def test_basic_constraints_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is None
+        assert info.basic_constraints_path_length is None
+
+    def test_basic_constraints_end_entity(self, analyzer, temp_dir):
+        bc = x509.BasicConstraints(ca=False, path_length=None)
+        cert = self._build_cert(bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is False
+        assert info.basic_constraints_path_length is None
+
+    def test_basic_constraints_ca_no_path_length(self, analyzer, temp_dir):
+        bc = x509.BasicConstraints(ca=True, path_length=None)
+        cert = self._build_cert(bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is True
+        assert info.basic_constraints_path_length is None
+
+    def test_basic_constraints_ca_with_path_length(self, analyzer, temp_dir):
+        bc = x509.BasicConstraints(ca=True, path_length=0)
+        cert = self._build_cert(bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.is_ca is True
+        assert info.basic_constraints_path_length == 0
+
+    # ── All three extensions present together ────────────────────────────────
+
+    def test_all_three_extensions_extracted_together(self, analyzer, temp_dir):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        ku = x509.KeyUsage(
+            digital_signature=True, content_commitment=False, key_encipherment=True,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        )
+        eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
+        bc = x509.BasicConstraints(ca=False, path_length=None)
+        cert = self._build_cert(key_usage_ext=ku, eku_ext=eku, bc_ext=bc)
+        info = self._analyze(analyzer, temp_dir, cert)
+
+        assert info.key_usage == ['digital_signature', 'key_encipherment']
+        assert info.extended_key_usage == ['server_auth']
+        assert info.is_ca is False
+        assert info.basic_constraints_path_length is None
 
 
 if __name__ == "__main__":
@@ -2676,6 +3240,7 @@ class TestKafkaPublisher:
             pod_name='my-pod',
             workload_kind='Deployment',
             workload_name='my-app',
+            node_name='worker-node-1',
             pod_labels={'app': 'my-app'},
             app_label='my-app',
             container_name='main',
@@ -2816,7 +3381,7 @@ class TestKafkaPublisher:
                 'subject', 'issuer', 'serial_number', 'common_name',
                 'san_dns_names', 'not_before', 'not_after',
                 'days_until_expiry', 'is_expired', 'process', 'pid',
-                'namespace', 'pod_name', 'workload_kind', 'workload_name',
+                'namespace', 'pod_name', 'node_name', 'workload_kind', 'workload_name',
                 'app_label', 'container_name', 'container_image', 'checksum',
             ]
             for field in required_fields:
@@ -2845,6 +3410,7 @@ class TestKafkaPublisher:
             assert msg['pid']           == 12345
             assert msg['pod_name']      == 'my-pod'
             assert msg['namespace']     == 'default'
+            assert msg['node_name']     == 'worker-node-1'
             assert msg['workload_kind'] == 'Deployment'
             assert msg['workload_name'] == 'my-app'
             assert msg['san_dns_names'] == ['test.example.com', 'www.test.example.com']
@@ -2985,6 +3551,36 @@ class TestKafkaPublisher:
         mock_publisher.publish.assert_called_once()
         published_cert = mock_publisher.publish.call_args[0][0]
         assert published_cert.path == path
+
+    def test_node_name_propagated_from_event_to_cert_info(
+        self, analyzer, temp_dir
+    ):
+        """node_name from GetEventsResponse is written to CertificateInfo and published."""
+        from unittest.mock import MagicMock
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        cert, _ = TestCertificateGeneration.generate_certificate('node-test.example.com', 365)
+        path = os.path.join(temp_dir, 'node-test.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        mock_event = MagicMock()
+        mock_event.node_name = 'worker-node-42'
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = '/usr/bin/curl'
+        mock_kprobe.process.pid.value = 99
+        mock_kprobe.process.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+
+        analyzer.process_event(mock_event)
+
+        published_cert = mock_publisher.publish.call_args[0][0]
+        assert published_cert.node_name == 'worker-node-42'
 
     def test_analyzer_does_not_publish_redetected_cert(
         self, analyzer, temp_dir, monkeypatch
@@ -3379,7 +3975,7 @@ class TestOpensslUprobeHooking:
     - File-path hooks (SSL_CTX_use_certificate_file / SSL_CTX_use_certificate_chain_file):
       cert path is carried in a string_arg and handled by the existing
       extract_cert_path_from_event / process_event flow.
-    - In-memory hooks (d2i_X509): raw DER bytes arrive in a bytes_arg and are
+    - In-memory hooks (SSL_CTX_use_certificate_ASN1): raw DER bytes arrive in a bytes_arg and are
       handled by _handle_uprobe_in_memory_cert, which parses them directly
       without touching the filesystem.
     """
@@ -3408,13 +4004,15 @@ class TestOpensslUprobeHooking:
         return arg
 
     @staticmethod
-    def _make_uprobe_event(args, pid=1234, binary='/usr/bin/nginx', has_pod=False):
+    def _make_uprobe_event(args, pid=1234, binary='/usr/bin/nginx', has_pod=False,
+                           symbol='SSL_CTX_use_certificate_ASN1'):
         """Build a minimal mock process_uprobe event."""
         from unittest.mock import MagicMock
 
         mock_uprobe = MagicMock()
         mock_uprobe.process.binary = binary
         mock_uprobe.process.pid.value = pid
+        mock_uprobe.symbol = symbol
 
         if has_pod:
             mock_uprobe.process.HasField.side_effect = lambda f: f in ('pid', 'pod')
@@ -3516,14 +4114,15 @@ class TestOpensslUprobeHooking:
         assert len(analyzer.known_certs) == 1
 
     def test_handle_bytes_synthetic_path_format(self, analyzer):
-        """CertificateInfo.path uses the uprobe://d2i_X509/<pid>/<serial> scheme."""
+        """CertificateInfo.path uses the uprobe://<symbol>/<pid>/<serial> scheme."""
         cert, der = self._cert_der()
         serial = str(cert.serial_number)
-        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=5678)
+        event = self._make_uprobe_event([self._make_bytes_arg(der)], pid=5678,
+                                        symbol='SSL_CTX_use_certificate_ASN1')
         analyzer._handle_uprobe_in_memory_cert(event)
 
         stored = list(analyzer.known_certs.values())[0]
-        assert stored.path == f'uprobe://d2i_X509/5678/{serial}'
+        assert stored.path == f'uprobe://SSL_CTX_use_certificate_ASN1/5678/{serial}'
 
     def test_handle_bytes_deduplicates_same_cert(self, analyzer):
         """Calling _handle_uprobe_in_memory_cert twice with the same DER adds only one entry."""
@@ -3657,7 +4256,7 @@ class TestOpensslUprobeHooking:
 
         mock_publisher.publish.assert_called_once()
         published = mock_publisher.publish.call_args[0][0]
-        assert 'uprobe://d2i_X509' in published.path
+        assert 'uprobe://SSL_CTX_use_certificate_ASN1' in published.path
 
     def test_kafka_not_published_for_redetected_in_memory_cert(self, analyzer):
         """Re-detected in-memory cert (same DER) is NOT published to Kafka again."""
@@ -3672,3 +4271,697 @@ class TestOpensslUprobeHooking:
         analyzer._handle_uprobe_in_memory_cert(event)
 
         assert mock_publisher.publish.call_count == 1
+
+
+class TestJavaNSSFIPSHooking:
+    """
+    Tests for NSC_CreateObject / NSC_FindObjectsInit uprobe handlers (java-fips-nss-cert policy).
+
+    Both handlers decode a little-endian CK_ATTRIBUTE[] template read from /proc/<pid>/mem.
+    _read_process_memory is patched throughout so no live process is needed.
+    """
+
+    # PKCS#11 constants mirrored from the production code
+    CKA_CLASS        = 0x00000001
+    CKA_VALUE        = 0x00000011
+    CKO_CERTIFICATE  = 0x00000001
+    TMPL_ADDR        = 0x1000
+    CLASS_ADDR       = 0x2000
+    DER_ADDR         = 0x3000
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _cert_der(cn='fips.example.com', days=365):
+        cert, _ = TestCertificateGeneration.generate_certificate(cn, days)
+        return cert, cert.public_bytes(Encoding.DER)
+
+    @staticmethod
+    def _make_uint64_arg(value):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'size_arg'
+        arg.size_arg = value
+        return arg
+
+    @staticmethod
+    def _pack_attr(attr_type: int, p_value: int, val_len: int) -> bytes:
+        """Pack one CK_ATTRIBUTE struct (24 bytes, little-endian LP64 layout)."""
+        return (
+            attr_type.to_bytes(8, 'little') +
+            p_value.to_bytes(8, 'little') +
+            val_len.to_bytes(8, 'little')
+        )
+
+    @classmethod
+    def _make_event(cls, symbol, uint64_values, pid=1234, binary='/usr/bin/java',
+                    has_pod=False):
+        """Build a mock process_uprobe event with uint64 args."""
+        from unittest.mock import MagicMock
+        mock_uprobe = MagicMock()
+        mock_uprobe.process.binary = binary
+        mock_uprobe.process.pid.value = pid
+        mock_uprobe.symbol = symbol
+        if has_pod:
+            mock_uprobe.process.HasField.side_effect = lambda f: f in ('pid', 'pod')
+            mock_uprobe.process.pod.namespace = 'fips-ns'
+            mock_uprobe.process.pod.name = 'java-pod'
+            mock_uprobe.process.pod.workload_object.kind = 'Deployment'
+            mock_uprobe.process.pod.workload_object.name = 'java-deploy'
+            mock_uprobe.process.pod.labels = {}
+        else:
+            mock_uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        mock_uprobe.args = [cls._make_uint64_arg(v) for v in uint64_values]
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        mock_event.process_uprobe = mock_uprobe
+        return mock_event
+
+    @staticmethod
+    def _make_kprobe_event():
+        from unittest.mock import MagicMock
+        ev = MagicMock()
+        ev.HasField.side_effect = lambda f: f == 'process_kprobe'
+        return ev
+
+    @classmethod
+    def _cert_template(cls, der: bytes) -> tuple:
+        """
+        Build the three _read_process_memory return values for a successful
+        _handle_nsc_create_object call: (template_bytes, ck_class_bytes, der_bytes).
+        Template layout: [CKA_CLASS → CLASS_ADDR, CKA_VALUE → DER_ADDR].
+        """
+        tmpl = (
+            cls._pack_attr(cls.CKA_CLASS, cls.CLASS_ADDR, 4) +
+            cls._pack_attr(cls.CKA_VALUE, cls.DER_ADDR, len(der))
+        )
+        ck_class = cls.CKO_CERTIFICATE.to_bytes(4, 'little')
+        return tmpl, ck_class, der
+
+    # ------------------------------------------------------------------ _read_process_memory
+
+    def test_read_memory_returns_none_for_zero_address(self, analyzer):
+        assert analyzer._read_process_memory(1234, 0, 100) is None
+
+    def test_read_memory_returns_none_for_zero_size(self, analyzer):
+        assert analyzer._read_process_memory(1234, self.TMPL_ADDR, 0) is None
+
+    def test_read_memory_returns_none_on_ioerror(self, analyzer):
+        import unittest.mock as mock
+        with mock.patch('builtins.open', side_effect=IOError('no such process')):
+            assert analyzer._read_process_memory(99999, self.TMPL_ADDR, 16) is None
+
+    def test_read_memory_returns_bytes_on_success(self, analyzer):
+        import unittest.mock as mock
+        data = b'\xde\xad\xbe\xef' * 4
+        m = mock.MagicMock()
+        m.__enter__ = mock.Mock(return_value=m)
+        m.__exit__ = mock.Mock(return_value=False)
+        m.read.return_value = data
+        with mock.patch('builtins.open', return_value=m):
+            result = analyzer._read_process_memory(1234, self.TMPL_ADDR, 16)
+        assert result == data
+
+    # ------------------------------------------------------------------ NSC_CreateObject
+
+    def test_create_object_rejects_kprobe(self, analyzer):
+        """Returns False immediately for a non-uprobe event type."""
+        assert analyzer._handle_nsc_create_object(self._make_kprobe_event()) is False
+
+    def test_create_object_rejects_too_few_args(self, analyzer):
+        """Returns False when fewer than 3 uint64 args are present."""
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR])
+        assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_zero_count(self, analyzer):
+        """Returns False when attribute count arg is 0."""
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 0])
+        assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_excessive_count(self, analyzer):
+        """Returns False when attribute count exceeds the sanity cap of 64."""
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 65])
+        assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_unreadable_template(self, analyzer):
+        """Returns False when /proc/pid/mem cannot be read for the template."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory', return_value=None):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_non_cert_ck_class(self, analyzer):
+        """Returns False when CKA_CLASS is CKO_DATA (0x0), not CKO_CERTIFICATE."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl = (
+            self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4) +
+            self._pack_attr(self.CKA_VALUE, self.DER_ADDR, len(der))
+        )
+        ck_data = (0x00000000).to_bytes(4, 'little')
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_data, der]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_missing_cka_value(self, analyzer):
+        """Returns False when template contains CKA_CLASS only (no DER payload pointer)."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_cert = self.CKO_CERTIFICATE.to_bytes(4, 'little')
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_garbage_der(self, analyzer):
+        """Returns False when the CKA_VALUE bytes are not valid DER."""
+        import unittest.mock as mock
+        junk = b'\xde\xad\xbe\xef' * 50  # 200 bytes — passes size guard, fails DER parse
+        tmpl, ck_cert, _ = self._cert_template(junk)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, junk]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_rejects_unreadable_der(self, analyzer):
+        """Returns False when the DER memory read returns None."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, None]):
+            assert analyzer._handle_nsc_create_object(event) is False
+
+    def test_create_object_accepts_valid_cert(self, analyzer):
+        """Returns True when a well-formed DER cert is found in the template."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            assert analyzer._handle_nsc_create_object(event) is True
+
+    def test_create_object_stores_cert_in_known_certs(self, analyzer):
+        """A valid cert is persisted to known_certs after extraction."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        assert len(analyzer.known_certs) == 1
+
+    def test_create_object_synthetic_path_format(self, analyzer):
+        """CertificateInfo.path uses the uprobe://NSC_CreateObject/<pid>/<serial> scheme."""
+        import unittest.mock as mock
+        cert, der = self._cert_der()
+        serial = str(cert.serial_number)
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2], pid=5555)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        stored = list(analyzer.known_certs.values())[0]
+        assert stored.path == f'uprobe://NSC_CreateObject/5555/{serial}'
+
+    def test_create_object_deduplicates_cert(self, analyzer):
+        """A second event for the same cert returns True without adding a duplicate entry."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is True
+        assert len(analyzer.known_certs) == 1
+
+    def test_create_object_self_filter_by_process_name(self, analyzer):
+        """Events from a cert-analyzer binary are silently dropped."""
+        import unittest.mock as mock
+        assert analyzer.filter_self_events is True
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2],
+                                 binary='/app/cert-analyzer')
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is False
+        assert len(analyzer.known_certs) == 0
+
+    def test_create_object_self_filter_by_pid(self, analyzer, monkeypatch):
+        """Events whose PID matches the analyzer's own PID are silently dropped."""
+        import unittest.mock as mock
+        assert analyzer.filter_self_events is True
+        monkeypatch.setattr(os, 'getpid', lambda: 1234)
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2], pid=1234)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is False
+
+    def test_create_object_updates_event_timestamp(self, analyzer):
+        """last_event_timestamp is updated after a successful cert extraction."""
+        import unittest.mock as mock
+        analyzer.metrics.last_event_timestamp._value.set(0)
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        assert analyzer.metrics.last_event_timestamp._value.get() > 0
+
+    def test_create_object_applies_pod_context(self, analyzer):
+        """Pod namespace from the uprobe event is stored on the resulting CertificateInfo."""
+        import unittest.mock as mock
+        _, der = self._cert_der()
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2], has_pod=True)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        stored = list(analyzer.known_certs.values())[0]
+        assert stored.namespace == 'fips-ns'
+
+    # ------------------------------------------------------------------ NSC_FindObjectsInit
+
+    def test_find_objects_rejects_kprobe(self, analyzer):
+        """Returns False immediately for a non-uprobe event type."""
+        assert analyzer._handle_nsc_find_objects_init(self._make_kprobe_event()) is False
+
+    def test_find_objects_rejects_too_few_args(self, analyzer):
+        """Returns False when fewer than 3 uint64 args are present."""
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR])
+        assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_zero_count(self, analyzer):
+        """Returns False when the attribute count arg is 0."""
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 0])
+        assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_excessive_count(self, analyzer):
+        """Returns False when attribute count exceeds the sanity cap of 32."""
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 33])
+        assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_unreadable_template(self, analyzer):
+        """Returns False when /proc/pid/mem cannot be read for the template."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory', return_value=None):
+            assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_rejects_non_cert_filter(self, analyzer):
+        """Returns False when the template filters on CKO_DATA, not CKO_CERTIFICATE."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_data = (0x00000000).to_bytes(4, 'little')
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_data]):
+            assert analyzer._handle_nsc_find_objects_init(event) is False
+
+    def test_find_objects_returns_true_for_cert_filter(self, analyzer):
+        """Returns True when the template contains a CKO_CERTIFICATE class filter."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_cert = self.CKO_CERTIFICATE.to_bytes(4, 'little')
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert]):
+            assert analyzer._handle_nsc_find_objects_init(event) is True
+
+    def test_find_objects_logs_cert_enumeration(self, analyzer, caplog):
+        """An INFO log mentioning NSC_FindObjectsInit is emitted when cert enumeration fires."""
+        import unittest.mock as mock
+        tmpl = self._pack_attr(self.CKA_CLASS, self.CLASS_ADDR, 4)
+        ck_cert = self.CKO_CERTIFICATE.to_bytes(4, 'little')
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1],
+                                 binary='/usr/bin/java', pid=9876)
+        with caplog.at_level(logging.INFO):
+            with mock.patch.object(analyzer, '_read_process_memory',
+                                   side_effect=[tmpl, ck_cert]):
+                analyzer._handle_nsc_find_objects_init(event)
+        assert any('NSC_FindObjectsInit' in r.message for r in caplog.records)
+
+    def test_find_objects_self_filter_by_pid(self, analyzer, monkeypatch):
+        """Own PID is dropped before any memory reads occur."""
+        import unittest.mock as mock
+        assert analyzer.filter_self_events is True
+        monkeypatch.setattr(os, 'getpid', lambda: 9876)
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1], pid=9876)
+        with mock.patch.object(analyzer, '_read_process_memory') as mock_mem:
+            result = analyzer._handle_nsc_find_objects_init(event)
+        assert result is False
+        mock_mem.assert_not_called()
+
+    # ------------------------------------------------------------------ process_event routing
+
+    def test_process_event_routes_nsc_create_object(self, analyzer):
+        """process_event dispatches NSC_CreateObject symbol to _handle_nsc_create_object."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_handle_nsc_create_object') as mock_handler:
+            analyzer.process_event(event)
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_routes_nsc_find_objects_init(self, analyzer):
+        """process_event dispatches NSC_FindObjectsInit symbol to _handle_nsc_find_objects_init."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_FindObjectsInit', [0, self.TMPL_ADDR, 1])
+        with mock.patch.object(analyzer, '_handle_nsc_find_objects_init') as mock_handler:
+            analyzer.process_event(event)
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_nsc_symbols_do_not_fall_through_to_bytes_handler(self, analyzer):
+        """_handle_uprobe_in_memory_cert is not called when the symbol is an NSC_ handler."""
+        import unittest.mock as mock
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_handle_nsc_create_object', return_value=True), \
+             mock.patch.object(analyzer, '_handle_uprobe_in_memory_cert') as mock_bytes:
+            analyzer.process_event(event)
+        mock_bytes.assert_not_called()
+
+
+class TestResolveProcessBinary:
+    """Tests for _resolve_process_binary fallback when Tetragon truncates the binary path."""
+
+    def test_normal_path_confirmed_via_proc_exe(self, analyzer):
+        """A non-truncated binary path is returned unchanged when proc/exe agrees."""
+        import unittest.mock as mock
+        with mock.patch('os.readlink', return_value='/usr/bin/nginx'):
+            result = analyzer._resolve_process_binary('/usr/bin/nginx', 9999)
+        assert result == '/usr/bin/nginx'
+
+    def test_truncated_path_resolved_via_proc_exe(self, analyzer, tmp_path):
+        """When Tetragon gives a directory (truncated), /proc/{pid}/exe provides the full path."""
+        link_dir = tmp_path / 'build'
+        link_dir.mkdir()
+        binary = link_dir / 'test_openssl3_cert_load'
+        binary.write_bytes(b'')
+
+        import unittest.mock as mock
+
+        original_readlink = __import__('os').readlink
+
+        def mock_readlink(path):
+            if path == '/proc/1234/exe':
+                return str(binary)
+            return original_readlink(path)
+
+        with mock.patch('os.readlink', side_effect=mock_readlink):
+            result = analyzer._resolve_process_binary(str(link_dir), 1234)
+        assert result == str(binary)
+
+    def test_protect_home_path_resolved_via_proc_exe(self, analyzer, tmp_path):
+        """Works even when ProtectHome makes os.path.isdir() unreliable for /home paths."""
+        import unittest.mock as mock
+
+        home_dir = '/home/benm/app/build'
+        home_binary = '/home/benm/app/build/myserver'
+
+        original_readlink = __import__('os').readlink
+
+        def mock_readlink(path):
+            if path == '/proc/1234/exe':
+                return home_binary
+            return original_readlink(path)
+
+        with mock.patch('os.readlink', side_effect=mock_readlink), \
+             mock.patch('os.path.isdir', return_value=False):
+            result = analyzer._resolve_process_binary(home_dir, 1234)
+        assert result == home_binary
+
+    def test_proc_exe_oserror_returns_original(self, analyzer):
+        """Original path is returned when /proc/{pid}/exe raises OSError (process exited)."""
+        import unittest.mock as mock
+
+        with mock.patch('os.readlink', side_effect=OSError('no such process')):
+            result = analyzer._resolve_process_binary('/some/build/dir', 42)
+        assert result == '/some/build/dir'
+
+
+def _generate_ca_signed_certificate(common_name: str, days_valid: int, ca_cert, ca_key):
+    """Generate a certificate issued by a separate CA (not self-signed)."""
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend(),
+    )
+    not_valid_before = datetime.utcnow()
+    not_valid_after  = datetime.utcnow() + timedelta(days=days_valid)
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TestOrg"),
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+    ])
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_valid_before)
+        .not_valid_after(not_valid_after)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(common_name)]),
+            critical=False,
+        )
+    )
+    cert = builder.sign(ca_key, hashes.SHA256(), backend=default_backend())
+    return cert, private_key
+
+
+class TestSelfSignedDetection:
+    """
+    Tests for is_self_signed detection in extract_certificate_info().
+
+    Note: TestCertificateGeneration.generate_certificate() always creates
+    self-signed certificates (issuer == subject, signed with own key).
+    CA-signed certificates require _generate_ca_signed_certificate().
+    """
+
+    def test_self_signed_cert_detected(self, analyzer, temp_dir):
+        """A self-signed certificate has is_self_signed=True."""
+        cert, _ = TestCertificateGeneration.generate_certificate("self.example.com", 365)
+        path = os.path.join(temp_dir, "self.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is True
+
+    def test_ca_signed_cert_not_self_signed(self, analyzer, temp_dir):
+        """A certificate signed by a separate CA has is_self_signed=False."""
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("leaf.example.com", 365, ca_cert, ca_key)
+
+        path = os.path.join(temp_dir, "leaf.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is False
+
+    def test_root_ca_is_self_signed(self, analyzer, temp_dir):
+        """A self-signed root CA certificate is correctly identified as self-signed."""
+        ca_cert, _ = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        path = os.path.join(temp_dir, "root_ca.pem")
+        TestCertificateGeneration.save_certificate_pem(ca_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is True
+
+    def test_intermediate_ca_is_not_self_signed(self, analyzer, temp_dir):
+        """An intermediate CA signed by a root CA is not self-signed."""
+        root_cert, root_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        inter_cert, _       = _generate_ca_signed_certificate("Intermediate CA", 1825, root_cert, root_key)
+
+        path = os.path.join(temp_dir, "intermediate.pem")
+        TestCertificateGeneration.save_certificate_pem(inter_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is False
+
+    def test_prometheus_metric_set_for_self_signed(self, analyzer, temp_dir):
+        """tls_certificate_self_signed gauge is 1 for a self-signed certificate."""
+        cert, _ = TestCertificateGeneration.generate_certificate("metric-self.example.com", 365)
+        path = os.path.join(temp_dir, "metric-self.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        val = analyzer.metrics.cert_self_signed.labels(
+            cert_path=path,
+            process="test",
+            cert_index="0",
+            pod_name="",
+            namespace="",
+            workload_kind="",
+            workload_name="",
+            node_name="",
+            is_ca="unknown",  # generate_certificate without is_ca=True adds no BasicConstraints
+        )._value.get()
+        assert val == 1.0
+
+    def test_prometheus_metric_set_for_ca_signed(self, analyzer, temp_dir):
+        """tls_certificate_self_signed gauge is 0 for a CA-signed certificate."""
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("metric-leaf.example.com", 365, ca_cert, ca_key)
+
+        path = os.path.join(temp_dir, "metric-leaf.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer.metrics.update_certificate_metrics(cert_infos[0])
+
+        val = analyzer.metrics.cert_self_signed.labels(
+            cert_path=path,
+            process="test",
+            cert_index="0",
+            pod_name="",
+            namespace="",
+            workload_kind="",
+            workload_name="",
+            node_name="",
+            is_ca="unknown",  # _generate_ca_signed_certificate adds no BasicConstraints
+        )._value.get()
+        assert val == 0.0
+
+    def test_is_ca_label_values(self, analyzer, temp_dir):
+        """is_ca label is 'true' for a CA cert, 'false' for an explicit non-CA, 'unknown' when absent."""
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+        def _cert_with_bc(is_ca_value):
+            """Build a minimal self-signed cert with an explicit BasicConstraints extension."""
+            key = _rsa.generate_private_key(65537, 2048, backend=default_backend())
+            subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "bc-test")])
+            builder = (
+                x509.CertificateBuilder()
+                .subject_name(subject).issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(datetime.utcnow())
+                .not_valid_after(datetime.utcnow() + timedelta(days=1))
+                .add_extension(x509.BasicConstraints(ca=is_ca_value, path_length=None), critical=True)
+            )
+            return builder.sign(key, hashes.SHA256(), backend=default_backend())
+
+        def _label(cert_obj, fname):
+            path = os.path.join(temp_dir, fname)
+            TestCertificateGeneration.save_certificate_pem(cert_obj, path)
+            infos = analyzer.analyze_certificate(path, "test", 1)
+            analyzer.metrics.update_certificate_metrics(infos[0])
+            return infos[0].is_ca
+
+        assert _label(_cert_with_bc(True),  "bc_true.pem")  is True
+        assert _label(_cert_with_bc(False), "bc_false.pem") is False
+
+        # No BasicConstraints extension → is_ca is None → label 'unknown'
+        no_bc_cert, _ = TestCertificateGeneration.generate_certificate("no-bc.example.com", 365)
+        assert _label(no_bc_cert, "no_bc.pem") is None
+
+    def test_self_signed_logs_warning(self, analyzer, temp_dir, caplog):
+        """A self-signed certificate triggers a WARNING log with SELF-SIGNED in the message."""
+        cert, _ = TestCertificateGeneration.generate_certificate("warn.example.com", 365)
+        path = os.path.join(temp_dir, "warn.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        assert any("SELF-SIGNED" in r.message for r in caplog.records)
+        assert any(r.levelno == logging.WARNING for r in caplog.records
+                   if "SELF-SIGNED" in r.message)
+
+    def test_ca_signed_does_not_log_self_signed_warning(self, analyzer, temp_dir, caplog):
+        """A CA-signed certificate does not produce a SELF-SIGNED warning."""
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("no-warn.example.com", 365, ca_cert, ca_key)
+
+        path = os.path.join(temp_dir, "no-warn.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+            analyzer.log_certificate_status(cert_infos[0])
+
+        assert not any("SELF-SIGNED" in r.message for r in caplog.records)
+
+    def test_is_self_signed_field_defaults_to_false(self):
+        """CertificateInfo.is_self_signed defaults to False."""
+        info = CertificateInfo(
+            path="/tmp/test.crt",
+            subject="CN=test",
+            issuer="CN=ca",
+            serial_number="1",
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process="test",
+            pid=1,
+        )
+        assert info.is_self_signed is False
+
+    def test_bundle_mixed_self_signed_and_ca_signed(self, analyzer, temp_dir):
+        """In a bundle, each cert is independently classified as self-signed or not."""
+        self_signed, _  = TestCertificateGeneration.generate_certificate("self.example.com", 365)
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        ca_signed, _    = _generate_ca_signed_certificate("leaf.example.com", 365, ca_cert, ca_key)
+
+        bundle_path = os.path.join(temp_dir, "mixed.pem")
+        TestCertificateGeneration.save_multi_certificate_pem([self_signed, ca_signed], bundle_path)
+
+        cert_infos = analyzer.analyze_certificate(bundle_path, "test", 1)
+
+        assert len(cert_infos) == 2
+        by_cn = {info.common_name: info for info in cert_infos}
+        assert by_cn["self.example.com"].is_self_signed is True
+        assert by_cn["leaf.example.com"].is_self_signed is False
+
+    def test_self_signed_fallback_on_old_cryptography(self, analyzer, temp_dir):
+        """On cryptography <40 (no verify_directly_issued_by), a self-signed cert is still detected via subject==issuer."""
+        from unittest.mock import patch
+        cert, _ = TestCertificateGeneration.generate_certificate("legacy-self.example.com", 365)
+        path = os.path.join(temp_dir, "legacy-self.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        with patch.object(x509.Certificate, "verify_directly_issued_by", side_effect=AttributeError):
+            cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is True
+
+    def test_ca_signed_fallback_on_old_cryptography(self, analyzer, temp_dir):
+        """On cryptography <40 (no verify_directly_issued_by), a CA-signed cert is not misclassified as self-signed."""
+        from unittest.mock import patch
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("legacy-leaf.example.com", 365, ca_cert, ca_key)
+        path = os.path.join(temp_dir, "legacy-leaf.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        with patch.object(x509.Certificate, "verify_directly_issued_by", side_effect=AttributeError):
+            cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is False

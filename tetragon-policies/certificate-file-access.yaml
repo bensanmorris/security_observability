@@ -12,8 +12,6 @@ spec:
       type: "int"
     - index: 1
       type: "file"
-    returnArg:
-      type: "int"
     selectors:
     - matchArgs:
       - index: 1

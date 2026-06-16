@@ -72,18 +72,6 @@ metrics. Supports PEM, DER, JKS, and PKCS12 formats with Kubernetes
 workload enrichment.
 
 
-%package policies
-Summary:        Tetragon eBPF policies for cert-analyzer
-BuildArch:      noarch
-Requires:       cert-analyzer = %{version}-%{release}
-
-%description policies
-Tetragon TracingPolicy definitions for the cert-analyzer TLS certificate
-monitor. Installs the stable certificate-file-access policy into the Tetragon
-auto-load directory (/etc/tetragon/tetragon.tp.d/) so it is loaded
-automatically on daemon start. Experimental policies are installed to
-/usr/share/cert-analyzer-policies/experimental/ for manual use.
-
 
 %prep
 %setup -q
@@ -134,8 +122,9 @@ install -d %{buildroot}%{ana_venv}
 install -d %{buildroot}%{ana_conf}
 install -d %{buildroot}%{ana_log}
 
-# Main analyzer script
-install -m 0755 cert_analyzer.py %{buildroot}%{ana_home}/cert_analyzer.py
+# Main analyzer script and FIPS compliance checker
+install -m 0755 cert_analyzer.py          %{buildroot}%{ana_home}/cert_analyzer.py
+install -m 0644 fips_compliance_checker.py %{buildroot}%{ana_home}/fips_compliance_checker.py
 
 # Generated Tetragon protos — pre-built and included in the source tarball
 cp -r tetragon %{buildroot}%{ana_home}/tetragon
@@ -175,16 +164,6 @@ install -d %{buildroot}/etc/systemd/system/tetragon.service.d
 install -m 0644 tetragon-override.conf \
     %{buildroot}/etc/systemd/system/tetragon.service.d/cert-analyzer.conf
 
-# ── Tetragon policies ─────────────────────────────────────────────────────────
-install -d %{buildroot}/etc/tetragon/tetragon.tp.d
-install -m 0644 tetragon-policies/certificate-file-access.yaml \
-    %{buildroot}/etc/tetragon/tetragon.tp.d/cert-analyzer-certificate-file-access.yaml
-
-install -d %{buildroot}%{_datadir}/cert-analyzer-policies/experimental
-install -m 0644 tetragon-policies/experimental/tls-service-tracking.yaml \
-    %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/tls-service-tracking.yaml
-install -m 0644 tetragon-policies/experimental/openssl3-cert-load.yaml \
-    %{buildroot}%{_datadir}/cert-analyzer-policies/experimental/openssl3-cert-load.yaml
 
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
@@ -263,6 +242,7 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 # Application
 %dir %{ana_home}
 %attr(0755, %{ana_user}, %{ana_group}) %{ana_home}/cert_analyzer.py
+%attr(0644, %{ana_user}, %{ana_group}) %{ana_home}/fips_compliance_checker.py
 %{ana_home}/tetragon/
 %{ana_venv}/
 
@@ -279,14 +259,6 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 /etc/systemd/system/tetragon.service.d/cert-analyzer.conf
 
 
-%files policies
-%dir /etc/tetragon
-%dir /etc/tetragon/tetragon.tp.d
-%config /etc/tetragon/tetragon.tp.d/cert-analyzer-certificate-file-access.yaml
-%dir %{_datadir}/cert-analyzer-policies
-%dir %{_datadir}/cert-analyzer-policies/experimental
-%{_datadir}/cert-analyzer-policies/experimental/tls-service-tracking.yaml
-%{_datadir}/cert-analyzer-policies/experimental/openssl3-cert-load.yaml
 
 
 %changelog

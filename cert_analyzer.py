@@ -3,7 +3,6 @@
 TLS Certificate Expiry Monitor for RHEL9/Podman
 Consumes Tetragon events and analyzes certificate expiry dates
 EXTENDED: Now supports multiple certificates per file
-EXTENDED: Kubernetes pod enrichment via k8s_enricher
 """
 
 import os
@@ -28,6 +27,7 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from prometheus_client import Gauge, Counter, Info, start_http_server
+from fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
 
 # Import generated Tetragon protos
 try:
@@ -35,13 +35,6 @@ try:
 except ImportError:
     print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
     sys.exit(1)
-
-# Import Kubernetes enricher - optional, degrades gracefully if unavailable
-try:
-    from k8s_enricher import KubernetesEnricher
-    K8S_ENRICHER_AVAILABLE = True
-except ImportError:
-    K8S_ENRICHER_AVAILABLE = False
 
 # Import JKS parser - optional, degrades gracefully if unavailable
 # Install with: pip install pyjks
@@ -85,6 +78,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Friendly names for the most common Extended Key Usage OIDs (RFC 5280 §4.2.1.12).
+# Unknown OIDs fall back to their dotted-string representation.
+_EKU_NAMES = {
+    '1.3.6.1.5.5.7.3.1': 'server_auth',
+    '1.3.6.1.5.5.7.3.2': 'client_auth',
+    '1.3.6.1.5.5.7.3.3': 'code_signing',
+    '1.3.6.1.5.5.7.3.4': 'email_protection',
+    '1.3.6.1.5.5.7.3.8': 'time_stamping',
+    '1.3.6.1.5.5.7.3.9': 'ocsp_signing',
+}
+
 
 @dataclass
 class CertificateInfo:
@@ -100,19 +104,44 @@ class CertificateInfo:
     namespace: str = ""
     common_name: str = ""
     san_dns_names: list = field(default_factory=list)
+    san_ip_addresses: list = field(default_factory=list)
     cert_index: int = 0
-    # Workload context sourced directly from Tetragon event (always populated when available)
+    # Kubernetes context sourced directly from the Tetragon event Pod proto
     pod_name: str = ""
+    pod_uid: str = ""
+    pod_labels: dict = None
+    pod_annotations: dict = None
     workload_kind: str = ""
     workload_name: str = ""
-    pod_labels: dict = None
-    # Additional context from Kubernetes API enricher (supplements Tetragon data)
-    app_label: str = ""
+    node_name: str = ""
+    app_label: str = ""                      # derived from pod_labels
+    container_id: str = ""
     container_name: str = ""
     container_image: str = ""
+    container_image_id: str = ""
+    container_privileged: bool = False
+    container_pid: Optional[int] = None
+    container_start_time: Optional[datetime] = None
+    container_maybe_exec_probe: bool = False
     # SHA-256 of the DER-encoded certificate bytes. Empty string when
     # CERT_CHECKSUM_ENABLED=false (the default).
     checksum: str = ""
+    # FIPS 140-2/140-3 compliance fields — populated by extract_certificate_info()
+    key_algorithm: str = ""    # RSA, EC, DSA, Ed25519, Ed448, unknown
+    key_size: int = 0          # bits; 0 for EdDSA
+    signature_hash: str = ""   # sha256, sha1, md5, etc.
+    curve_name: str = ""       # secp256r1 etc. (EC only)
+    fips_compliant: bool = False
+    fips_violations: list = field(default_factory=list)
+    # RFC 5280 extension fields — None means the extension is absent from the certificate
+    key_usage: Optional[list] = None
+    extended_key_usage: Optional[list] = None
+    is_ca: Optional[bool] = None
+    basic_constraints_path_length: Optional[int] = None
+    # True when the certificate is self-signed (subject == issuer and signature
+    # verifies against its own public key). Root CA certificates are legitimately
+    # self-signed; self-signed leaf certificates are typically a configuration risk.
+    is_self_signed: bool = False
 
     @property
     def days_until_expiry(self) -> float:
@@ -151,24 +180,27 @@ class PrometheusMetrics:
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_expiry_timestamp = Gauge(
             'tls_certificate_expiry_timestamp',
             'Unix timestamp of certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_valid_from = Gauge(
             'tls_certificate_valid_from_timestamp',
             'Unix timestamp of certificate valid from date',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         # Event counters
@@ -189,14 +221,28 @@ class PrometheusMetrics:
             'tls_certificate_expired',
             'Whether certificate is expired (1=expired, 0=valid)',
             ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name']
+             'workload_kind', 'workload_name', 'node_name']
         )
 
         self.cert_expiring_soon = Gauge(
             'tls_certificate_expiring_soon',
             'Whether certificate expires within threshold (1=yes, 0=no)',
             ['cert_path', 'process', 'threshold_days', 'cert_index', 'pod_name',
-             'namespace', 'workload_kind', 'workload_name']
+             'namespace', 'workload_kind', 'workload_name', 'node_name']
+        )
+
+        self.cert_fips_compliant = Gauge(
+            'tls_certificate_fips_compliant',
+            'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
+            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+             'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash']
+        )
+
+        self.cert_self_signed = Gauge(
+            'tls_certificate_self_signed',
+            'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
+            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+             'workload_kind', 'workload_name', 'node_name', 'is_ca']
         )
 
         # System health
@@ -257,23 +303,26 @@ class PrometheusMetrics:
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
         labels = {
-            'cert_path':      info.path,
-            'subject':        info.subject[:100],
-            'issuer':         info.issuer[:100],
-            'serial':         info.serial_number,
-            'process':        info.process,
-            'common_name':    info.common_name,
-            'cert_index':     str(info.cert_index),
-            'pod_name':       info.pod_name,
-            'namespace':      info.namespace,
-            'workload_kind':  info.workload_kind,
-            'workload_name':  info.workload_name,
-            'app_label':      info.app_label,
-            'container_name': info.container_name,
+            'cert_path':        info.path,
+            'subject':          info.subject[:100],
+            'issuer':           info.issuer[:100],
+            'serial':           info.serial_number,
+            'process':          info.process,
+            'common_name':      info.common_name,
+            'san_dns_names':    ','.join(info.san_dns_names),
+            'san_ip_addresses': ','.join(info.san_ip_addresses),
+            'cert_index':       str(info.cert_index),
+            'pod_name':         info.pod_name,
+            'namespace':        info.namespace,
+            'workload_kind':    info.workload_kind,
+            'workload_name':    info.workload_name,
+            'node_name':        info.node_name,
+            'app_label':        info.app_label,
+            'container_name':   info.container_name,
             # Empty string when CERT_CHECKSUM_ENABLED=false — Prometheus
             # handles empty label values cleanly and the label is simply
             # omitted from query results when filtering
-            'checksum':       info.checksum,
+            'checksum':         info.checksum,
         }
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
@@ -288,6 +337,7 @@ class PrometheusMetrics:
             namespace=info.namespace,
             workload_kind=info.workload_kind,
             workload_name=info.workload_name,
+            node_name=info.node_name,
         ).set(1 if info.is_expired else 0)
 
         for threshold in [7, 30, 90]:
@@ -300,9 +350,42 @@ class PrometheusMetrics:
                 namespace=info.namespace,
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
+                node_name=info.node_name,
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
 
+        if info.key_algorithm:
+            self.cert_fips_compliant.labels(
+                cert_path=info.path,
+                process=info.process,
+                cert_index=str(info.cert_index),
+                pod_name=info.pod_name,
+                namespace=info.namespace,
+                workload_kind=info.workload_kind,
+                workload_name=info.workload_name,
+                node_name=info.node_name,
+                key_algorithm=info.key_algorithm,
+                signature_hash=info.signature_hash,
+            ).set(1 if info.fips_compliant else 0)
 
+        self.cert_self_signed.labels(
+            cert_path=info.path,
+            process=info.process,
+            cert_index=str(info.cert_index),
+            pod_name=info.pod_name,
+            namespace=info.namespace,
+            workload_kind=info.workload_kind,
+            workload_name=info.workload_name,
+            node_name=info.node_name,
+            is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
+        ).set(1 if info.is_self_signed else 0)
+
+
+
+
+_kafka_delivery_errors = Counter(
+    'kafka_delivery_errors_total',
+    'Total number of Kafka message delivery failures (async, broker-side)',
+)
 
 
 class KafkaPublisher:
@@ -329,6 +412,7 @@ class KafkaPublisher:
         "serial_number":    "abc123",
         "common_name":      "example.com",
         "san_dns_names":    ["example.com", "www.example.com"],
+        "san_ip_addresses": ["10.96.0.1", "192.168.1.1"],
         "not_before":       "2024-01-01T00:00:00",
         "not_after":        "2025-01-01T00:00:00",
         "days_until_expiry": 44.9,
@@ -342,7 +426,18 @@ class KafkaPublisher:
         "app_label":        "my-app",
         "container_name":   "main",
         "container_image":  "my-app:1.0",
-        "checksum":         ""
+        "checksum":         "",
+        "key_algorithm":    "RSA",
+        "key_size":         2048,
+        "signature_hash":   "sha256",
+        "curve_name":       "",
+        "fips_compliant":   true,
+        "fips_violations":  [],
+        "key_usage":                     ["digital_signature", "key_encipherment"],
+        "extended_key_usage":            ["server_auth", "client_auth"],
+        "is_ca":                         false,
+        "basic_constraints_path_length": null,
+        "is_self_signed":                false
     }
     """
 
@@ -448,20 +543,41 @@ class KafkaPublisher:
             'serial_number':     cert_info.serial_number,
             'common_name':       cert_info.common_name,
             'san_dns_names':     cert_info.san_dns_names,
+            'san_ip_addresses':  cert_info.san_ip_addresses,
             'not_before':        cert_info.not_before.isoformat(),
             'not_after':         cert_info.not_after.isoformat(),
             'days_until_expiry': round(cert_info.days_until_expiry, 2),
             'is_expired':        cert_info.is_expired,
             'process':           cert_info.process,
             'pid':               cert_info.pid,
-            'namespace':         cert_info.namespace,
-            'pod_name':          cert_info.pod_name,
-            'workload_kind':     cert_info.workload_kind,
-            'workload_name':     cert_info.workload_name,
-            'app_label':         cert_info.app_label,
-            'container_name':    cert_info.container_name,
-            'container_image':   cert_info.container_image,
+            'namespace':                  cert_info.namespace,
+            'pod_name':                   cert_info.pod_name,
+            'pod_uid':                    cert_info.pod_uid,
+            'node_name':                  cert_info.node_name,
+            'pod_annotations':            cert_info.pod_annotations,
+            'workload_kind':              cert_info.workload_kind,
+            'workload_name':              cert_info.workload_name,
+            'app_label':                  cert_info.app_label,
+            'container_id':               cert_info.container_id,
+            'container_name':             cert_info.container_name,
+            'container_image':            cert_info.container_image,
+            'container_image_id':         cert_info.container_image_id,
+            'container_privileged':       cert_info.container_privileged,
+            'container_pid':              cert_info.container_pid,
+            'container_start_time':       cert_info.container_start_time.isoformat() if cert_info.container_start_time else None,
+            'container_maybe_exec_probe': cert_info.container_maybe_exec_probe,
             'checksum':          cert_info.checksum,
+            'key_algorithm':     cert_info.key_algorithm,
+            'key_size':          cert_info.key_size,
+            'signature_hash':    cert_info.signature_hash,
+            'curve_name':        cert_info.curve_name,
+            'fips_compliant':    cert_info.fips_compliant,
+            'fips_violations':   cert_info.fips_violations,
+            'key_usage':                     cert_info.key_usage,
+            'extended_key_usage':            cert_info.extended_key_usage,
+            'is_ca':                         cert_info.is_ca,
+            'basic_constraints_path_length': cert_info.basic_constraints_path_length,
+            'is_self_signed':                cert_info.is_self_signed,
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
@@ -485,6 +601,12 @@ class KafkaPublisher:
 
     def _on_error(self, exc: Exception) -> None:
         logger.warning(f"Kafka delivery error: {exc}")
+        _kafka_delivery_errors.inc()
+        # Nullify the producer so the next publish attempt triggers reconnect.
+        # Without this, a broker that drops messages in-flight (broker down,
+        # auth failure, topic deleted) would leave the producer in a state where
+        # send() appears to succeed but nothing is ever delivered.
+        self._producer = None
 
     def close(self) -> None:
         """Flush pending messages and close the producer cleanly."""
@@ -726,7 +848,14 @@ class HealthServer:
 
     def start(self) -> None:
         """Start the health server in a background daemon thread."""
-        self._server = HTTPServer(('', self.port), self._make_handler())
+        try:
+            self._server = HTTPServer(('', self.port), self._make_handler())
+        except OSError as e:
+            logger.critical(
+                f"Cannot bind health server to port {self.port}: {e}. "
+                f"Change [health] port in cert-analyzer.conf or set HEALTH_PORT."
+            )
+            sys.exit(1)
 
         thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         thread.name = 'health-server'
@@ -754,13 +883,17 @@ class CertificateAnalyzer:
                  health_server: Optional['HealthServer'] = None,
                  host_prefix: str = '',
                  kafka_publisher: Optional['KafkaPublisher'] = None,
-                 checksum_enabled: bool = False):
+                 checksum_enabled: bool = False,
+                 demo_mode: bool = False,
+                 fips_compliance_enabled: bool = True):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
         self.host_prefix = host_prefix
         self.kafka_publisher = kafka_publisher
         self.checksum_enabled = checksum_enabled
+        self.demo_mode = demo_mode
+        self.fips_compliance_enabled = fips_compliance_enabled
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -771,16 +904,6 @@ class CertificateAnalyzer:
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
 
-        # Kubernetes enricher - enabled when running in-cluster or locally with kubeconfig
-        if K8S_ENRICHER_AVAILABLE:
-            self.enricher = KubernetesEnricher()
-            if self.enricher.available:
-                logger.info("Kubernetes pod enrichment enabled")
-            else:
-                logger.info("Kubernetes pod enrichment disabled - API unavailable")
-        else:
-            self.enricher = None
-            logger.info("Kubernetes pod enrichment disabled - k8s_enricher not found")
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -1090,15 +1213,81 @@ class CertificateAnalyzer:
             common_name = ""
 
         san_dns_names = []
+        san_ip_addresses = []
         try:
             san_ext = cert.extensions.get_extension_for_oid(
                 x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
             )
             san_dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+            san_ip_addresses = [
+                str(ip) for ip in san_ext.value.get_values_for_type(x509.IPAddress)
+            ]
         except x509.ExtensionNotFound:
             pass
         except Exception as e:
             logger.debug(f"Error extracting SAN: {e}")
+
+        key_usage = None
+        try:
+            ku_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.KEY_USAGE
+            )
+            ku = ku_ext.value
+            flags = [
+                'digital_signature', 'content_commitment', 'key_encipherment',
+                'data_encipherment', 'key_agreement', 'key_cert_sign', 'crl_sign',
+            ]
+            key_usage = [f for f in flags if getattr(ku, f)]
+            if ku.key_agreement:
+                if ku.encipher_only:
+                    key_usage.append('encipher_only')
+                if ku.decipher_only:
+                    key_usage.append('decipher_only')
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Key Usage: {e}")
+
+        extended_key_usage = None
+        try:
+            eku_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.EXTENDED_KEY_USAGE
+            )
+            extended_key_usage = [
+                _EKU_NAMES.get(oid.dotted_string, oid.dotted_string)
+                for oid in eku_ext.value
+            ]
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Extended Key Usage: {e}")
+
+        is_ca = None
+        basic_constraints_path_length = None
+        try:
+            bc_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.BASIC_CONSTRAINTS
+            )
+            is_ca = bc_ext.value.ca
+            basic_constraints_path_length = bc_ext.value.path_length
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Basic Constraints: {e}")
+
+        # A certificate is self-signed when its subject name matches its issuer
+        # and the signature verifies against its own public key.
+        # verify_directly_issued_by() (cryptography ≥40) performs both checks atomically;
+        # on older versions (e.g. RHEL8 ships 3.2.1) fall back to name-match heuristic.
+        is_self_signed = False
+        try:
+            cert.verify_directly_issued_by(cert)
+            is_self_signed = True
+        except AttributeError:
+            # cryptography < 40: Name.__eq__ does proper attribute-set comparison.
+            is_self_signed = cert.subject == cert.issuer
+        except Exception:
+            pass
 
         # Compute SHA-256 of DER-encoded certificate when enabled.
         # Uses public_bytes() which is always available for a parsed cert object.
@@ -1110,6 +1299,22 @@ class CertificateAnalyzer:
                 checksum = hashlib.sha256(der_bytes).hexdigest()
             except Exception as e:
                 logger.debug(f"Could not compute checksum for cert {cert_index} in {cert_path}: {e}")
+
+        fips_result = None
+        if self.fips_compliance_enabled:
+            try:
+                pub_key = cert.public_key()
+            except Exception:
+                pub_key = None
+            try:
+                fips_result = _fips_check(cert, pub_key=pub_key)
+            except Exception as e:
+                logger.debug(f"FIPS check failed for cert {cert_index} in {cert_path}: {e}")
+                fips_result = FipsComplianceResult(
+                    compliant=False, key_algorithm='unknown', key_size=0,
+                    curve_name='', signature_hash='unknown',
+                    violations=['FIPS check error'],
+                )
 
         return CertificateInfo(
             path=cert_path,
@@ -1123,8 +1328,20 @@ class CertificateAnalyzer:
             namespace=namespace,
             common_name=common_name,
             san_dns_names=san_dns_names,
+            san_ip_addresses=san_ip_addresses,
             cert_index=cert_index,
             checksum=checksum,
+            key_algorithm=fips_result.key_algorithm if fips_result is not None else '',
+            key_size=fips_result.key_size if fips_result is not None else 0,
+            signature_hash=fips_result.signature_hash if fips_result is not None else '',
+            curve_name=fips_result.curve_name if fips_result is not None else '',
+            fips_compliant=fips_result.compliant if fips_result is not None else False,
+            fips_violations=fips_result.violations if fips_result is not None else [],
+            key_usage=key_usage,
+            extended_key_usage=extended_key_usage,
+            is_ca=is_ca,
+            basic_constraints_path_length=basic_constraints_path_length,
+            is_self_signed=is_self_signed,
         )
 
     def analyze_certificate(
@@ -1169,45 +1386,47 @@ class CertificateAnalyzer:
         return cert_infos
 
     def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
-        """
-        Apply workload context to a CertificateInfo instance.
+        """Populate all Tetragon Pod proto fields onto cert_info."""
+        if tetragon_pod is None:
+            return
 
-        Primary source: Tetragon event pod proto - provides pod name, namespace,
-        workload kind/name, and pod labels with zero additional API calls.
+        cert_info.pod_name        = tetragon_pod.name
+        cert_info.namespace       = tetragon_pod.namespace
+        cert_info.workload_kind   = tetragon_pod.workload_kind
+        cert_info.workload_name   = tetragon_pod.workload
+        cert_info.pod_labels      = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
+        # pod.uid available from Tetragon v1.6.0; empty string on older servers
+        if tetragon_pod.uid:
+            cert_info.pod_uid = tetragon_pod.uid
+        # pod.pod_annotations available from Tetragon v1.5.0; empty map on older servers
+        cert_info.pod_annotations = dict(tetragon_pod.pod_annotations) if tetragon_pod.pod_annotations else {}
 
-        Secondary source: Kubernetes API enricher - supplements with fields
-        Tetragon does not provide, specifically container name and container image.
-        """
-        # --- Primary: read directly from the Tetragon event proto ---
-        if tetragon_pod is not None:
-            cert_info.pod_name      = tetragon_pod.name
-            cert_info.namespace     = tetragon_pod.namespace
-            cert_info.workload_kind = tetragon_pod.workload_kind
-            cert_info.workload_name = tetragon_pod.workload
-            cert_info.pod_labels    = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
-            # Derive app_label from pod labels using common conventions
-            for key in ["app.kubernetes.io/name", "app", "name"]:
-                if key in cert_info.pod_labels:
-                    cert_info.app_label = cert_info.pod_labels[key]
-                    break
-            logger.debug(
-                f"Tetragon pod context: pod={cert_info.pod_name} "
-                f"namespace={cert_info.namespace} "
-                f"workload={cert_info.workload_kind}/{cert_info.workload_name} "
-                f"labels={cert_info.pod_labels}"
-            )
+        for key in ["app.kubernetes.io/name", "app", "name"]:
+            if key in cert_info.pod_labels:
+                cert_info.app_label = cert_info.pod_labels[key]
+                break
 
-        # --- Secondary: Kubernetes API for fields Tetragon doesn't provide ---
-        # Currently used for: container_name, container_image
-        if self.enricher and self.enricher.available and cert_info.pod_name and cert_info.namespace:
-            pod_ctx = self.enricher.enrich(cert_info.pod_name, cert_info.namespace)
-            if pod_ctx:
-                cert_info.container_name  = pod_ctx.container_name
-                cert_info.container_image = pod_ctx.container_image
-                logger.debug(
-                    f"K8s enricher added: container={cert_info.container_name} "
-                    f"image={cert_info.container_image}"
-                )
+        c = tetragon_pod.container
+        cert_info.container_id               = c.id
+        cert_info.container_name             = c.name
+        cert_info.container_image            = c.image.name
+        cert_info.container_image_id         = c.image.id
+        cert_info.container_maybe_exec_probe = c.maybe_exec_probe
+        # container.security_context available from Tetragon v1.5.0; unset on older servers
+        if c.HasField('security_context'):
+            cert_info.container_privileged = c.security_context.privileged
+        if c.HasField('pid'):
+            cert_info.container_pid = c.pid.value
+        if c.HasField('start_time'):
+            cert_info.container_start_time = c.start_time.ToDatetime()
+
+        logger.debug(
+            f"Tetragon pod context: pod={cert_info.pod_name} uid={cert_info.pod_uid} "
+            f"namespace={cert_info.namespace} "
+            f"workload={cert_info.workload_kind}/{cert_info.workload_name} "
+            f"container={cert_info.container_name} image={cert_info.container_image} "
+            f"privileged={cert_info.container_privileged} labels={cert_info.pod_labels}"
+        )
 
     def log_certificate_status(self, info: CertificateInfo):
         """Log certificate status with appropriate severity"""
@@ -1222,9 +1441,12 @@ class CertificateAnalyzer:
         if info.pod_name:
             k8s_ctx = (
                 f" | pod={info.pod_name} namespace={info.namespace}"
+                + (f" node={info.node_name}" if info.node_name else "")
                 + (f" workload={info.workload}" if info.workload else "")
                 + (f" container={info.container_name}" if info.container_name else "")
             )
+        elif info.node_name:
+            k8s_ctx = f" | node={info.node_name}"
 
         if info.is_expired:
             logger.error(
@@ -1255,21 +1477,71 @@ class CertificateAnalyzer:
                 f"{k8s_ctx}"
             )
 
-        logger.debug(f"   Subject: {info.subject}")
-        logger.debug(f"   Issuer: {info.issuer}")
-        logger.debug(f"   Serial: {info.serial_number}")
+        detail_log = logger.info if self.demo_mode else logger.debug
+        detail_log(f"   Subject: {info.subject}")
+        detail_log(f"   Issuer: {info.issuer}")
+        detail_log(f"   Serial: {info.serial_number}")
         if info.checksum:
-            logger.debug(f"   SHA-256: {info.checksum}")
-        logger.debug(
+            detail_log(f"   SHA-256: {info.checksum}")
+        detail_log(
             f"   Valid: {info.not_before.strftime('%Y-%m-%d')} -> "
             f"{info.not_after.strftime('%Y-%m-%d')}"
         )
         if info.san_dns_names:
-            logger.debug(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+            detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+        if info.san_ip_addresses:
+            detail_log(f"   SAN IP:  {', '.join(info.san_ip_addresses[:5])}")
+        if info.key_usage is not None or info.extended_key_usage is not None:
+            ku  = ', '.join(info.key_usage)         if info.key_usage         else '—'
+            eku = ', '.join(info.extended_key_usage) if info.extended_key_usage else '—'
+            detail_log(f"   Key Usage: {ku} | EKU: {eku}")
+        if info.is_ca is not None:
+            bc = "CA" if info.is_ca else "end-entity"
+            if info.is_ca and info.basic_constraints_path_length is not None:
+                bc += f" (path length {info.basic_constraints_path_length})"
+            detail_log(f"   Basic Constraints: {bc}")
+        if info.fips_compliant:
+            alg = info.key_algorithm
+            if info.key_size:
+                alg += f" {info.key_size}-bit"
+            if info.curve_name:
+                alg += f"/{info.curve_name}"
+            if info.signature_hash:
+                alg += f"/{info.signature_hash}"
+            detail_log(f"   FIPS: compliant ({alg})")
+        elif info.fips_violations:
+            logger.warning(
+                f"⚠️  FIPS NON-COMPLIANT: {display_path} — "
+                + " | ".join(info.fips_violations)
+            )
+        if info.is_self_signed:
+            logger.warning(
+                f"⚠️  SELF-SIGNED: {display_path} "
+                f"(process={info.process} CN={info.common_name})"
+                f"{k8s_ctx}"
+            )
         if info.pod_name:
-            logger.debug(f"   Pod: {info.namespace}/{info.pod_name}")
-            logger.debug(f"   Workload: {info.workload}")
-            logger.debug(f"   Container: {info.container_name} ({info.container_image})")
+            detail_log(f"   Pod: {info.namespace}/{info.pod_name}")
+            detail_log(f"   Workload: {info.workload}")
+            detail_log(f"   Container: {info.container_name} ({info.container_image})")
+
+    def _resolve_process_binary(self, process_name: str, pid: int) -> str:
+        """Resolve the full binary path when Tetragon truncates it to a parent directory.
+
+        Always probes /proc/{pid}/exe so that ProtectHome (which makes os.path.isdir()
+        unreliable for /home paths inside the service namespace) does not prevent
+        resolution while the process is still alive.
+        """
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+            prefix = process_name.rstrip("/")
+            if exe == prefix or exe.startswith(prefix + "/"):
+                if exe != process_name:
+                    logger.debug(f"Resolved truncated binary path for PID {pid}: {process_name!r} -> {exe!r}")
+                return exe
+        except OSError as e:
+            logger.debug(f"Could not resolve binary path for PID {pid}: {e}")
+        return process_name
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
         """
@@ -1289,8 +1561,8 @@ class CertificateAnalyzer:
         # Handle kprobe events
         if event.HasField('process_kprobe'):
             kprobe = event.process_kprobe
-            process_name = kprobe.process.binary
             pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+            process_name = self._resolve_process_binary(kprobe.process.binary, pid)
 
             if kprobe.process.HasField('pod'):
                 tetragon_pod = kprobe.process.pod
@@ -1313,8 +1585,8 @@ class CertificateAnalyzer:
         # Handle uprobe events
         elif event.HasField('process_uprobe'):
             uprobe = event.process_uprobe
-            process_name = uprobe.process.binary
             pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+            process_name = self._resolve_process_binary(uprobe.process.binary, pid)
 
             if uprobe.process.HasField('pod'):
                 tetragon_pod = uprobe.process.pod
@@ -1343,18 +1615,226 @@ class CertificateAnalyzer:
 
         return cert_path, process_name, pid, namespace, tetragon_pod
 
-    def _handle_uprobe_in_memory_cert(self, event) -> bool:
+    # ------------------------------------------------------------------
+    # PKCS11 / NSS helpers (Java FIPS mode)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_process_memory(pid: int, address: int, size: int) -> Optional[bytes]:
+        """Read bytes from a process's virtual address space via /proc/<pid>/mem.
+
+        Requires CAP_SYS_PTRACE (or the same UID as the target process when
+        YAMA ptrace restrictions are relaxed).  cert_analyzer typically runs as
+        root in the Tetragon security-monitoring context, so this works.
         """
-        Handle a process_uprobe event where the cert arrives as raw DER bytes
-        (e.g. d2i_X509). Returns True if a cert was successfully extracted and
-        processed, False otherwise (no bytes_arg, unparseable bytes, etc.).
+        if address == 0 or size == 0:
+            return None
+        try:
+            with open(f"/proc/{pid}/mem", "rb") as f:
+                f.seek(address)
+                return f.read(size)
+        except (IOError, OSError, OverflowError) as exc:
+            logger.debug(f"Cannot read /proc/{pid}/mem at 0x{address:x} ({size}B): {exc}")
+            return None
+
+    def _handle_nsc_create_object(self, event) -> bool:
+        """Handle a NSC_CreateObject uprobe event from libsoftokn3.so.
+
+        NSC_CreateObject(session, pTemplate, ulCount, phObject) is called when
+        the NSS PKCS11 token creates any object — keys, digest sessions, and
+        certificates (CKA_CLASS = CKO_CERTIFICATE = 0x01).
+
+        When Java runs under FIPS mode, KeyStore.setCertificateEntry() calls this
+        function to import a certificate DER blob into the NSS FIPS token.  The
+        cert bytes live inside the CK_ATTRIBUTE pTemplate array:
+
+            struct CK_ATTRIBUTE {          // 24 bytes on LP64
+                uint64 type;               // e.g. 0x01 = CKA_CLASS, 0x11 = CKA_VALUE
+                void  *pValue;             // pointer to the attribute's value
+                uint64 ulValueLen;         // byte length of *pValue
+            };
+
+        Tetragon captures pTemplate and ulCount as uint64 args (args[1] and args[2]).
+        This method reads the template from /proc/<pid>/mem, locates CKA_CLASS and
+        CKA_VALUE, verifies the object is a certificate, then follows the CKA_VALUE
+        pValue pointer to extract the raw DER bytes.
         """
         if not event.HasField('process_uprobe'):
             return False
 
         uprobe = event.process_uprobe
-        process_name = uprobe.process.binary
         pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+
+        if self.filter_self_events:
+            if "cert-analyzer" in process_name or "cert_analyzer" in process_name:
+                return False
+            if pid == os.getpid():
+                return False
+
+        # Extract the three uint64 args: session, pTemplate, ulCount
+        uint64_args = [arg.size_arg for arg in uprobe.args if arg.HasField('size_arg')]
+        if len(uint64_args) < 3:
+            logger.debug("NSC_CreateObject: fewer than 3 uint64 args, skipping")
+            return False
+
+        template_addr = uint64_args[1]
+        count = uint64_args[2]
+
+        if count == 0 or count > 64:
+            logger.debug(f"NSC_CreateObject: implausible attribute count {count}, skipping")
+            return False
+
+        # Read the flat CK_ATTRIBUTE array (each entry is 24 bytes)
+        template_bytes = self._read_process_memory(pid, template_addr, count * 24)
+        if not template_bytes or len(template_bytes) < count * 24:
+            logger.debug(f"NSC_CreateObject: could not read template from PID {pid}")
+            return False
+
+        CKA_CLASS = 0x00000001
+        CKO_CERTIFICATE = 0x00000001
+        CKA_VALUE = 0x00000011
+        ATTR_SIZE = 24  # sizeof(CK_ATTRIBUTE) on LP64
+
+        ck_class: Optional[int] = None
+        der_addr: Optional[int] = None
+        der_len: int = 0
+
+        for i in range(count):
+            off = i * ATTR_SIZE
+            attr_type = int.from_bytes(template_bytes[off:off+8], 'little')
+            p_value   = int.from_bytes(template_bytes[off+8:off+16], 'little')
+            val_len   = int.from_bytes(template_bytes[off+16:off+24], 'little')
+
+            if attr_type == CKA_CLASS and val_len in (4, 8):
+                class_bytes = self._read_process_memory(pid, p_value, val_len)
+                if class_bytes:
+                    ck_class = int.from_bytes(class_bytes[:val_len], 'little')
+            elif attr_type == CKA_VALUE and val_len > 0:
+                der_addr = p_value
+                der_len  = val_len
+
+        if ck_class != CKO_CERTIFICATE:
+            logger.debug(f"NSC_CreateObject from {process_name}: CKA_CLASS={ck_class:#x}, not a cert")
+            return False
+
+        if not der_addr or not (64 < der_len < 65536):
+            logger.debug(f"NSC_CreateObject from {process_name}: no CKA_VALUE or implausible len {der_len}")
+            return False
+
+        der_bytes = self._read_process_memory(pid, der_addr, der_len)
+        if not der_bytes:
+            logger.debug(f"NSC_CreateObject: could not read DER bytes from PID {pid}")
+            return False
+
+        try:
+            cert = x509.load_der_x509_certificate(der_bytes, default_backend())
+        except Exception as exc:
+            logger.debug(f"NSC_CreateObject: DER parse failed: {exc}")
+            return False
+
+        serial = str(cert.serial_number)
+        synthetic_path = f"uprobe://NSC_CreateObject/{pid}/{serial}"
+
+        self.metrics.last_event_timestamp.set(time.time())
+        logger.info(
+            f"🔍 Detected Java FIPS in-memory certificate: {synthetic_path} "
+            f"by {process_name} (PID: {pid})"
+        )
+
+        if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
+            logger.info(f"Re-detected known Java FIPS certificate: {synthetic_path}")
+            return True
+
+        cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid, namespace)
+        if cert_info is None:
+            return False
+
+        self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name = event.node_name
+        self.metrics.update_certificate_metrics(cert_info)
+        self.log_certificate_status(cert_info)
+        self.known_certs[cert_info.unique_key] = cert_info
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        self._update_cache_metrics()
+        return True
+
+    def _handle_nsc_find_objects_init(self, event) -> bool:
+        """Handle a NSC_FindObjectsInit uprobe event from libsoftokn3.so.
+
+        This fires when Java enumerates objects in the NSS PKCS11 token, which
+        happens during KeyStore.load() in FIPS mode.  The template may contain
+        a CKO_CERTIFICATE class filter, indicating a cert-read operation.
+
+        We cannot extract cert bytes here (they are returned by subsequent
+        NSC_FindObjects + NSC_GetAttributeValue calls), but we log the event
+        to show that Java FIPS cert enumeration was detected.
+        """
+        if not event.HasField('process_uprobe'):
+            return False
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+
+        if self.filter_self_events and pid == os.getpid():
+            return False
+
+        uint64_args = [arg.size_arg for arg in uprobe.args if arg.HasField('size_arg')]
+        if len(uint64_args) < 3:
+            return False
+
+        template_addr = uint64_args[1]
+        count = uint64_args[2]
+
+        if count == 0 or count > 32:
+            return False
+
+        template_bytes = self._read_process_memory(pid, template_addr, count * 24)
+        if not template_bytes:
+            return False
+
+        CKA_CLASS = 0x00000001
+        CKO_CERTIFICATE = 0x00000001
+        ATTR_SIZE = 24
+
+        for i in range(count):
+            off = i * ATTR_SIZE
+            attr_type = int.from_bytes(template_bytes[off:off+8], 'little')
+            p_value   = int.from_bytes(template_bytes[off+8:off+16], 'little')
+            val_len   = int.from_bytes(template_bytes[off+16:off+24], 'little')
+
+            if attr_type == CKA_CLASS and val_len in (4, 8):
+                class_bytes = self._read_process_memory(pid, p_value, val_len)
+                if class_bytes:
+                    ck_class = int.from_bytes(class_bytes[:val_len], 'little')
+                    if ck_class == CKO_CERTIFICATE:
+                        logger.info(
+                            f"🔍 Java FIPS cert enumeration: NSC_FindObjectsInit "
+                            f"from {process_name} (PID: {pid}) — "
+                            f"cert bytes in subsequent NSC_GetAttributeValue"
+                        )
+                        return True
+        return False
+
+    def _handle_uprobe_in_memory_cert(self, event) -> bool:
+        """
+        Handle a process_uprobe event where the cert arrives as raw DER bytes
+        (e.g. SSL_CTX_use_certificate_ASN1). Returns True if a cert was
+        successfully extracted and processed, False otherwise (no bytes_arg,
+        unparseable bytes, etc.).
+        """
+        if not event.HasField('process_uprobe'):
+            return False
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
         tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
         namespace = tetragon_pod.namespace if tetragon_pod else ""
 
@@ -1382,7 +1862,8 @@ class CertificateAnalyzer:
             return False
 
         serial = str(cert.serial_number)
-        synthetic_path = f"uprobe://d2i_X509/{pid}/{serial}"
+        symbol = uprobe.symbol if uprobe.symbol else "undetermined_symbol_name"
+        synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
         self.metrics.last_event_timestamp.set(time.time())
         logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
@@ -1396,6 +1877,7 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name = event.node_name
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -1415,6 +1897,15 @@ class CertificateAnalyzer:
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
 
         if not cert_path:
+            # Route PKCS11/NSS events (Java FIPS) to dedicated handlers first.
+            if event.HasField('process_uprobe'):
+                symbol = event.process_uprobe.symbol
+                if symbol == "NSC_CreateObject":
+                    self._handle_nsc_create_object(event)
+                    return
+                if symbol == "NSC_FindObjectsInit":
+                    self._handle_nsc_find_objects_init(event)
+                    return
             self._handle_uprobe_in_memory_cert(event)
             return
 
@@ -1448,6 +1939,8 @@ class CertificateAnalyzer:
                 if tetragon_pod is not None and not cert_info.pod_name:
                     logger.debug(f"Applying pod context to cached entry for {cert_path}")
                     self._apply_pod_context(cert_info, tetragon_pod)
+                if event.node_name:
+                    cert_info.node_name = event.node_name
                 self.log_certificate_status(cert_info)
                 self.metrics.update_certificate_metrics(cert_info)
             return
@@ -1462,6 +1955,7 @@ class CertificateAnalyzer:
         for cert_info in cert_infos:
             # Apply pod context: Tetragon event first, k8s API for extras
             self._apply_pod_context(cert_info, tetragon_pod)
+            cert_info.node_name = event.node_name
 
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)
@@ -1763,7 +2257,9 @@ def main():
     # Empty by default for standalone RPM deployment — set to /host for
     # Kubernetes where the node root filesystem is bind-mounted at /host
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
-    checksum_enabled = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',           'false').lower() == 'true'
+    checksum_enabled        = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',        'false').lower() == 'true'
+    demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
+    fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
@@ -1785,6 +2281,7 @@ def main():
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
     logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
+    logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -1800,7 +2297,14 @@ def main():
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
-    start_http_server(metrics_port)
+    try:
+        start_http_server(metrics_port)
+    except OSError as e:
+        logger.critical(
+            f"Cannot bind Prometheus metrics server to port {metrics_port}: {e}. "
+            f"Change [metrics] port in cert-analyzer.conf or set METRICS_PORT."
+        )
+        sys.exit(1)
 
     # Initialise optional Kafka publisher before the analyzer so it can be
     # passed in at construction time
@@ -1824,7 +2328,9 @@ def main():
                                    filter_self_events=filter_self,
                                    host_prefix=host_prefix,
                                    kafka_publisher=kafka_publisher,
-                                   checksum_enabled=checksum_enabled)
+                                   checksum_enabled=checksum_enabled,
+                                   demo_mode=demo_mode,
+                                   fips_compliance_enabled=fips_compliance_enabled)
 
     health = HealthServer(
         analyzer=analyzer,
