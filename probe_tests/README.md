@@ -121,16 +121,16 @@ needed for local testing.
 
 **End-to-end test procedure:**
 
-The order of operations matters: Tetragon's uprobe attaches to processes that
-already have `libcert_agent_stub.so` mapped at policy-load time.  Load the
-policy **after** the agent has been injected into the JVM.
-
-**Step 1 — Load the Tetragon policy** (do this first so it is ready):
+**Step 1 — Load the Tetragon policy** (from the repo root):
 ```bash
 sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
 ```
 
-**Step 2 — Start the target JVM** (from the repo root):
+The uprobe is installed on the `libcert_agent_stub.so` file inode, so it fires
+for any JVM that loads the library — including those injected after the policy
+is loaded.
+
+**Step 2 — Start the target JVM**:
 ```bash
 # prints PID and loops every 5 seconds
 java -cp probe_tests/java CertAgentTest
@@ -147,27 +147,14 @@ The JVM terminal should print:
 [cert-agent] Initialized — intercepting KeyStore.setCertificateEntry
 ```
 
-**Step 4 — Reload the policy** now that the `.so` is in the JVM's address space:
-```bash
-sudo tetra tracingpolicy delete java-non-fips-cert
-sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
-```
-
-**Step 5 — Watch cert_analyzer** for events (within one 5-second loop interval):
+**Step 4 — Watch cert_analyzer** for events (within one 5-second loop interval):
 ```bash
 sudo journalctl -u cert-analyzer -f
 # Expected:
 # 🔍 Detected in-memory certificate: uprobe://java_cert_agent_write/<pid>/... by /usr/bin/java
 ```
 
-> **Why the policy reload in step 4?**  Tetragon enumerates processes that have
-> the target library mapped when a policy is loaded, and attaches its uprobe to
-> those processes.  If no process has `libcert_agent_stub.so` mapped at load
-> time (because jattach hadn't run yet), the uprobe is not attached.  Reloading
-> after jattach ensures Tetragon finds the JVM and attaches correctly.
-
-**Or inject statically** (skips the policy reload — the `.so` is in the JVM's
-maps from the start, so a single policy load suffices):
+**Or inject statically** (agent is pre-loaded before the JVM starts):
 ```bash
 # Terminal 1: load policy once
 sudo tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
