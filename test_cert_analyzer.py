@@ -4938,3 +4938,30 @@ class TestSelfSignedDetection:
         by_cn = {info.common_name: info for info in cert_infos}
         assert by_cn["self.example.com"].is_self_signed is True
         assert by_cn["leaf.example.com"].is_self_signed is False
+
+    def test_self_signed_fallback_on_old_cryptography(self, analyzer, temp_dir):
+        """On cryptography <40 (no verify_directly_issued_by), a self-signed cert is still detected via subject==issuer."""
+        from unittest.mock import patch
+        cert, _ = TestCertificateGeneration.generate_certificate("legacy-self.example.com", 365)
+        path = os.path.join(temp_dir, "legacy-self.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        with patch.object(x509.Certificate, "verify_directly_issued_by", side_effect=AttributeError):
+            cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is True
+
+    def test_ca_signed_fallback_on_old_cryptography(self, analyzer, temp_dir):
+        """On cryptography <40 (no verify_directly_issued_by), a CA-signed cert is not misclassified as self-signed."""
+        from unittest.mock import patch
+        ca_cert, ca_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf_cert, _    = _generate_ca_signed_certificate("legacy-leaf.example.com", 365, ca_cert, ca_key)
+        path = os.path.join(temp_dir, "legacy-leaf.pem")
+        TestCertificateGeneration.save_certificate_pem(leaf_cert, path)
+
+        with patch.object(x509.Certificate, "verify_directly_issued_by", side_effect=AttributeError):
+            cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        assert len(cert_infos) == 1
+        assert cert_infos[0].is_self_signed is False
