@@ -3,7 +3,7 @@
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 
-CertSight provides real-time runtime certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes.
+CertSight provides real-time certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes.
 
 ---
 
