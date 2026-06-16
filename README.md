@@ -54,13 +54,9 @@ Policies are not bundled in the RPM — they are shipped separately so they can 
 ```bash
 tar -xzf tetragon-policies-<version>.tar.gz
 
-# Load all policies immediately (active until Tetragon restarts):
+# Detects your RHEL version, loads all appropriate policies, and persists
+# them to /etc/tetragon/tetragon.tp.d/ so they survive Tetragon restarts:
 sudo ./tetragon-policies/apply-policies.sh
-
-# Or install persistently (loaded automatically on Tetragon start):
-sudo cp tetragon-policies/*.yaml /etc/tetragon/tetragon.tp.d/
-sudo cp tetragon-policies/experimental/*.yaml /etc/tetragon/tetragon.tp.d/
-sudo systemctl restart tetragon
 ```
 
 > **Note:** `experimental/java-fips-nss-cert.yaml` hooks `NSC_CreateObject` and `NSC_FindObjectsInit` inside `libsoftokn3.so`. These symbols are not exported in the stripped RHEL package, so Tetragon resolves them via build-ID debuginfo lookup. Install the debuginfo package before loading this policy or the uprobe will fail to attach:
@@ -78,13 +74,7 @@ sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
 sudo systemctl enable --now cert-agent-deployer
 ```
 
-The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). Load the Tetragon policy after the RPMs are installed (no ordering constraint relative to the deployer or any running JVM):
-
-```bash
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
-```
-
-The uprobe is installed on the `libcert_agent_stub.so` file inode, so it automatically fires for any JVM that subsequently loads the library — including those the deployer attaches to after the policy is loaded.
+The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). The `experimental/java-non-fips-cert.yaml` policy is included in `apply-policies.sh` — if you have already run it, no additional step is needed. The uprobe is installed on the `libcert_agent_stub.so` file inode, so it fires for any JVM that subsequently loads the library with no ordering constraint relative to the deployer.
 
 **Verifying with the probe-tests archive:**
 
