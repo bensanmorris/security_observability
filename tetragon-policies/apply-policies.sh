@@ -9,6 +9,8 @@ if [[ ! -x "$TETRA" ]]; then
     exit 1
 fi
 
+TETRAGON_POLICY_DIR=/etc/tetragon/tetragon.tp.d
+
 # Detect RHEL major version to select the correct OpenSSL policy variant.
 # RHEL 8 ships OpenSSL 1.1 (libssl.so.1.1); RHEL 9 ships OpenSSL 3 (libssl.so.3).
 RHEL_MAJOR=0
@@ -35,6 +37,19 @@ esac
 declare -a SUCCEEDED=()
 declare -a FAILED=()
 declare -a SKIPPED=()
+declare -a PERSIST_FAILED=()
+
+persist_policy() {
+    local policy_file="$1"
+    local label="$2"
+    local dest_name="${label//\//-}"
+    if sudo mkdir -p "$TETRAGON_POLICY_DIR" && sudo cp "$policy_file" "$TETRAGON_POLICY_DIR/$dest_name"; then
+        :
+    else
+        echo "    Warning: failed to copy $label to $TETRAGON_POLICY_DIR" >&2
+        PERSIST_FAILED+=("$label")
+    fi
+}
 
 apply_policy() {
     local policy_file="$1"
@@ -43,6 +58,7 @@ apply_policy() {
     if output=$(sudo "$TETRA" tracingpolicy add "$policy_file" 2>&1); then
         printf "OK\n"
         SUCCEEDED+=("$label")
+        persist_policy "$policy_file" "$label"
     else
         printf "FAILED\n"
         # Indent the error output so it's visually grouped with the policy
@@ -86,6 +102,9 @@ TOTAL=$(( ${#SUCCEEDED[@]} + ${#FAILED[@]} ))
 echo ""
 echo "================================================"
 echo " Summary: ${#SUCCEEDED[@]}/${TOTAL} policies applied successfully"
+if [[ ${#SUCCEEDED[@]} -gt 0 ]]; then
+    echo " Persisted to: $TETRAGON_POLICY_DIR"
+fi
 echo "================================================"
 
 for label in "${SUCCEEDED[@]}"; do
@@ -96,6 +115,9 @@ for label in "${FAILED[@]}"; do
 done
 for label in "${SKIPPED[@]}"; do
     echo "  [SKIPPED] $label"
+done
+for label in "${PERSIST_FAILED[@]}"; do
+    echo "  [NO PERSIST] $label"
 done
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
