@@ -1266,11 +1266,14 @@ class CertificateAnalyzer:
         # A certificate is self-signed when its subject name matches its issuer
         # and the signature verifies against its own public key.
         # verify_directly_issued_by() (cryptography ≥40) performs both checks atomically;
-        # any exception means it is not self-signed.
+        # on older versions (e.g. RHEL8 ships 3.2.1) fall back to name-match heuristic.
         is_self_signed = False
         try:
             cert.verify_directly_issued_by(cert)
             is_self_signed = True
+        except AttributeError:
+            # cryptography < 40: Name.__eq__ does proper attribute-set comparison.
+            is_self_signed = cert.subject == cert.issuer
         except Exception:
             pass
 
