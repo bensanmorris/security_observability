@@ -78,6 +78,7 @@ All three share the same label set:
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `cert_analyzer_healthy` | Gauge | — | `1` while the analyzer is running normally |
+| `tetragon_connected` | Gauge | — | `1` when the event stream to Tetragon is active, `0` when disconnected or not yet connected. Set to `0` on `gRPC` error or shutdown; returns to `1` as soon as the stream is re-established |
 | `cert_analyzer_last_event_timestamp` | Gauge | — | Unix timestamp of the last event received from Tetragon |
 | `cert_analyzer_tetragon_version` | Info | — | `build_version` and `runtime_version` labels |
 | `cert_analyzer_tetragon_version_match` | Gauge | — | `1` if build and runtime Tetragon versions match, `0` if mismatched |

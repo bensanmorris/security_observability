@@ -8,6 +8,8 @@ import logging
 import tempfile
 import os
 import time
+import threading
+import grpc
 from datetime import datetime, timedelta
 from pathlib import Path
 from cryptography import x509
@@ -5156,3 +5158,133 @@ class TestSelfSignedDetection:
 
         assert len(cert_infos) == 1
         assert cert_infos[0].is_self_signed is False
+
+
+# ── Tetragon connected metric helpers ────────────────────────────────────────
+
+class _GrpcRpcError(grpc.RpcError):
+    """Minimal gRPC RpcError that satisfies the code().name access in start()."""
+    def code(self):
+        class _Code:
+            name = 'UNAVAILABLE'
+        return _Code()
+
+
+class _BlockingEventIterator:
+    """Iterator that blocks until stop is set — simulates a live gRPC event stream."""
+    def __init__(self, stop: threading.Event):
+        self._stop = stop
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while not self._stop.is_set():
+            time.sleep(0.02)
+        raise StopIteration
+
+
+class _StreamingStub:
+    """
+    Mock stub for start() integration tests.
+
+    When fail_first=True the first GetEvents call raises gRPC error; all
+    subsequent calls block normally. streaming_started is set when a
+    non-failing call begins, and stop signals that call to end.
+    """
+    def __init__(self, fail_first: bool = False):
+        self.streaming_started = threading.Event()
+        self.stop              = threading.Event()
+        self._fail_first       = fail_first
+        self._call_count       = 0
+
+    def GetVersion(self, req, timeout=None):
+        return _MockGetVersionResponse('v1.0.0')
+
+    def ListTracingPolicies(self, req, timeout=None):
+        return _MockListPoliciesResponse([])
+
+    def GetEvents(self, req):
+        self._call_count += 1
+        if self._fail_first and self._call_count == 1:
+            raise _GrpcRpcError()
+        self.streaming_started.set()
+        return _BlockingEventIterator(self.stop)
+
+
+class TestTetragonConnected:
+    """
+    Tests for the tetragon_connected Prometheus gauge.
+
+    Transitions are driven by start(). Tests that verify connected/disconnected
+    states run start() in a background daemon thread with injected mock channel
+    and stub so no real Tetragon socket is required.
+    """
+
+    def _start_in_thread(self, analyzer, stub, monkeypatch, mock_sleep=None):
+        """Patch channel/stub creation and launch start() in a daemon thread."""
+        import cert_analyzer as _ca
+
+        class _MockChannel:
+            def close(self): pass
+
+        monkeypatch.setattr(_ca.grpc, 'insecure_channel',
+                            lambda *a, **kw: _MockChannel())
+        monkeypatch.setattr(_ca.sensors_pb2_grpc, 'FineGuidanceSensorsStub',
+                            lambda ch: stub)
+        if mock_sleep is not None:
+            monkeypatch.setattr(_ca.time, 'sleep', mock_sleep)
+
+        t = threading.Thread(target=analyzer.start, daemon=True)
+        t.start()
+        return t
+
+    def test_initial_value_is_0(self, analyzer):
+        """tetragon_connected starts at 0 before any connection is attempted."""
+        assert analyzer.metrics.tetragon_connected._value.get() == 0.0
+
+    def test_set_to_1_when_event_stream_is_active(self, analyzer, monkeypatch):
+        """tetragon_connected is 1 while GetEvents is actively streaming."""
+        stub = _StreamingStub()
+        self._start_in_thread(analyzer, stub, monkeypatch)
+
+        assert stub.streaming_started.wait(timeout=3), "Event stream did not start"
+        assert analyzer.metrics.tetragon_connected._value.get() == 1.0
+        stub.stop.set()
+
+    def test_set_to_0_on_grpc_error(self, analyzer, monkeypatch):
+        """tetragon_connected drops to 0 when GetEvents raises a gRPC error."""
+        error_triggered = threading.Event()
+
+        class _FailingStub:
+            def GetVersion(self, req, timeout=None):
+                return _MockGetVersionResponse('v1.0.0')
+            def ListTracingPolicies(self, req, timeout=None):
+                return _MockListPoliciesResponse([])
+            def GetEvents(self, req):
+                error_triggered.set()
+                raise _GrpcRpcError()
+
+        self._start_in_thread(analyzer, _FailingStub(), monkeypatch)
+
+        assert error_triggered.wait(timeout=3), "gRPC error was never triggered"
+        # The except grpc.RpcError handler sets tetragon_connected=0 immediately
+        # after the raise. A short real sleep ensures the except block has run.
+        time.sleep(0.05)
+        assert analyzer.metrics.tetragon_connected._value.get() == 0.0
+
+    def test_recovers_to_1_after_grpc_error(self, analyzer, monkeypatch):
+        """tetragon_connected returns to 1 once the event stream reconnects."""
+        stub = _StreamingStub(fail_first=True)
+        self._start_in_thread(
+            analyzer, stub, monkeypatch,
+            mock_sleep=lambda s: None,  # skip retry back-off
+        )
+
+        assert stub.streaming_started.wait(timeout=3), "Stream did not recover"
+        assert analyzer.metrics.tetragon_connected._value.get() == 1.0
+        stub.stop.set()
+
+    def test_is_independent_of_analyzer_healthy(self, analyzer):
+        """tetragon_connected and analyzer_healthy are separate metric objects."""
+        assert analyzer.metrics.tetragon_connected is not analyzer.metrics.analyzer_healthy

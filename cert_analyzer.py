@@ -264,6 +264,12 @@ class PrometheusMetrics:
         )
         self.analyzer_healthy.set(1)
 
+        self.tetragon_connected = Gauge(
+            'tetragon_connected',
+            'Whether the analyzer has an active gRPC event stream to Tetragon (1=connected, 0=disconnected)',
+        )
+        self.tetragon_connected.set(0)
+
         self.last_event_timestamp = Gauge(
             'cert_analyzer_last_event_timestamp',
             'Timestamp of last processed event'
@@ -2212,6 +2218,7 @@ class CertificateAnalyzer:
                 try:
                     logger.info("Listening for Tetragon certificate events...")
                     self.metrics.analyzer_healthy.set(1)
+                    self.metrics.tetragon_connected.set(1)
 
                     for response in stub.GetEvents(request):
                         try:
@@ -2228,6 +2235,7 @@ class CertificateAnalyzer:
 
                 except grpc.RpcError as e:
                     self.metrics.analyzer_healthy.set(0)
+                    self.metrics.tetragon_connected.set(0)
                     logger.warning(
                         f"Tetragon connection lost ({e.code().name}), "
                         f"retrying in {retry_delay}s..."
@@ -2237,6 +2245,7 @@ class CertificateAnalyzer:
 
                 except Exception as e:
                     self.metrics.analyzer_healthy.set(0)
+                    self.metrics.tetragon_connected.set(0)
                     logger.error(
                         f"Unexpected error in event stream: {e} — "
                         f"retrying in {retry_delay}s",
@@ -2248,6 +2257,7 @@ class CertificateAnalyzer:
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             self.metrics.analyzer_healthy.set(0)
+            self.metrics.tetragon_connected.set(0)
         finally:
             channel.close()
 
