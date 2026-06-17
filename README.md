@@ -28,7 +28,7 @@ An application is not a single binary. It is a tree of executables and shared li
 - In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
 - Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
 - Which process accessed which certificate, when, and from which Kubernetes pod
-- For details on surfaced fields and metrics per certificate access refer to the [surfaced fields guide](extras/FIELDS-README.md)
+- An extensive set of surfaced fields and metrics per certificate access. Refer to our [surfaced fields guide](extras/FIELDS-README.md)
 
 Instructions are below but if you prefer to watch video guides:
 
