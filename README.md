@@ -3,13 +3,32 @@
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 
-Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of certificate accesses in realtime. Parses and surfaces certificate, process and k8s data (where applicable) as both [Prometheus metrics and Kafka topics](extras/FIELDS-README.md).
+CertSight provides real-time certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes.
 
-Supports in-memory certificate intercepts (via system crypto lib uprobe hooks) for post-decrypt inspection (no keys required) in addition to file-based PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) formats.
+---
 
-Each detected certificate is automatically checked for FIPS 140-2/140-3 algorithm compliance including key type, minimum key size, approved curves, and signature hash with results surfaced in the same Prometheus metrics and Kafka events alongside expiry data.
+## The problem
 
-Java certificate visibility is supported in both FIPS and non-FIPS environments. In FIPS mode, uprobe hooks on NSS (`libsoftokn3.so`) capture certificates at the native layer. In non-FIPS mode, a lightweight Java agent instruments the JCA `KeyStore` API and reports certificates via a native stub hooked by Tetragon — see the [cert-agent (Java, non-FIPS)](probe_tests/README.md#cert-agent-java-non-fips) test for details.
+Certificate expiry causes outages that are entirely preventable. At scale with hundreds of machines and thousands of certificates tracking what's actually running in your estate is hard, especially when certificates are loaded dynamically, passed in memory between TLS stack components, or processed by runtimes that never call system crypto libraries.
+
+## How CertSight differs from existing approaches
+
+| Approach | What it sees | What it misses |
+|---|---|---|
+| Network scanner | Certs on open ports | In-memory certs, internal services, file-only loads |
+| Binary scanner | Vulnerable components in artefacts at build time | Runtime execution paths, dynamically loaded certs |
+| Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
+| **CertSight** | Dynamically linked crypto - every cert access at runtime FIPS compliance checked with process and k8s context | Statically linked crypto (excluding Java / JCA - we've got that covered) |
+
+An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
+
+## What CertSight detects
+
+- Every certificate file access system-wide via eBPF fd_install kprobe (PEM, DER, JKS, PKCS12)
+- In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
+- Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
+- Which process accessed which certificate, when, and from which Kubernetes pod
+- For details on surfaced fields and metrics per certificate access refer to the [surfaced fields guide](extras/FIELDS-README.md)
 
 Instructions are below but if you prefer to watch video guides:
 
@@ -210,8 +229,6 @@ sudo journalctl -u cert-analyzer -f
 # Metrics
 curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 ```
-
----
 
 ## Further reading
 
