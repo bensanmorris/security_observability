@@ -43,6 +43,7 @@ All three share the same label set:
 | `app_label` | k8s pod labels | Value of `app`, `app.kubernetes.io/name`, or `k8s-app` label; empty if none |
 | `container_name` | Tetragon / k8s | Empty on bare metal |
 | `checksum` | X.509 | SHA-256 hex fingerprint of DER-encoded cert; empty string when `checksum_enabled=false` |
+| `parent_process` | Tetragon event | Binary path of the process that spawned the cert loader; empty when Tetragon's process cache did not have the parent at event time (common at startup) |
 
 ### Certificate status flags
 
@@ -138,6 +139,8 @@ unique per certificate, and rotated when the cert at a path changes.
 
   "process":           "/usr/bin/nginx",
   "pid":               12345,
+  "parent_process":    "/usr/bin/containerd-shim",
+  "parent_pid":        12300,
 
   "namespace":         "production",
   "pod_name":          "nginx-7d6b9c-xkp2q",
@@ -210,6 +213,10 @@ unique per certificate, and rotated when the cert at a path changes.
 |---|---|---|
 | `process` | string | Binary path of the process that accessed the certificate |
 | `pid` | int | PID of that process |
+| `parent_process` | string | Binary path of the process that spawned the cert loader; empty string when Tetragon's process cache did not have the parent at event time (common at startup or for short-lived processes) |
+| `parent_pid` | int | PID of the parent process; `0` when unavailable |
+
+> **Security note**: `parent_process` surfaces the spawn chain — e.g. a cert loaded by `/usr/bin/java` whose parent is `/bin/bash` rather than your service manager is a strong signal of unexpected activity. Because Tetragon populates this field from its in-kernel process cache, it may be absent (`""`) for processes that were already running before Tetragon started. Filter on `parent_process != ""` to scope queries to events where the chain is known.
 
 #### Kubernetes context
 
