@@ -31,7 +31,7 @@ from fips_compliance_checker import check_certificate as _fips_check, FipsCompli
 
 # Import generated Tetragon protos
 try:
-    from tetragon import tetragon_pb2, events_pb2, sensors_pb2_grpc
+    from tetragon import tetragon_pb2, events_pb2, sensors_pb2, sensors_pb2_grpc
 except ImportError:
     print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
     sys.exit(1)
@@ -67,6 +67,18 @@ TETRAGON_BUILD_VERSION: str = os.getenv('TETRAGON_BUILD_VERSION', 'unknown')
 # commit SHA via the VERSION build arg in the Containerfile.
 # Falls back to 'dev' when running outside of a built container.
 CERT_ANALYZER_VERSION: str = os.getenv('CERT_ANALYZER_VERSION', 'dev')
+
+# Map TracingPolicyState enum integers to clean label strings.
+# Prefix TP_STATE_ is stripped and the remainder lowercased (e.g. TP_STATE_LOAD_ERROR → load_error).
+_POLICY_STATE_NAMES: Dict[int, str] = {
+    0: 'unknown',
+    1: 'enabled',
+    2: 'disabled',
+    3: 'load_error',
+    4: 'error',
+    5: 'loading',
+    6: 'unloading',
+}
 
 # Configure logging
 logging.basicConfig(
@@ -299,6 +311,18 @@ class PrometheusMetrics:
             'Configured maximum size for all LRU caches',
         )
         self.cache_max_size.set(CACHE_MAX_SIZE)
+
+        # Tetragon policy tracking
+        self.tetragon_policy_info = Gauge(
+            'tetragon_policy_info',
+            'Tetragon tracing policies and their current state (1=present)',
+            ['name', 'namespace', 'state'],
+        )
+        self.tetragon_policies_total = Gauge(
+            'tetragon_policies_total',
+            'Number of Tetragon tracing policies by state',
+            ['state'],
+        )
 
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
@@ -903,7 +927,7 @@ class CertificateAnalyzer:
         # other activity, which is desirable if JKS_PASSWORD has since been set.
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
-
+        self._known_policy_labels: Set[Tuple[str, str, str]] = set()
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -2058,6 +2082,84 @@ class CertificateAnalyzer:
         thread.start()
         logger.info(f"Started Tetragon version monitor (interval: {interval}s)")
 
+    def check_tetragon_policies(self, stub) -> None:
+        """
+        Query Tetragon for all tracing policies and update Prometheus metrics.
+
+        Exposes two metrics:
+          - tetragon_policy_info{name, namespace, state}=1  (presence per policy)
+          - tetragon_policies_total{state}=N                (count per state)
+
+        Stale series are removed when a policy is deleted or changes state,
+        so the metrics always reflect the live policy table. Failures are
+        logged as warnings and never propagate.
+        """
+        if not hasattr(sensors_pb2, 'ListTracingPoliciesRequest'):
+            logger.warning(
+                "ListTracingPoliciesRequest not available in Tetragon protobuf "
+                "bindings; skipping policy check"
+            )
+            return
+        try:
+            response = stub.ListTracingPolicies(
+                sensors_pb2.ListTracingPoliciesRequest(),
+                timeout=5.0,
+            )
+        except Exception as e:
+            logger.warning(f"Could not list Tetragon tracing policies: {e}")
+            return
+
+        new_labels: Set[Tuple[str, str, str]] = set()
+        state_counts: Dict[str, int] = {}
+
+        for policy in response.policies:
+            state_str = _POLICY_STATE_NAMES.get(policy.state, 'unknown')
+            ns = policy.namespace or ''
+            key = (policy.name, ns, state_str)
+            new_labels.add(key)
+            state_counts[state_str] = state_counts.get(state_str, 0) + 1
+
+        # Remove series for policies that were deleted or changed state
+        for name, ns, state_str in self._known_policy_labels - new_labels:
+            self.metrics.tetragon_policy_info.remove(name, ns, state_str)
+
+        for name, ns, state_str in new_labels:
+            self.metrics.tetragon_policy_info.labels(
+                name=name, namespace=ns, state=state_str
+            ).set(1)
+
+        # Always emit a count for every known state so queries don't return no-data
+        for state_str in _POLICY_STATE_NAMES.values():
+            self.metrics.tetragon_policies_total.labels(state=state_str).set(
+                state_counts.get(state_str, 0)
+            )
+
+        self._known_policy_labels = new_labels
+        logger.debug(f"Tetragon policy states: {state_counts}")
+
+    def _start_policy_monitor(self, stub) -> None:
+        """
+        Start a background daemon thread that periodically re-queries tracing
+        policy state and updates Prometheus metrics.
+
+        Interval is configurable via TETRAGON_POLICY_CHECK_INTERVAL env var
+        (default: 60 seconds).
+        """
+        interval = int(os.getenv('TETRAGON_POLICY_CHECK_INTERVAL', '60'))
+
+        def _monitor():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.check_tetragon_policies(stub)
+                except Exception as e:
+                    logger.warning(f"Policy monitor error: {e}")
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.name = 'tetragon-policy-monitor'
+        thread.start()
+        logger.info(f"Started Tetragon policy monitor (interval: {interval}s)")
+
     def start(self):
         """
         Start listening to Tetragon events with automatic reconnection.
@@ -2085,9 +2187,11 @@ class CertificateAnalyzer:
         if self.health_server:
             self.health_server.set_channel(channel)
 
-        # Version check on startup, then periodically in background
+        # Version and policy checks on startup, then periodically in background
         self.check_tetragon_version(stub)
         self._start_version_monitor(stub)
+        self.check_tetragon_policies(stub)
+        self._start_policy_monitor(stub)
 
         request = events_pb2.GetEventsRequest(
             allow_list=[

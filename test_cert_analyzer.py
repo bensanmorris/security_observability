@@ -2417,6 +2417,197 @@ class TestTetragonVersionCheck:
         except Exception as exc:
             pytest.fail(f"get_runtime_tetragon_version raised unexpectedly: {exc}")
 
+
+# ── Tetragon policy check helpers ────────────────────────────────────────────
+
+class _MockPolicyStatus:
+    """Minimal mock of the TracingPolicyStatus proto."""
+    def __init__(self, name: str, state: int, namespace: str = ''):
+        self.name      = name
+        self.namespace = namespace
+        self.state     = state
+
+
+class _MockListPoliciesResponse:
+    """Minimal mock of the ListTracingPoliciesResponse proto."""
+    def __init__(self, policies):
+        self.policies = policies
+
+
+class _MockPolicyStub:
+    """Mock gRPC stub whose ListTracingPolicies returns a configurable policy list."""
+    def __init__(self, policies=None, raise_exc=None):
+        self._policies  = policies or []
+        self._raise_exc = raise_exc
+
+    def ListTracingPolicies(self, request, timeout=None):
+        if self._raise_exc:
+            raise self._raise_exc
+        return _MockListPoliciesResponse(self._policies)
+
+
+class TestTetragonPolicyCheck:
+    """
+    Tests for check_tetragon_policies().
+
+    All tests use mock stubs so no live Tetragon connection is needed.
+    Prometheus metric state is verified via the analyzer fixture which
+    provides a clean registry per test.
+    """
+
+    def _policy_info_samples(self, analyzer):
+        """All samples currently emitted by tetragon_policy_info."""
+        return list(analyzer.metrics.tetragon_policy_info.collect()[0].samples)
+
+    def _policy_total(self, analyzer, state: str) -> float:
+        """Current value of tetragon_policies_total for a given state label."""
+        return analyzer.metrics.tetragon_policies_total.labels(state=state)._value.get()
+
+    def test_enabled_policy_sets_policy_info(self, analyzer):
+        """A single enabled policy creates a tetragon_policy_info series set to 1."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('cert-access', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        samples = self._policy_info_samples(analyzer)
+        assert len(samples) == 1
+        assert samples[0].labels == {'name': 'cert-access', 'namespace': '', 'state': 'enabled'}
+        assert samples[0].value == 1.0
+
+    def test_enabled_count_reflects_policy_list(self, analyzer):
+        """tetragon_policies_total{state="enabled"} equals the number of enabled policies."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('policy-a', state=1),
+            _MockPolicyStatus('policy-b', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        assert self._policy_total(analyzer, 'enabled') == 2.0
+
+    def test_mixed_states_counted_separately(self, analyzer):
+        """Policies in different states are counted independently per state."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('ok-policy',  state=1),  # enabled
+            _MockPolicyStatus('bad-policy', state=3),  # load_error
+        ])
+        analyzer.check_tetragon_policies(stub)
+        assert self._policy_total(analyzer, 'enabled')    == 1.0
+        assert self._policy_total(analyzer, 'load_error') == 1.0
+
+    def test_all_states_always_emitted(self, analyzer):
+        """All state counters are emitted even for states with zero policies."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('one', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        assert self._policy_total(analyzer, 'disabled')   == 0.0
+        assert self._policy_total(analyzer, 'load_error') == 0.0
+        assert self._policy_total(analyzer, 'error')      == 0.0
+
+    def test_namespace_included_in_policy_info_label(self, analyzer):
+        """Namespace label is populated for namespaced policies."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('my-policy', state=1, namespace='kube-system'),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        samples = self._policy_info_samples(analyzer)
+        assert samples[0].labels['namespace'] == 'kube-system'
+
+    def test_cluster_scoped_policy_has_empty_namespace(self, analyzer):
+        """Cluster-scoped policies (empty namespace in proto) produce namespace=''."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('cluster-policy', state=1, namespace=''),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        samples = self._policy_info_samples(analyzer)
+        assert samples[0].labels['namespace'] == ''
+
+    def test_stale_series_removed_when_policy_deleted(self, analyzer):
+        """When a policy disappears between polls, its metric series is removed."""
+        stub_first = _MockPolicyStub(policies=[
+            _MockPolicyStatus('policy-a', state=1),
+            _MockPolicyStatus('policy-b', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub_first)
+        assert len(self._policy_info_samples(analyzer)) == 2
+
+        stub_second = _MockPolicyStub(policies=[
+            _MockPolicyStatus('policy-a', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub_second)
+        samples = self._policy_info_samples(analyzer)
+        assert len(samples) == 1
+        assert samples[0].labels['name'] == 'policy-a'
+
+    def test_stale_series_removed_on_state_change(self, analyzer):
+        """When a policy transitions state, the old state series is removed."""
+        stub_first = _MockPolicyStub(policies=[
+            _MockPolicyStatus('my-policy', state=1),  # enabled
+        ])
+        analyzer.check_tetragon_policies(stub_first)
+        assert self._policy_info_samples(analyzer)[0].labels['state'] == 'enabled'
+
+        stub_second = _MockPolicyStub(policies=[
+            _MockPolicyStatus('my-policy', state=3),  # load_error
+        ])
+        analyzer.check_tetragon_policies(stub_second)
+        samples = self._policy_info_samples(analyzer)
+        assert len(samples) == 1
+        assert samples[0].labels['state'] == 'load_error'
+
+    def test_empty_policy_list_produces_zero_counts(self, analyzer):
+        """No active policies — all state counters are 0, no policy_info series."""
+        stub = _MockPolicyStub(policies=[])
+        analyzer.check_tetragon_policies(stub)
+        assert self._policy_info_samples(analyzer) == []
+        assert self._policy_total(analyzer, 'enabled') == 0.0
+
+    def test_policies_cleared_between_polls(self, analyzer):
+        """After all policies are removed, subsequent poll zeroes the counts."""
+        stub_first = _MockPolicyStub(policies=[
+            _MockPolicyStatus('policy-a', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub_first)
+        assert self._policy_total(analyzer, 'enabled') == 1.0
+
+        stub_empty = _MockPolicyStub(policies=[])
+        analyzer.check_tetragon_policies(stub_empty)
+        assert self._policy_total(analyzer, 'enabled') == 0.0
+        assert self._policy_info_samples(analyzer) == []
+
+    def test_grpc_error_does_not_raise(self, analyzer):
+        """A gRPC failure leaves metrics unchanged and does not propagate."""
+        stub = _MockPolicyStub(raise_exc=Exception("connection refused"))
+        try:
+            analyzer.check_tetragon_policies(stub)
+        except Exception as exc:
+            pytest.fail(f"check_tetragon_policies raised unexpectedly: {exc}")
+
+    def test_grpc_error_logs_warning(self, analyzer, caplog):
+        """A gRPC failure is surfaced as a WARNING log."""
+        stub = _MockPolicyStub(raise_exc=Exception("timeout"))
+        with caplog.at_level(logging.WARNING, logger='cert_analyzer'):
+            analyzer.check_tetragon_policies(stub)
+        assert any('tracing polic' in r.message.lower() for r in caplog.records)
+
+    def test_unknown_state_integer_labelled_unknown(self, analyzer):
+        """An unrecognised state integer falls back to the 'unknown' label."""
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('exotic-policy', state=99),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        samples = self._policy_info_samples(analyzer)
+        assert samples[0].labels['state'] == 'unknown'
+
+    def test_missing_proto_type_skips_gracefully(self, analyzer, monkeypatch):
+        """If ListTracingPoliciesRequest is absent from the bindings, the check is skipped."""
+        import cert_analyzer as _ca
+        monkeypatch.delattr(_ca.sensors_pb2, 'ListTracingPoliciesRequest')
+        stub = _MockPolicyStub(policies=[
+            _MockPolicyStatus('policy-a', state=1),
+        ])
+        analyzer.check_tetragon_policies(stub)
+        assert self._policy_info_samples(analyzer) == []
+
     def test_get_runtime_version_returns_unknown_when_get_version_request_absent(
         self, analyzer, monkeypatch, caplog
     ):
