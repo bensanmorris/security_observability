@@ -168,14 +168,27 @@
   },
   "panels": [
     {
+      "id": 33,
+      "title": "Pipeline Health",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
       "id": 1,
       "title": "Analyzer Health",
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 3,
+        "w": 4,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "datasource": {
         "type": "prometheus",
@@ -246,14 +259,380 @@
       }
     },
     {
+      "id": 32,
+      "title": "Tetragon Connected",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tetragon_connected",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Disconnected",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Connected",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 29,
+      "title": "Active Policies",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tetragon_policies_total{state=\"enabled\"} or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "title": "Policy Errors",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(tetragon_policies_total{state=~\"load_error|error\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "None",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "title": "Tetragon Version Match",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_tetragon_version_match",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Mismatch",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Match",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "title": "Kafka Delivery Errors (5m rate)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "rate(kafka_delivery_errors_total[5m])",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.01
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 34,
+      "title": "Certificate Summary",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
       "id": 2,
       "title": "Total Certificates",
       "type": "stat",
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 3,
-        "y": 0
+        "x": 0,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -310,8 +689,8 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 6,
-        "y": 0
+        "x": 3,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -371,8 +750,8 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 9,
-        "y": 0
+        "x": 6,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -432,8 +811,8 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 12,
-        "y": 0
+        "x": 9,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -493,8 +872,8 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 15,
-        "y": 0
+        "x": 12,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -554,8 +933,8 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 18,
-        "y": 0
+        "x": 15,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -615,8 +994,8 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 21,
-        "y": 0
+        "x": 18,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -683,7 +1062,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 10
       },
       "panels": []
     },
@@ -695,7 +1074,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 11
       },
       "datasource": {
         "type": "prometheus",
@@ -860,7 +1239,7 @@
         "h": 8,
         "w": 7,
         "x": 0,
-        "y": 15
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -1032,7 +1411,7 @@
         "h": 8,
         "w": 17,
         "x": 7,
-        "y": 15
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -1113,7 +1492,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 29
       },
       "panels": []
     },
@@ -1125,7 +1504,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 24
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -1222,7 +1601,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 24
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -1279,7 +1658,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -1387,7 +1766,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 38
       },
       "panels": []
     },
@@ -1397,9 +1776,9 @@
       "type": "table",
       "gridPos": {
         "h": 8,
-        "w": 16,
+        "w": 24,
         "x": 0,
-        "y": 33
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -1477,155 +1856,14 @@
       }
     },
     {
-      "id": 19,
-      "title": "Tetragon Version Match",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 33
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "cert_analyzer_tetragon_version_match",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Mismatch",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "Match",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 20,
-      "title": "Kafka Delivery Errors (5m rate)",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 33
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "rate(kafka_delivery_errors_total[5m])",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0.01
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 21,
       "title": "Self-Signed by Namespace",
       "type": "piechart",
       "gridPos": {
         "h": 4,
         "w": 8,
-        "x": 16,
-        "y": 37
+        "x": 0,
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1678,7 +1916,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 51
       },
       "datasource": {
         "type": "prometheus",
@@ -1855,7 +2093,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 59
       },
       "panels": []
     },
@@ -1867,7 +2105,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 60
       },
       "datasource": {
         "type": "prometheus",
@@ -1919,7 +2157,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 60
       },
       "datasource": {
         "type": "prometheus",
@@ -1984,7 +2222,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 58
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -2091,7 +2329,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 58
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -2187,143 +2425,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 74
       },
       "panels": []
-    },
-    {
-      "id": 29,
-      "title": "Active Policies",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 65
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "tetragon_policies_total{state=\"enabled\"} or vector(0)",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "yellow",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 30,
-      "title": "Policy Errors",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 65
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(tetragon_policies_total{state=~\"load_error|error\"}) or vector(0)",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "None",
-                  "color": "green",
-                  "index": 0
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
     },
     {
       "id": 31,
@@ -2337,7 +2441,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 75
       },
       "targets": [
         {
@@ -2476,84 +2580,6 @@
             ]
           }
         ]
-      }
-    },
-    {
-      "id": 32,
-      "title": "Tetragon Connected",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 65
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "tetragon_connected",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Disconnected",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "Connected",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
       }
     }
   ]
