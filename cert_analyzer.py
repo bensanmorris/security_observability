@@ -188,6 +188,54 @@ class CertificateInfo:
         return ""
 
 
+# Risk score weights for workload risk assessment.
+# Expiry proximity dominates; structural issues are secondary.
+_RISK_EXPIRED          = 100
+_RISK_EXPIRING_7D      = 80
+_RISK_EXPIRING_30D     = 50
+_RISK_EXPIRING_90D     = 25
+_RISK_SELF_SIGNED_LEAF = 20
+_RISK_FIPS_VIOLATION   = 15
+
+
+def _cert_risk_score(cert: 'CertificateInfo') -> int:
+    """Return a 0-100 risk score for a single certificate.
+
+    Expiry proximity is the dominant signal. Structural issues (self-signed
+    leaf, FIPS violations) contribute only when no expiry risk is present, and
+    can combine additively up to the 100 cap.
+    """
+    if cert.is_expired:
+        return _RISK_EXPIRED
+    days = cert.days_until_expiry
+    if days < 7:
+        return _RISK_EXPIRING_7D
+    if days < 30:
+        return _RISK_EXPIRING_30D
+    if days < 90:
+        return _RISK_EXPIRING_90D
+    score = 0
+    if cert.is_self_signed and cert.is_ca is False:
+        score += _RISK_SELF_SIGNED_LEAF
+    if cert.fips_violations:
+        score += _RISK_FIPS_VIOLATION
+    return min(score, 100)
+
+
+def _workload_key(cert: 'CertificateInfo') -> tuple:
+    """Return a grouping key for workload-level risk aggregation.
+
+    For Kubernetes workloads, groups by (namespace, workload_kind, workload_name)
+    so all replicas of a workload share one score regardless of node.
+    For bare-metal processes, falls back to (node_name, process).
+    The tuple always has 5 elements matching the workload_risk_score label order:
+    (namespace, workload_kind, workload_name, node_name, process).
+    """
+    if cert.workload_kind and cert.workload_name:
+        return (cert.namespace, cert.workload_kind, cert.workload_name, "", "")
+    return ("", "", "", cert.node_name, cert.process)
+
+
 class PrometheusMetrics:
     """Prometheus metrics for certificate monitoring"""
 
@@ -333,6 +381,15 @@ class PrometheusMetrics:
             'tetragon_policies_total',
             'Number of Tetragon tracing policies by state',
             ['state'],
+        )
+
+        self.workload_risk_score = Gauge(
+            'cert_workload_risk_score',
+            'Highest certificate risk score across all certs in a workload '
+            '(0=clean, 100=critical). Driven by expiry proximity, self-signed '
+            'leaf certs, and FIPS violations. Updated on each cert event and '
+            'refreshed every 60 seconds to reflect expiry drift.',
+            ['namespace', 'workload_kind', 'workload_name', 'node_name', 'process'],
         )
 
     def update_certificate_metrics(self, info: CertificateInfo):
@@ -944,12 +1001,43 @@ class CertificateAnalyzer:
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
         self._known_policy_labels: Set[Tuple[str, str, str]] = set()
+        self._known_workload_risk_labels: Set[Tuple[str, str, str, str, str]] = set()
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
         self.metrics.cache_known_certs_size.set(len(self.known_certs))
         self.metrics.cache_processed_paths_size.set(len(self.processed_paths))
         self.metrics.cache_password_failed_size.set(len(self.password_failed_paths))
+
+    def _update_workload_risk_scores(self) -> None:
+        """Recompute and emit workload risk scores from the current cert cache.
+
+        Groups certs by workload key, takes the worst (max) score across all
+        certs in each group, and removes stale Prometheus series for workloads
+        that are no longer in the cache.
+        """
+        workloads: Dict[tuple, List[CertificateInfo]] = {}
+        for cert in self.known_certs.values():
+            key = _workload_key(cert)
+            workloads.setdefault(key, []).append(cert)
+
+        new_labels: Set[Tuple[str, str, str, str, str]] = set()
+        for (namespace, workload_kind, workload_name, node_name, process), certs in workloads.items():
+            score = max(_cert_risk_score(c) for c in certs)
+            label_tuple = (namespace, workload_kind, workload_name, node_name, process)
+            new_labels.add(label_tuple)
+            self.metrics.workload_risk_score.labels(
+                namespace=namespace,
+                workload_kind=workload_kind,
+                workload_name=workload_name,
+                node_name=node_name,
+                process=process,
+            ).set(score)
+
+        for label_tuple in self._known_workload_risk_labels - new_labels:
+            self.metrics.workload_risk_score.remove(*label_tuple)
+
+        self._known_workload_risk_labels = new_labels
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -1816,6 +1904,7 @@ class CertificateAnalyzer:
             self.kafka_publisher.publish(cert_info)
 
         self._update_cache_metrics()
+        self._update_workload_risk_scores()
         return True
 
     def _handle_nsc_find_objects_init(self, event) -> bool:
@@ -1944,6 +2033,7 @@ class CertificateAnalyzer:
             self.kafka_publisher.publish(cert_info)
 
         self._update_cache_metrics()
+        self._update_workload_risk_scores()
         return True
 
     def process_event(self, event):
@@ -2026,6 +2116,7 @@ class CertificateAnalyzer:
                 self.kafka_publisher.publish(cert_info)
 
         self._update_cache_metrics()
+        self._update_workload_risk_scores()
 
     def get_runtime_tetragon_version(self, stub) -> str:
         """
@@ -2196,6 +2287,31 @@ class CertificateAnalyzer:
         thread.start()
         logger.info(f"Started Tetragon policy monitor (interval: {interval}s)")
 
+    def _start_risk_score_monitor(self) -> None:
+        """Start a background thread that periodically refreshes workload risk scores.
+
+        Ensures scores reflect current expiry proximity even when no new Tetragon
+        events arrive — e.g. a cert aging through the 90-day or 30-day threshold
+        between events will trigger a score update at the next refresh cycle.
+
+        Interval is configurable via RISK_SCORE_REFRESH_INTERVAL env var
+        (default: 60 seconds).
+        """
+        interval = int(os.getenv('RISK_SCORE_REFRESH_INTERVAL', '60'))
+
+        def _monitor():
+            while True:
+                time.sleep(interval)
+                try:
+                    self._update_workload_risk_scores()
+                except Exception as e:
+                    logger.warning(f"Risk score refresh error: {e}")
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.name = 'risk-score-monitor'
+        thread.start()
+        logger.info(f"Started workload risk score monitor (interval: {interval}s)")
+
     def start(self):
         """
         Start listening to Tetragon events with automatic reconnection.
@@ -2228,6 +2344,7 @@ class CertificateAnalyzer:
         self._start_version_monitor(stub)
         self.check_tetragon_policies(stub)
         self._start_policy_monitor(stub)
+        self._start_risk_score_monitor()
 
         request = events_pb2.GetEventsRequest(
             allow_list=[
@@ -2320,6 +2437,8 @@ class CertificateAnalyzer:
 
             except Exception as e:
                 logger.error(f"Error scanning {base_path}: {e}")
+
+        self._update_workload_risk_scores()
 
 
 CONFIG_FILE_PATH = '/etc/cert-analyzer/cert-analyzer.conf'

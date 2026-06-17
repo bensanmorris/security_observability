@@ -24,7 +24,10 @@ from prometheus_client import REGISTRY
 # Import the analyzer (adjust path as needed)
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from cert_analyzer import CertificateAnalyzer, CertificateInfo, LRUCache
+from cert_analyzer import (
+    CertificateAnalyzer, CertificateInfo, LRUCache,
+    _cert_risk_score, _workload_key,
+)
 
 
 class TestCertificateGeneration:
@@ -5297,3 +5300,246 @@ class TestTetragonConnected:
     def test_is_independent_of_analyzer_healthy(self, analyzer):
         """tetragon_connected and analyzer_healthy are separate metric objects."""
         assert analyzer.metrics.tetragon_connected is not analyzer.metrics.analyzer_healthy
+
+
+class TestCertRiskScore:
+    """Unit tests for _cert_risk_score()."""
+
+    def test_expired_cert_scores_100(self):
+        cert = _make_cert_info(
+            not_before=datetime.utcnow() - timedelta(days=400),
+            not_after=datetime.utcnow() - timedelta(days=1),
+        )
+        assert _cert_risk_score(cert) == 100
+
+    def test_expiring_within_7_days_scores_80(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=3),
+        )
+        assert _cert_risk_score(cert) == 80
+
+    def test_expiring_within_30_days_scores_50(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=15),
+        )
+        assert _cert_risk_score(cert) == 50
+
+    def test_expiring_within_90_days_scores_25(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=60),
+        )
+        assert _cert_risk_score(cert) == 25
+
+    def test_healthy_cert_scores_0(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=False,
+            fips_violations=[],
+        )
+        assert _cert_risk_score(cert) == 0
+
+    def test_self_signed_leaf_adds_20(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=True,
+            is_ca=False,
+            fips_violations=[],
+        )
+        assert _cert_risk_score(cert) == 20
+
+    def test_self_signed_ca_scores_0(self):
+        """Root CA certs are legitimately self-signed — not a risk signal."""
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=True,
+            is_ca=True,
+            fips_violations=[],
+        )
+        assert _cert_risk_score(cert) == 0
+
+    def test_fips_violation_adds_15(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=False,
+            fips_violations=["RSA key size 1024 is below minimum 2048"],
+        )
+        assert _cert_risk_score(cert) == 15
+
+    def test_self_signed_plus_fips_violation_combines(self):
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=True,
+            is_ca=False,
+            fips_violations=["weak key"],
+        )
+        assert _cert_risk_score(cert) == 35
+
+    def test_expiry_dominates_structural_issues(self):
+        """A cert expiring in 3 days scores 80 regardless of other issues."""
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=3),
+            is_self_signed=True,
+            is_ca=False,
+            fips_violations=["weak key"],
+        )
+        assert _cert_risk_score(cert) == 80
+
+    def test_score_caps_at_100(self):
+        """Score cannot exceed 100 even with multiple structural issues."""
+        cert = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=True,
+            is_ca=False,
+            fips_violations=["v1"] * 10,
+        )
+        assert _cert_risk_score(cert) <= 100
+
+
+class TestWorkloadKey:
+    """Unit tests for _workload_key()."""
+
+    def test_kubernetes_workload_groups_by_workload_identity(self):
+        cert = _make_cert_info(
+            namespace="production",
+            workload_kind="Deployment",
+            workload_name="nginx",
+            node_name="worker-1",
+            process="/usr/sbin/nginx",
+        )
+        key = _workload_key(cert)
+        assert key == ("production", "Deployment", "nginx", "", "")
+
+    def test_kubernetes_workload_drops_node_and_process(self):
+        """Two replicas on different nodes should share the same workload key."""
+        cert1 = _make_cert_info(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            node_name="node-1", process="/app/server",
+        )
+        cert2 = _make_cert_info(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            node_name="node-2", process="/app/server",
+        )
+        assert _workload_key(cert1) == _workload_key(cert2)
+
+    def test_bare_metal_groups_by_node_and_process(self):
+        cert = _make_cert_info(
+            namespace="",
+            workload_kind="",
+            workload_name="",
+            node_name="host-a",
+            process="/usr/bin/nginx",
+        )
+        key = _workload_key(cert)
+        assert key == ("", "", "", "host-a", "/usr/bin/nginx")
+
+    def test_bare_metal_different_processes_get_different_keys(self):
+        nginx = _make_cert_info(
+            workload_kind="", workload_name="", node_name="host-a",
+            process="/usr/sbin/nginx",
+        )
+        curl = _make_cert_info(
+            workload_kind="", workload_name="", node_name="host-a",
+            process="/usr/bin/curl",
+        )
+        assert _workload_key(nginx) != _workload_key(curl)
+
+
+class TestWorkloadRiskScores:
+    """Integration tests for _update_workload_risk_scores()."""
+
+    def test_single_healthy_cert_scores_0(self, analyzer):
+        cert = _make_cert_info(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            not_after=datetime.utcnow() + timedelta(days=365),
+            is_self_signed=False,
+            fips_violations=[],
+        )
+        analyzer.known_certs[cert.unique_key] = cert
+        analyzer._update_workload_risk_scores()
+
+        score = analyzer.metrics.workload_risk_score.labels(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            node_name="", process="",
+        )._value.get()
+        assert score == 0
+
+    def test_expired_cert_raises_workload_to_100(self, analyzer):
+        cert = _make_cert_info(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            not_before=datetime.utcnow() - timedelta(days=400),
+            not_after=datetime.utcnow() - timedelta(days=1),
+        )
+        analyzer.known_certs[cert.unique_key] = cert
+        analyzer._update_workload_risk_scores()
+
+        score = analyzer.metrics.workload_risk_score.labels(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            node_name="", process="",
+        )._value.get()
+        assert score == 100
+
+    def test_worst_cert_dominates_workload_score(self, analyzer):
+        """A workload with one healthy and one expiring cert scores by the worst."""
+        healthy = _make_cert_info(
+            path="/etc/ssl/good.crt", serial_number="1001",
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            not_after=datetime.utcnow() + timedelta(days=365),
+        )
+        expiring = _make_cert_info(
+            path="/etc/ssl/bad.crt", serial_number="1002",
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            not_after=datetime.utcnow() + timedelta(days=3),
+        )
+        analyzer.known_certs[healthy.unique_key] = healthy
+        analyzer.known_certs[expiring.unique_key] = expiring
+        analyzer._update_workload_risk_scores()
+
+        score = analyzer.metrics.workload_risk_score.labels(
+            namespace="prod", workload_kind="Deployment", workload_name="api",
+            node_name="", process="",
+        )._value.get()
+        assert score == 80
+
+    def test_different_workloads_get_independent_scores(self, analyzer):
+        good_cert = _make_cert_info(
+            path="/etc/ssl/good.crt", serial_number="2001",
+            namespace="prod", workload_kind="Deployment", workload_name="frontend",
+            not_after=datetime.utcnow() + timedelta(days=365),
+        )
+        bad_cert = _make_cert_info(
+            path="/etc/ssl/bad.crt", serial_number="2002",
+            namespace="prod", workload_kind="Deployment", workload_name="backend",
+            not_before=datetime.utcnow() - timedelta(days=400),
+            not_after=datetime.utcnow() - timedelta(days=1),
+        )
+        analyzer.known_certs[good_cert.unique_key] = good_cert
+        analyzer.known_certs[bad_cert.unique_key] = bad_cert
+        analyzer._update_workload_risk_scores()
+
+        frontend_score = analyzer.metrics.workload_risk_score.labels(
+            namespace="prod", workload_kind="Deployment", workload_name="frontend",
+            node_name="", process="",
+        )._value.get()
+        backend_score = analyzer.metrics.workload_risk_score.labels(
+            namespace="prod", workload_kind="Deployment", workload_name="backend",
+            node_name="", process="",
+        )._value.get()
+        assert frontend_score == 0
+        assert backend_score == 100
+
+    def test_stale_series_removed_when_cert_evicted(self, analyzer):
+        """When a cert leaves known_certs its workload label set is removed."""
+        cert = _make_cert_info(
+            namespace="prod", workload_kind="Deployment", workload_name="gone",
+            not_after=datetime.utcnow() + timedelta(days=365),
+        )
+        analyzer.known_certs[cert.unique_key] = cert
+        analyzer._update_workload_risk_scores()
+
+        label_tuple = ("prod", "Deployment", "gone", "", "")
+        assert label_tuple in analyzer._known_workload_risk_labels
+
+        del analyzer.known_certs[cert.unique_key]
+        analyzer._update_workload_risk_scores()
+
+        assert label_tuple not in analyzer._known_workload_risk_labels

@@ -625,6 +625,342 @@
       "panels": []
     },
     {
+      "id": 36,
+      "title": "Workload Risk",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "panels": []
+    },
+    {
+      "id": 37,
+      "title": "High Risk Workloads",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(cert_workload_risk_score{namespace=~\"$namespace\",node_name=~\"$node\"} > 50) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 38,
+      "title": "Critical Workloads",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 4,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(cert_workload_risk_score{namespace=~\"$namespace\",node_name=~\"$node\"} > 79) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 39,
+      "title": "Workloads by Risk Score",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sort_desc(cert_workload_risk_score{namespace=~\"$namespace\",node_name=~\"$node\"})",
+          "instant": true,
+          "legendFormat": "{{workload_kind}}/{{workload_name}} ({{namespace}}){{node_name}}{{process}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 25
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "displayName": "${__series.name}"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 40,
+      "title": "Workload Risk Scores",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sort_desc(cert_workload_risk_score{namespace=~\"$namespace\",node_name=~\"$node\"})",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "namespace": 0,
+              "workload_kind": 1,
+              "workload_name": 2,
+              "node_name": 3,
+              "process": 4,
+              "Value": 5
+            },
+            "renameByName": {
+              "namespace": "Namespace",
+              "workload_kind": "Workload Kind",
+              "workload_name": "Workload",
+              "node_name": "Node",
+              "process": "Process",
+              "Value": "Risk Score"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Risk Score",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Risk Score"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 25
+                    },
+                    {
+                      "color": "orange",
+                      "value": 50
+                    },
+                    {
+                      "color": "red",
+                      "value": 80
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "id": 2,
       "title": "Total Certificates",
       "type": "stat",
@@ -1062,7 +1398,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 27
       },
       "panels": []
     },
@@ -1074,7 +1410,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 11
+        "y": 28
       },
       "datasource": {
         "type": "prometheus",
@@ -1239,7 +1575,7 @@
         "h": 8,
         "w": 7,
         "x": 0,
-        "y": 21
+        "y": 38
       },
       "datasource": {
         "type": "prometheus",
@@ -1411,7 +1747,7 @@
         "h": 8,
         "w": 17,
         "x": 7,
-        "y": 21
+        "y": 38
       },
       "datasource": {
         "type": "prometheus",
@@ -1492,7 +1828,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 46
       },
       "panels": []
     },
@@ -1504,7 +1840,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 30
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1601,7 +1937,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 30
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1658,7 +1994,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1766,7 +2102,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 55
       },
       "panels": []
     },
@@ -1778,7 +2114,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 56
       },
       "datasource": {
         "type": "prometheus",
@@ -1863,7 +2199,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 47
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -1916,7 +2252,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -2092,7 +2428,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 76
       },
       "datasource": {
         "type": "prometheus",
@@ -2233,7 +2569,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 67
+        "y": 84
       },
       "panels": []
     },
@@ -2245,7 +2581,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 68
+        "y": 85
       },
       "datasource": {
         "type": "prometheus",
@@ -2297,7 +2633,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 68
+        "y": 85
       },
       "datasource": {
         "type": "prometheus",
@@ -2362,7 +2698,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 76
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2469,7 +2805,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 76
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2565,7 +2901,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 99
       },
       "panels": []
     },
@@ -2581,7 +2917,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 83
+        "y": 100
       },
       "targets": [
         {

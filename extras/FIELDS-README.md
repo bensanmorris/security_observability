@@ -54,6 +54,70 @@ All three share the same label set:
 | `tls_certificate_fips_compliant` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `key_algorithm`, `signature_hash` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
 | `tls_certificate_self_signed` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `is_ca` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
 
+### Workload risk score
+
+A single aggregated score per workload, derived from the signals already
+present in the per-certificate metrics above. The score reflects the
+**worst-case certificate** in the workload — one expiring cert raises the
+entire workload's score regardless of how many healthy certs it also holds.
+
+| Metric | Type | Description |
+|---|---|---|
+| `cert_workload_risk_score` | Gauge | Risk score for a workload based on its certificate posture (0 = clean, 100 = critical). Updated on each certificate event and refreshed every 60 seconds so scores drift correctly as certs age between events |
+
+Label set:
+
+| Label | Source | Notes |
+|---|---|---|
+| `namespace` | Tetragon / k8s | Kubernetes namespace; empty on bare metal |
+| `workload_kind` | Tetragon / k8s | e.g. `Deployment`, `DaemonSet`; empty on bare metal |
+| `workload_name` | Tetragon / k8s | Controller name; empty on bare metal |
+| `node_name` | Tetragon | Empty for Kubernetes workloads (all replicas share one score regardless of node); set for bare-metal grouping |
+| `process` | Tetragon event | Empty for Kubernetes workloads; binary path for bare-metal grouping |
+
+> **Grouping**: For Kubernetes, `node_name` and `process` are always empty so all
+> pod replicas of a workload share one score. For bare-metal deployments,
+> `namespace`, `workload_kind`, and `workload_name` are empty and the score is
+> per `(node_name, process)`.
+
+Scoring model — the workload score is the **maximum** across all its certificates:
+
+| Condition | Score |
+|---|---|
+| Any expired certificate | 100 |
+| Any certificate expiring within 7 days | 80 |
+| Any certificate expiring within 30 days | 50 |
+| Any certificate expiring within 90 days | 25 |
+| Self-signed leaf certificate (non-CA) | +20 |
+| FIPS violation | +15 |
+
+Expiry proximity dominates. Structural issues (`+20`, `+15`) combine additively
+but only when no expiry risk is present, and the total is capped at 100.
+Self-signed root CA certificates (`is_ca=true`) are excluded from the self-signed
+penalty as they are legitimately self-signed.
+
+The refresh interval is configurable via the `RISK_SCORE_REFRESH_INTERVAL`
+environment variable (default: 60 seconds). Stale label series are removed
+automatically when a workload's certificates leave the LRU cache.
+
+Alert and dashboard guidance:
+
+```promql
+# Top 10 riskiest workloads — suitable for a board-facing table panel
+topk(10, cert_workload_risk_score)
+
+# Alert when any workload reaches warning threshold
+cert_workload_risk_score > 50
+
+# Alert when any workload is critical
+cert_workload_risk_score > 79
+
+# Scope to a single namespace
+cert_workload_risk_score{namespace="production"}
+```
+
+---
+
 ### Event and error counters
 
 | Metric | Type | Labels | Description |
