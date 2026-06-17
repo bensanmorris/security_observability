@@ -58,7 +58,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -67,7 +70,7 @@
       }
     ]
   },
-  "description": "CertSight — Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
+  "description": "CertSight \u2014 Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -75,8 +78,18 @@
   "links": [],
   "refresh": "1m",
   "schemaVersion": 38,
-  "tags": ["certificates", "security", "tls", "fips", "certsight", "ebpf"],
-  "time": {"from": "now-1h", "to": "now"},
+  "tags": [
+    "certificates",
+    "security",
+    "tls",
+    "fips",
+    "certsight",
+    "ebpf"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "CertSight",
@@ -98,8 +111,15 @@
         "type": "datasource"
       },
       {
-        "current": {"selected": true, "text": "All", "value": "$__all"},
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "definition": "label_values(tls_certificate_expiry_days, namespace)",
         "hide": 0,
         "includeAll": true,
@@ -118,8 +138,15 @@
         "type": "query"
       },
       {
-        "current": {"selected": true, "text": "All", "value": "$__all"},
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "definition": "label_values(tls_certificate_expiry_days, node_name)",
         "hide": 0,
         "includeAll": true,
@@ -144,18 +171,35 @@
       "id": 1,
       "title": "Analyzer Health",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_healthy",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -168,19 +212,35 @@
             {
               "type": "value",
               "options": {
-                "0": {"text": "Unhealthy", "color": "red", "index": 0},
-                "1": {"text": "Healthy", "color": "green", "index": 1}
+                "0": {
+                  "text": "Unhealthy",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Healthy",
+                  "color": "green",
+                  "index": 1
+                }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "green", "value": 1}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -189,18 +249,35 @@
       "id": 2,
       "title": "Total Certificates",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"}) or vector(0)",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "value",
@@ -209,10 +286,18 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "blue", "value": null}]
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": []
@@ -222,18 +307,35 @@
       "id": 3,
       "title": "Expired",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 6, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_expired{namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -245,31 +347,56 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "red", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
     },
     {
       "id": 4,
-      "title": "Expiring ≤7 Days",
+      "title": "Expiring \u22647 Days",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 9, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_expiring_soon{threshold_days=\"7\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -281,31 +408,56 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "dark-red", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "dark-red",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
     },
     {
       "id": 5,
-      "title": "Expiring ≤30 Days",
+      "title": "Expiring \u226430 Days",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 12, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_expiring_soon{threshold_days=\"30\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -317,11 +469,19 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -330,18 +490,35 @@
       "id": 6,
       "title": "FIPS Non-Compliant",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 15, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0) or vector(0)",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -353,11 +530,19 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -366,18 +551,35 @@
       "id": 7,
       "title": "Self-Signed",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -389,11 +591,19 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -402,18 +612,35 @@
       "id": 8,
       "title": "Last Event",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "time() - cert_analyzer_last_event_timestamp",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -426,12 +653,23 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 300},
-              {"color": "red", "value": 600}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -441,18 +679,34 @@
       "title": "Certificate Inventory",
       "type": "row",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 4},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
       "panels": []
     },
     {
       "id": 10,
       "title": "All Certificates",
       "type": "table",
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 5},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"}",
           "instant": true,
           "format": "table",
@@ -515,14 +769,22 @@
           "id": "sortBy",
           "options": {
             "fields": [
-              {"displayName": "Days Until Expiry", "desc": false}
+              {
+                "displayName": "Days Until Expiry",
+                "desc": false
+              }
             ]
           }
         }
       ],
       "options": {
         "showHeader": true,
-        "sortBy": [{"displayName": "Days Until Expiry", "desc": false}]
+        "sortBy": [
+          {
+            "displayName": "Days Until Expiry",
+            "desc": false
+          }
+        ]
       },
       "fieldConfig": {
         "defaults": {
@@ -534,10 +796,19 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "Days Until Expiry"},
+            "matcher": {
+              "id": "byName",
+              "options": "Days Until Expiry"
+            },
             "properties": [
-              {"id": "unit", "value": "none"},
-              {"id": "decimals", "value": 1},
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
               {
                 "id": "custom.displayMode",
                 "value": "color-background"
@@ -547,15 +818,35 @@
                 "value": {
                   "mode": "absolute",
                   "steps": [
-                    {"color": "dark-red", "value": null},
-                    {"color": "red", "value": 0},
-                    {"color": "orange", "value": 7},
-                    {"color": "yellow", "value": 30},
-                    {"color": "green", "value": 90}
+                    {
+                      "color": "dark-red",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 7
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 30
+                    },
+                    {
+                      "color": "green",
+                      "value": 90
+                    }
                   ]
                 }
               },
-              {"id": "color", "value": {"mode": "thresholds"}}
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
             ]
           }
         ]
@@ -565,39 +856,62 @@
       "id": 11,
       "title": "Expiry Distribution",
       "type": "piechart",
-      "gridPos": {"h": 8, "w": 7, "x": 0, "y": 15},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 0) or vector(0)",
           "instant": true,
           "legendFormat": "Expired",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 7) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 0) or vector(0))",
           "instant": true,
           "legendFormat": "Critical (<7d)",
           "refId": "B"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 30) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 7) or vector(0))",
           "instant": true,
-          "legendFormat": "Warning (7–30d)",
+          "legendFormat": "Warning (7\u201330d)",
           "refId": "C"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 90) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 30) or vector(0))",
           "instant": true,
-          "legendFormat": "Soon (30–90d)",
+          "legendFormat": "Soon (30\u201390d)",
           "refId": "D"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} >= 90) or vector(0)",
           "instant": true,
           "legendFormat": "Healthy (90d+)",
@@ -605,24 +919,108 @@
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "pieType": "pie",
-        "displayLabels": ["percent"],
+        "displayLabels": [
+          "percent"
+        ],
         "legend": {
           "displayMode": "table",
           "placement": "right",
-          "values": ["value", "percent"]
+          "values": [
+            "value",
+            "percent"
+          ]
         },
-        "tooltip": {"mode": "single", "sort": "none"}
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "Expired"},         "properties": [{"id": "color", "value": {"fixedColor": "dark-red",  "mode": "fixed"}}]},
-          {"matcher": {"id": "byName", "options": "Critical (<7d)"},  "properties": [{"id": "color", "value": {"fixedColor": "red",       "mode": "fixed"}}]},
-          {"matcher": {"id": "byName", "options": "Warning (7–30d)"}, "properties": [{"id": "color", "value": {"fixedColor": "orange",    "mode": "fixed"}}]},
-          {"matcher": {"id": "byName", "options": "Soon (30–90d)"},   "properties": [{"id": "color", "value": {"fixedColor": "yellow",    "mode": "fixed"}}]},
-          {"matcher": {"id": "byName", "options": "Healthy (90d+)"},  "properties": [{"id": "color", "value": {"fixedColor": "green",     "mode": "fixed"}}]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expired"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Critical (<7d)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Warning (7\u201330d)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Soon (30\u201390d)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Healthy (90d+)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       }
     },
@@ -630,19 +1028,36 @@
       "id": 12,
       "title": "Soonest Expiring Certificates",
       "type": "bargauge",
-      "gridPos": {"h": 8, "w": 17, "x": 7, "y": 15},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 17,
+        "x": 7,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "sort(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 90)",
           "instant": true,
-          "legendFormat": "{{common_name}} · {{cert_path}} ({{namespace}})",
+          "legendFormat": "{{common_name}} \u00b7 {{cert_path}} ({{namespace}})",
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "horizontal",
         "displayMode": "gradient",
         "showUnfilled": true,
@@ -659,14 +1074,31 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "dark-red", "value": null},
-              {"color": "red", "value": 0},
-              {"color": "orange", "value": 7},
-              {"color": "yellow", "value": 30},
-              {"color": "green", "value": 90}
+              {
+                "color": "dark-red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 7
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
             ]
           },
-          "color": {"mode": "thresholds"},
+          "color": {
+            "mode": "thresholds"
+          },
           "displayName": "${__series.name}"
         },
         "overrides": []
@@ -677,25 +1109,44 @@
       "title": "FIPS Compliance",
       "type": "row",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
       "panels": []
     },
     {
       "id": 14,
       "title": "FIPS Compliance Ratio",
       "type": "piechart",
-      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
           "instant": true,
           "legendFormat": "Compliant",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count(tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0) or vector(0)",
           "instant": true,
           "legendFormat": "Non-Compliant",
@@ -703,21 +1154,63 @@
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "pieType": "donut",
-        "displayLabels": ["percent"],
+        "displayLabels": [
+          "percent"
+        ],
         "legend": {
           "displayMode": "table",
           "placement": "bottom",
-          "values": ["value", "percent"]
+          "values": [
+            "value",
+            "percent"
+          ]
         },
-        "tooltip": {"mode": "single", "sort": "none"}
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "Compliant"},     "properties": [{"id": "color", "value": {"fixedColor": "green",  "mode": "fixed"}}]},
-          {"matcher": {"id": "byName", "options": "Non-Compliant"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Compliant"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Non-Compliant"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       }
     },
@@ -725,11 +1218,22 @@
       "id": 15,
       "title": "Key Algorithm Distribution",
       "type": "piechart",
-      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count by (key_algorithm) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"})",
           "instant": true,
           "legendFormat": "{{key_algorithm}}",
@@ -737,15 +1241,30 @@
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "pieType": "pie",
-        "displayLabels": ["name", "percent"],
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
         "legend": {
           "displayMode": "table",
           "placement": "bottom",
-          "values": ["value", "percent"]
+          "values": [
+            "value",
+            "percent"
+          ]
         },
-        "tooltip": {"mode": "single", "sort": "none"}
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "fieldConfig": {
         "defaults": {},
@@ -756,11 +1275,22 @@
       "id": 16,
       "title": "FIPS Non-Compliant Certificates",
       "type": "table",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0",
           "instant": true,
           "format": "table",
@@ -795,7 +1325,9 @@
           }
         }
       ],
-      "options": {"showHeader": true},
+      "options": {
+        "showHeader": true
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -806,14 +1338,42 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "Algorithm"},
-            "properties": [{"id": "custom.displayMode", "value": "color-background"},
-                           {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]
+            "matcher": {
+              "id": "byName",
+              "options": "Algorithm"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": {"id": "byName", "options": "Signature Hash"},
-            "properties": [{"id": "custom.displayMode", "value": "color-background"},
-                           {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]
+            "matcher": {
+              "id": "byName",
+              "options": "Signature Hash"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       }
@@ -823,18 +1383,34 @@
       "title": "Security",
       "type": "row",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
       "panels": []
     },
     {
       "id": 18,
       "title": "Self-Signed Certificates",
       "type": "table",
-      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 33},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1",
           "instant": true,
           "format": "table",
@@ -866,7 +1442,9 @@
           }
         }
       ],
-      "options": {"showHeader": true},
+      "options": {
+        "showHeader": true
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -877,9 +1455,23 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "Path"},
-            "properties": [{"id": "custom.displayMode", "value": "color-background"},
-                           {"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}}]
+            "matcher": {
+              "id": "byName",
+              "options": "Path"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       }
@@ -888,18 +1480,35 @@
       "id": 19,
       "title": "Tetragon Version Match",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 33},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_tetragon_version_match",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -912,19 +1521,35 @@
             {
               "type": "value",
               "options": {
-                "0": {"text": "Mismatch", "color": "red",   "index": 0},
-                "1": {"text": "Match",    "color": "green", "index": 1}
+                "0": {
+                  "text": "Mismatch",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Match",
+                  "color": "green",
+                  "index": 1
+                }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red",   "value": null},
-              {"color": "green", "value": 1}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -933,18 +1558,35 @@
       "id": 20,
       "title": "Kafka Delivery Errors (5m rate)",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 33},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "rate(kafka_delivery_errors_total[5m])",
           "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
@@ -958,11 +1600,19 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "orange", "value": 0.01}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.01
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }
@@ -971,11 +1621,22 @@
       "id": 21,
       "title": "Self-Signed by Namespace",
       "type": "piechart",
-      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 37},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 37
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "count by (namespace) (tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1)",
           "instant": true,
           "legendFormat": "{{namespace}}",
@@ -983,23 +1644,52 @@
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "pieType": "pie",
-        "displayLabels": ["name"],
-        "legend": {"displayMode": "list", "placement": "right", "values": []},
-        "tooltip": {"mode": "single", "sort": "none"}
+        "displayLabels": [
+          "name"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "values": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
-      "fieldConfig": {"defaults": {}, "overrides": []}
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     },
     {
       "id": 27,
       "title": "Certificates with IP SANs",
       "type": "table",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 41},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\",san_ip_addresses!=\"\"}",
           "instant": true,
           "format": "table",
@@ -1053,13 +1743,23 @@
         {
           "id": "sortBy",
           "options": {
-            "fields": [{"displayName": "Days Until Expiry", "desc": false}]
+            "fields": [
+              {
+                "displayName": "Days Until Expiry",
+                "desc": false
+              }
+            ]
           }
         }
       ],
       "options": {
         "showHeader": true,
-        "sortBy": [{"displayName": "Days Until Expiry", "desc": false}]
+        "sortBy": [
+          {
+            "displayName": "Days Until Expiry",
+            "desc": false
+          }
+        ]
       },
       "fieldConfig": {
         "defaults": {
@@ -1071,32 +1771,76 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "IP SANs"},
+            "matcher": {
+              "id": "byName",
+              "options": "IP SANs"
+            },
             "properties": [
-              {"id": "custom.displayMode", "value": "color-background"},
-              {"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
             ]
           },
           {
-            "matcher": {"id": "byName", "options": "Days Until Expiry"},
+            "matcher": {
+              "id": "byName",
+              "options": "Days Until Expiry"
+            },
             "properties": [
-              {"id": "unit", "value": "none"},
-              {"id": "decimals", "value": 1},
-              {"id": "custom.displayMode", "value": "color-background"},
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
-                    {"color": "dark-red", "value": null},
-                    {"color": "red", "value": 0},
-                    {"color": "orange", "value": 7},
-                    {"color": "yellow", "value": 30},
-                    {"color": "green", "value": 90}
+                    {
+                      "color": "dark-red",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 7
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 30
+                    },
+                    {
+                      "color": "green",
+                      "value": 90
+                    }
                   ]
                 }
               },
-              {"id": "color", "value": {"mode": "thresholds"}}
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
             ]
           }
         ]
@@ -1107,26 +1851,50 @@
       "title": "Operational Health",
       "type": "row",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 49},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
       "panels": []
     },
     {
       "id": 23,
       "title": "Certificate Event Rate",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "rate(tls_certificate_events_total[5m])",
           "legendFormat": "{{event_type}} / {{status}}",
           "refId": "A"
         }
       ],
       "options": {
-        "tooltip": {"mode": "multi", "sort": "none"},
-        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1147,24 +1915,46 @@
       "id": 24,
       "title": "Analysis Error Rate by Type",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 50},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "rate(tls_certificate_analysis_errors_total[5m])",
           "legendFormat": "{{error_type}}",
           "refId": "A"
         }
       ],
       "options": {
-        "tooltip": {"mode": "multi", "sort": "none"},
-        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
-          "color": {"fixedColor": "red", "mode": "palette-classic"},
+          "color": {
+            "fixedColor": "red",
+            "mode": "palette-classic"
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -1175,7 +1965,12 @@
           },
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "red", "value": null}]
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": []
@@ -1185,37 +1980,67 @@
       "id": 25,
       "title": "Cache Occupancy",
       "type": "timeseries",
-      "gridPos": {"h": 6, "w": 16, "x": 0, "y": 58},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 6,
+        "w": 16,
+        "x": 0,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_known_certs_size",
           "legendFormat": "known_certs",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_processed_paths_size",
           "legendFormat": "processed_paths",
           "refId": "B"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_password_failed_size",
           "legendFormat": "password_failed",
           "refId": "C"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_max_size",
           "legendFormat": "max (cap)",
           "refId": "D"
         }
       ],
       "options": {
-        "tooltip": {"mode": "multi", "sort": "none"},
-        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1231,10 +2056,28 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "max (cap)"},
+            "matcher": {
+              "id": "byName",
+              "options": "max (cap)"
+            },
             "properties": [
-              {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}},
-              {"id": "color", "value": {"fixedColor": "gray", "mode": "fixed"}}
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "gray",
+                  "mode": "fixed"
+                }
+              }
             ]
           }
         ]
@@ -1244,25 +2087,42 @@
       "id": 26,
       "title": "Cache Utilization",
       "type": "bargauge",
-      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 58},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_known_certs_size / cert_analyzer_cache_max_size * 100",
           "instant": true,
           "legendFormat": "known_certs",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_processed_paths_size / cert_analyzer_cache_max_size * 100",
           "instant": true,
           "legendFormat": "processed_paths",
           "refId": "B"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "cert_analyzer_cache_password_failed_size / cert_analyzer_cache_max_size * 100",
           "instant": true,
           "legendFormat": "password_failed",
@@ -1270,7 +2130,13 @@
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "orientation": "horizontal",
         "displayMode": "gradient",
         "showUnfilled": true,
@@ -1287,13 +2153,405 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "yellow", "value": 70},
-              {"color": "orange", "value": 85},
-              {"color": "red",    "value": 95}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "orange",
+                "value": 85
+              },
+              {
+                "color": "red",
+                "value": 95
+              }
             ]
           },
-          "color": {"mode": "thresholds"}
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 28,
+      "title": "Tetragon",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "panels": []
+    },
+    {
+      "id": 29,
+      "title": "Active Policies",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 65
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tetragon_policies_total{state=\"enabled\"} or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "title": "Policy Errors",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 65
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(tetragon_policies_total{state=~\"load_error|error\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "None",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 31,
+      "title": "Tracing Policies",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tetragon_policy_info",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true
+            },
+            "indexByName": {
+              "name": 0,
+              "namespace": 1,
+              "state": 2
+            },
+            "renameByName": {
+              "name": "Policy",
+              "namespace": "Namespace",
+              "state": "State"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "State",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "enabled": {
+                        "text": "enabled",
+                        "color": "green",
+                        "index": 0
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "disabled": {
+                        "text": "disabled",
+                        "color": "blue",
+                        "index": 1
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "load_error": {
+                        "text": "load_error",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "error": {
+                        "text": "error",
+                        "color": "red",
+                        "index": 3
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "loading": {
+                        "text": "loading",
+                        "color": "yellow",
+                        "index": 4
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "unloading": {
+                        "text": "unloading",
+                        "color": "yellow",
+                        "index": 5
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "title": "Tetragon Connected",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 65
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tetragon_connected",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Disconnected",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Connected",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       }

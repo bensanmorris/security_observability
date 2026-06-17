@@ -78,6 +78,7 @@ All three share the same label set:
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `cert_analyzer_healthy` | Gauge | — | `1` while the analyzer is running normally |
+| `tetragon_connected` | Gauge | — | `1` when the event stream to Tetragon is active, `0` when disconnected or not yet connected. Set to `0` on `gRPC` error or shutdown; returns to `1` as soon as the stream is re-established |
 | `cert_analyzer_last_event_timestamp` | Gauge | — | Unix timestamp of the last event received from Tetragon |
 | `cert_analyzer_tetragon_version` | Info | — | `build_version` and `runtime_version` labels |
 | `cert_analyzer_tetragon_version_match` | Gauge | — | `1` if build and runtime Tetragon versions match, `0` if mismatched |
@@ -87,6 +88,22 @@ All three share the same label set:
 | `cert_analyzer_cache_password_failed_size` | Gauge | — | Current number of entries in the password-failed LRU cache |
 | `cert_analyzer_cache_max_size` | Gauge | — | Configured `max_size` for all LRU caches |
 | `kafka_delivery_errors_total` | Counter | — | Cumulative async Kafka delivery failures |
+| `tetragon_policy_info` | Gauge | `name`, `namespace`, `state` | One series per tracing policy, value always `1`. Stale series are removed when a policy is deleted or changes state. `namespace` is empty for cluster-scoped policies |
+| `tetragon_policies_total` | Gauge | `state` | Count of tracing policies in each state. All state values are always emitted (including `0`) so alert rules can rely on the series being present |
+
+`state` values for `tetragon_policy_info` and `tetragon_policies_total`:
+
+| Value | Meaning |
+|---|---|
+| `enabled` | Policy is loaded and actively generating events |
+| `disabled` | Policy is loaded but has been administratively disabled |
+| `loading` | Policy is being loaded into the kernel (transient) |
+| `unloading` | Policy is being removed from the kernel (transient) |
+| `load_error` | Policy failed to load — sensors will not fire. Requires operator attention |
+| `error` | Policy encountered a runtime error after loading |
+| `unknown` | State could not be determined |
+
+Alert guidance: `tetragon_policies_total{state=~"load_error|error"} > 0` means at least one policy is broken and the cert-analyzer may not be receiving events for the affected probes.
 
 ---
 
