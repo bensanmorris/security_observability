@@ -11,6 +11,8 @@ CertSight provides real-time certificate observability for Linux via eBPF withou
 
 Certificate expiry causes outages that are entirely preventable. At scale with hundreds of machines and thousands of certificates tracking what's actually running in your estate is hard, especially when certificates are loaded dynamically, passed in memory between TLS stack components, or processed by runtimes that never call system crypto libraries.
 
+Furthermore on 15th March 2026 SSL certificate validity dropped to 200 days and in 2029 it will drop to just 47 days strengthening the case for always-on low overhead real time certificate monitoring.
+
 ## How CertSight differs from existing approaches
 
 | Approach | What it sees | What it misses |
