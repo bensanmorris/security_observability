@@ -135,6 +135,11 @@ class CertificateInfo:
     container_pid: Optional[int] = None
     container_start_time: Optional[datetime] = None
     container_maybe_exec_probe: bool = False
+    # Spawning process — binary path and PID of the process that launched
+    # the cert loader. Empty when Tetragon's process cache didn't have the
+    # parent at event time (common at startup).
+    parent_process: str = ""
+    parent_pid: int = 0
     # SHA-256 of the DER-encoded certificate bytes. Empty string when
     # CERT_CHECKSUM_ENABLED=false (the default).
     checksum: str = ""
@@ -194,7 +199,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
         self.cert_expiry_timestamp = Gauge(
@@ -203,7 +208,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
         self.cert_valid_from = Gauge(
@@ -212,7 +217,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
         # Event counters
@@ -353,6 +358,9 @@ class PrometheusMetrics:
             # handles empty label values cleanly and the label is simply
             # omitted from query results when filtering
             'checksum':         info.checksum,
+            # Empty string when Tetragon's process cache didn't have the
+            # parent at event time
+            'parent_process':   info.parent_process,
         }
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
@@ -580,6 +588,8 @@ class KafkaPublisher:
             'is_expired':        cert_info.is_expired,
             'process':           cert_info.process,
             'pid':               cert_info.pid,
+            'parent_process':    cert_info.parent_process,
+            'parent_pid':        cert_info.parent_pid,
             'namespace':                  cert_info.namespace,
             'pod_name':                   cert_info.pod_name,
             'pod_uid':                    cert_info.pod_uid,
@@ -1582,11 +1592,13 @@ class CertificateAnalyzer:
         so that _apply_pod_context can read all available pod metadata (name,
         namespace, workload, labels) in one place without multiple return values.
         """
-        cert_path    = None
-        process_name = ""
-        pid          = 0
-        namespace    = ""
-        tetragon_pod = None
+        cert_path      = None
+        process_name   = ""
+        pid            = 0
+        namespace      = ""
+        tetragon_pod   = None
+        parent_process = ""
+        parent_pid     = 0
 
         # Handle kprobe events
         if event.HasField('process_kprobe'):
@@ -1597,6 +1609,10 @@ class CertificateAnalyzer:
             if kprobe.process.HasField('pod'):
                 tetragon_pod = kprobe.process.pod
                 namespace    = tetragon_pod.namespace
+
+            if kprobe.HasField('parent'):
+                parent_process = kprobe.parent.binary
+                parent_pid = kprobe.parent.pid.value if kprobe.parent.HasField('pid') else 0
 
             for arg in kprobe.args:
                 if arg.HasField('file_arg'):
@@ -1622,6 +1638,10 @@ class CertificateAnalyzer:
                 tetragon_pod = uprobe.process.pod
                 namespace    = tetragon_pod.namespace
 
+            if uprobe.HasField('parent'):
+                parent_process = uprobe.parent.binary
+                parent_pid = uprobe.parent.pid.value if uprobe.parent.HasField('pid') else 0
+
             for arg in uprobe.args:
                 if arg.HasField('string_arg'):
                     path = arg.string_arg
@@ -1643,7 +1663,7 @@ class CertificateAnalyzer:
             if not cert_path.startswith(self.host_prefix):
                 cert_path = self.host_prefix + cert_path
 
-        return cert_path, process_name, pid, namespace, tetragon_pod
+        return cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid
 
     # ------------------------------------------------------------------
     # PKCS11 / NSS helpers (Java FIPS mode)
@@ -1697,6 +1717,8 @@ class CertificateAnalyzer:
         process_name = self._resolve_process_binary(uprobe.process.binary, pid)
         tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
         namespace = tetragon_pod.namespace if tetragon_pod else ""
+        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
+        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
 
         if self.filter_self_events:
             if "cert-analyzer" in process_name or "cert_analyzer" in process_name:
@@ -1783,7 +1805,9 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name = event.node_name
+        cert_info.node_name      = event.node_name
+        cert_info.parent_process = parent_process
+        cert_info.parent_pid     = parent_pid
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -1867,6 +1891,8 @@ class CertificateAnalyzer:
         process_name = self._resolve_process_binary(uprobe.process.binary, pid)
         tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
         namespace = tetragon_pod.namespace if tetragon_pod else ""
+        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
+        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
 
         if self.filter_self_events:
             if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
@@ -1907,7 +1933,9 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name = event.node_name
+        cert_info.node_name      = event.node_name
+        cert_info.parent_process = parent_process
+        cert_info.parent_pid     = parent_pid
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -1921,7 +1949,7 @@ class CertificateAnalyzer:
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
-        cert_path, process_name, pid, namespace, tetragon_pod = \
+        cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)
         pod_name = tetragon_pod.name if tetragon_pod is not None else ""
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
@@ -1985,7 +2013,9 @@ class CertificateAnalyzer:
         for cert_info in cert_infos:
             # Apply pod context: Tetragon event first, k8s API for extras
             self._apply_pod_context(cert_info, tetragon_pod)
-            cert_info.node_name = event.node_name
+            cert_info.node_name     = event.node_name
+            cert_info.parent_process = parent_process
+            cert_info.parent_pid     = parent_pid
 
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)

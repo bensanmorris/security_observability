@@ -2085,6 +2085,146 @@
       }
     },
     {
+      "id": 35,
+      "title": "Certificates with Known Parent Process",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\",parent_process!=\"\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true,
+              "checksum": true,
+              "cert_index": true,
+              "serial": true,
+              "subject": true,
+              "issuer": true,
+              "app_label": true,
+              "san_dns_names": true,
+              "san_ip_addresses": true,
+              "container_name": true,
+              "workload_kind": true
+            },
+            "indexByName": {
+              "parent_process": 0,
+              "process": 1,
+              "cert_path": 2,
+              "common_name": 3,
+              "namespace": 4,
+              "workload_name": 5,
+              "pod_name": 6,
+              "node_name": 7
+            },
+            "renameByName": {
+              "parent_process": "Parent Process",
+              "process": "Process",
+              "cert_path": "Path",
+              "common_name": "Common Name",
+              "namespace": "Namespace",
+              "workload_name": "Workload",
+              "pod_name": "Pod",
+              "node_name": "Node"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Parent Process",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Parent Process",
+            "desc": false
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Parent Process"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Process"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "semi-dark-blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "id": 22,
       "title": "Operational Health",
       "type": "row",
@@ -2093,7 +2233,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 67
       },
       "panels": []
     },
@@ -2105,7 +2245,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 60
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -2157,7 +2297,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 60
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -2222,7 +2362,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 68
+        "y": 76
       },
       "datasource": {
         "type": "prometheus",
@@ -2329,7 +2469,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 68
+        "y": 76
       },
       "datasource": {
         "type": "prometheus",
@@ -2425,7 +2565,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "panels": []
     },
@@ -2441,7 +2581,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 75
+        "y": 83
       },
       "targets": [
         {

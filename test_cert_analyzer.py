@@ -1411,6 +1411,8 @@ class TestProcessEventTimestamp:
             def __init__(self, path):
                 self.process = _MockProcess()
                 self.args    = [_MockArg(path)]
+            def HasField(self, name):
+                return False
 
         class _MockEvent:
             node_name = ''
@@ -3733,6 +3735,7 @@ class TestKafkaPublisher:
         mock_kprobe.process.binary = '/usr/bin/curl'
         mock_kprobe.process.pid.value = 99
         mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
         mock_arg = MagicMock()
         mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
         mock_arg.file_arg.path = path
@@ -3764,6 +3767,7 @@ class TestKafkaPublisher:
         mock_kprobe.process.binary = '/usr/bin/curl'
         mock_kprobe.process.pid.value = 99
         mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
         mock_arg = MagicMock()
         mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
         mock_arg.file_arg.path = path
@@ -3796,6 +3800,7 @@ class TestKafkaPublisher:
             mock_kprobe.process.binary = '/usr/bin/curl'
             mock_kprobe.process.pid.value = 99
             mock_kprobe.process.HasField.return_value = False
+            mock_kprobe.HasField.return_value = False
             mock_arg = MagicMock()
             mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
             mock_arg.file_arg.path = p
@@ -3829,6 +3834,7 @@ class TestKafkaPublisher:
         mock_kprobe.process.binary = '/usr/bin/test'
         mock_kprobe.process.pid.value = 1
         mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
         mock_arg = MagicMock()
         mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
         mock_arg.file_arg.path = path
@@ -4217,6 +4223,7 @@ class TestOpensslUprobeHooking:
         else:
             mock_uprobe.process.HasField.side_effect = lambda f: f == 'pid'
 
+        mock_uprobe.HasField.side_effect = lambda f: False
         mock_uprobe.args = args
 
         mock_event = MagicMock()
@@ -4234,6 +4241,7 @@ class TestOpensslUprobeHooking:
         mock_kprobe.process.binary = '/usr/bin/curl'
         mock_kprobe.process.pid.value = 999
         mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
         mock_kprobe.args = []
         mock_event.process_kprobe = mock_kprobe
         return mock_event
@@ -4247,14 +4255,14 @@ class TestOpensslUprobeHooking:
         TestCertificateGeneration.save_certificate_pem(cert, cert_path)
 
         event = self._make_uprobe_event([self._make_string_arg(cert_path)])
-        extracted, _, _, _, _ = analyzer.extract_cert_path_from_event(event)
+        extracted, _, _, _, _, _, _ = analyzer.extract_cert_path_from_event(event)
 
         assert extracted == cert_path
 
     def test_file_path_uprobe_non_cert_string_arg_is_ignored(self, analyzer):
         """extract_cert_path_from_event ignores a string_arg that is not a cert path."""
         event = self._make_uprobe_event([self._make_string_arg('/etc/hosts')])
-        cert_path, _, _, _, _ = analyzer.extract_cert_path_from_event(event)
+        cert_path, _, _, _, _, _, _ = analyzer.extract_cert_path_from_event(event)
 
         assert cert_path is None
 
@@ -4524,6 +4532,7 @@ class TestJavaNSSFIPSHooking:
             mock_uprobe.process.pod.labels = {}
         else:
             mock_uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        mock_uprobe.HasField.side_effect = lambda f: False
         mock_uprobe.args = [cls._make_uint64_arg(v) for v in uint64_values]
         mock_event = MagicMock()
         mock_event.HasField.side_effect = lambda f: f == 'process_uprobe'
