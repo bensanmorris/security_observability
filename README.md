@@ -208,6 +208,14 @@ sudo systemctl enable --now cert-analyzer
 | `jks_password` | _(unset)_ | Password tried when opening encrypted JKS keystores |
 | `pkcs12_password` | _(unset)_ | Password tried when opening encrypted PKCS12 keystores |
 
+**[port_probe]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Probe TLS endpoints discovered via bind events — triggers a TLS handshake against the bound address/port and ingests the served certificate into the normal pipeline |
+| `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete |
+| `timeout_seconds` | `5` | Seconds before the TLS probe connection attempt times out |
+
 **[kafka]**
 
 | Setting | Default | Description |
