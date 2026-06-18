@@ -13,7 +13,7 @@ spec:
       type: "sockaddr"
     selectors:
     - matchArgs:
-      - index: 1
+      - index: 0
         operator: "Protocol"
         values:
         - "IPPROTO_TCP"
