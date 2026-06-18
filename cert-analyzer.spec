@@ -213,6 +213,28 @@ chown -R %{ana_user}:%{ana_group} %{ana_log}
 chown    root:%{ana_group}         %{ana_conf}/cert-analyzer.conf
 chmod    0640                      %{ana_conf}/cert-analyzer.conf
 
+# Append config sections that may be absent in configs from earlier releases.
+# %config(noreplace) preserves operator edits but means new default sections are
+# never written to existing files — this block bridges that gap on upgrade.
+_CONF=%{ana_conf}/cert-analyzer.conf
+if [ -f "$_CONF" ] && ! grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null; then
+    printf '\n[port_probe]\n' >> "$_CONF" \
+    && printf '# Set enabled = true to probe TLS endpoints discovered via tls-service-tracking\n' >> "$_CONF" \
+    && printf '# bind events. Each bind event triggers a TLS handshake against the bound\n' >> "$_CONF" \
+    && printf '# address/port; the served leaf certificate is ingested into the normal pipeline.\n' >> "$_CONF" \
+    && printf '# On K8s the container IP is resolved from /proc/<pid>/net/fib_trie; on bare\n' >> "$_CONF" \
+    && printf '# metal 127.0.0.1 is used when the bind address is 0.0.0.0.\n' >> "$_CONF" \
+    && printf '# Requires the tls-service-tracking or tls-service-tracking-fixed policy to be loaded.\n' >> "$_CONF" \
+    && printf 'enabled = false\n' >> "$_CONF" \
+    && printf '\n# Seconds to wait after a bind event before probing (allows TLS initialisation\n' >> "$_CONF" \
+    && printf '# to complete before the connection attempt).\n' >> "$_CONF" \
+    && printf 'connect_delay_seconds = 2\n' >> "$_CONF" \
+    && printf '\n# Seconds before the TLS probe connection attempt times out.\n' >> "$_CONF" \
+    && printf 'timeout_seconds = 5\n' >> "$_CONF" \
+    || echo "WARNING: failed to append [port_probe] section to $_CONF" >&2
+fi
+unset _CONF
+
 # Reload systemd to pick up the Tetragon drop-in
 systemctl daemon-reload >/dev/null 2>&1 || true
 
