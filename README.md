@@ -20,7 +20,7 @@ Furthermore on 15th March 2026 SSL certificate validity dropped to 200 days and 
 | Network scanner | Certs on open ports | In-memory certs, internal services, file-only loads |
 | Binary scanner | Vulnerable components in artefacts at build time | Runtime execution paths, dynamically loaded certs |
 | Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
-| **CertSight** | • Every certificate file access system-wide <br>• In-memory certificates post-handshake <br>• Dynamically linked crypto <br>• Java certificate operations in both FIPS and non-FIPS environments <br><br> Every cert access is FIPS compliance checked with full process and k8s context surfaced | Statically linked crypto (excluding Java / JCA - we've got that covered) |
+| **CertSight** | • Every certificate file access system-wide <br>• In-memory certificates post-handshake <br>• Dynamically linked crypto <br>• Java certificate operations in both FIPS and non-FIPS environments <br>• Certs on open ports via optional port probe (triggered by bind events, no port sweep required) <br><br> Every cert access is FIPS compliance checked with full process and k8s context surfaced | Statically linked crypto (excluding Java / JCA - we've got that covered) |
 
 An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
 

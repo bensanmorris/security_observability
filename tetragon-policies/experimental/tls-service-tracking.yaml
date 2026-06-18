@@ -17,13 +17,5 @@ spec:
         operator: "Protocol"
         values:
         - "IPPROTO_TCP"
-      matchBinaries:
-      - operator: "In"
-        values:
-        - "/usr/sbin/nginx"
-        - "/usr/bin/envoy"
-        - "/usr/local/bin/haproxy"
-        - "/usr/bin/httpd"
-        - "/usr/sbin/httpd"
       matchActions:
       - action: Post

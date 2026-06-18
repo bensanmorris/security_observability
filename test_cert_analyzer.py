@@ -5297,3 +5297,446 @@ class TestTetragonConnected:
     def test_is_independent_of_analyzer_healthy(self, analyzer):
         """tetragon_connected and analyzer_healthy are separate metric objects."""
         assert analyzer.metrics.tetragon_connected is not analyzer.metrics.analyzer_healthy
+
+
+class TestPortProbe:
+    """Tests for port-probe cert discovery.
+
+    Covers:
+      _read_primary_ip_from_fib_trie — fib_trie parsing
+      _resolve_pid_ip               — IP resolution (specific vs wildcard bind addr)
+      _probe_tls_endpoint           — TLS handshake + cert ingestion pipeline
+      _handle_tls_bind_event        — kprobe event decoding (sock_arg / bytes_arg)
+      process_event routing         — bind events dispatched or bypassed by flag
+    """
+
+    # ── fixtures / shared helpers ─────────────────────────────────────────────
+
+    @pytest.fixture
+    def probe_analyzer(self):
+        """CertificateAnalyzer with port_probe_enabled=True and zero connect delay."""
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            port_probe_enabled=True,
+            port_probe_timeout=2.0,
+            port_probe_connect_delay=0.0,
+        )
+        yield a
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fib_trie(ips, loopback=True):
+        """Build minimal fib_trie text with the given non-loopback IPs."""
+        lines = ['Main:\n']
+        for ip in ips:
+            lines += [
+                f'        +-- {ip}/32 2 0 1\n',
+                '           /32 host LOCAL\n',
+            ]
+        if loopback:
+            lines += [
+                '        +-- 127.0.0.1/32 2 0 1\n',
+                '           /32 host LOCAL\n',
+            ]
+        return ''.join(lines)
+
+    @staticmethod
+    def _make_sock_arg(port, saddr='0.0.0.0'):
+        from unittest.mock import MagicMock
+        sock = MagicMock()
+        sock.sport = port
+        sock.saddr = saddr
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'sock_arg'
+        arg.sock_arg = sock
+        return arg
+
+    @staticmethod
+    def _make_no_sock_arg():
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: False
+        return arg
+
+    @staticmethod
+    def _sockaddr_in(port, addr='0.0.0.0'):
+        """Pack a struct sockaddr_in (family=AF_INET=2, big-endian port, 4-byte addr)."""
+        import struct
+        parts = [int(x) for x in addr.split('.')]
+        return struct.pack('<H', 2) + struct.pack('>H', port) + bytes(parts) + b'\x00' * 8
+
+    @staticmethod
+    def _make_bytes_arg(data):
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'bytes_arg'
+        arg.bytes_arg = data
+        return arg
+
+    @staticmethod
+    def _make_int_arg():
+        from unittest.mock import MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: False
+        return arg
+
+    @staticmethod
+    def _make_bind_event(function_name, args, pid=1234, binary='/usr/sbin/nginx'):
+        from unittest.mock import MagicMock
+        kprobe = MagicMock()
+        kprobe.function_name = function_name
+        kprobe.process.binary = binary
+        kprobe.process.pid.value = pid
+        kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        kprobe.args = args
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        event.process_kprobe = kprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _gen_server_cert(tmp_dir):
+        """Generate a self-signed cert+key, write to files. Returns (cert_path, key_path, cert_obj)."""
+        cert_obj, private_key = TestCertificateGeneration.generate_certificate(
+            'probe.example.com', 365
+        )
+        cert_path = os.path.join(tmp_dir, 'server.crt')
+        key_path  = os.path.join(tmp_dir, 'server.key')
+        with open(cert_path, 'wb') as f:
+            f.write(cert_obj.public_bytes(serialization.Encoding.PEM))
+        with open(key_path, 'wb') as f:
+            f.write(private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            ))
+        return cert_path, key_path, cert_obj
+
+    @staticmethod
+    def _start_tls_server(cert_path, key_path):
+        """Spin up a TLS server on a random port. Returns (port, stop_event)."""
+        import queue
+        import ssl as _ssl
+        import socket as _socket
+        port_q = queue.Queue()
+        stop   = threading.Event()
+
+        def _serve():
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert_path, key_path)
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as raw:
+                raw.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                raw.bind(('127.0.0.1', 0))
+                raw.listen(5)
+                port_q.put(raw.getsockname()[1])
+                raw.settimeout(0.5)
+                while not stop.is_set():
+                    try:
+                        conn, _ = raw.accept()
+                        try:
+                            with ctx.wrap_socket(conn, server_side=True) as tls:
+                                tls.recv(1)
+                        except _ssl.SSLError:
+                            pass
+                    except (_socket.timeout, OSError):
+                        pass
+
+        threading.Thread(target=_serve, daemon=True).start()
+        return port_q.get(timeout=3), stop
+
+    # ── _read_primary_ip_from_fib_trie ────────────────────────────────────────
+
+    def test_fib_trie_returns_container_ip(self, probe_analyzer):
+        from unittest.mock import patch, mock_open
+        content = self._fib_trie(['10.244.1.5'])
+        with patch('builtins.open', mock_open(read_data=content)):
+            ip = probe_analyzer._read_primary_ip_from_fib_trie(1234)
+        assert ip == '10.244.1.5'
+
+    def test_fib_trie_returns_first_non_loopback_when_multiple(self, probe_analyzer):
+        from unittest.mock import patch, mock_open
+        content = self._fib_trie(['10.244.1.5', '192.168.1.100'])
+        with patch('builtins.open', mock_open(read_data=content)):
+            ip = probe_analyzer._read_primary_ip_from_fib_trie(1234)
+        assert ip == '10.244.1.5'
+
+    def test_fib_trie_skips_loopback(self, probe_analyzer):
+        from unittest.mock import patch, mock_open
+        content = self._fib_trie([], loopback=True)
+        with patch('builtins.open', mock_open(read_data=content)):
+            ip = probe_analyzer._read_primary_ip_from_fib_trie(1234)
+        assert ip is None
+
+    def test_fib_trie_returns_none_on_oserror(self, probe_analyzer):
+        from unittest.mock import patch
+        with patch('builtins.open', side_effect=OSError('no such file')):
+            ip = probe_analyzer._read_primary_ip_from_fib_trie(99999)
+        assert ip is None
+
+    # ── _resolve_pid_ip ───────────────────────────────────────────────────────
+
+    def test_resolve_returns_specific_bind_addr_directly(self, probe_analyzer):
+        """A non-wildcard bind address is returned without reading fib_trie."""
+        from unittest.mock import patch
+        with patch.object(probe_analyzer, '_read_primary_ip_from_fib_trie') as mock_fib:
+            ip = probe_analyzer._resolve_pid_ip(1234, '10.0.0.1')
+        mock_fib.assert_not_called()
+        assert ip == '10.0.0.1'
+
+    def test_resolve_wildcard_uses_fib_trie_ip(self, probe_analyzer):
+        """0.0.0.0 bind addr resolves to the container IP via fib_trie."""
+        from unittest.mock import patch
+        with patch.object(probe_analyzer, '_read_primary_ip_from_fib_trie', return_value='10.244.1.5'):
+            ip = probe_analyzer._resolve_pid_ip(1234, '0.0.0.0')
+        assert ip == '10.244.1.5'
+
+    def test_resolve_wildcard_falls_back_to_localhost_on_fib_failure(self, probe_analyzer):
+        """Falls back to 127.0.0.1 when fib_trie read fails (bare-metal case)."""
+        from unittest.mock import patch
+        with patch.object(probe_analyzer, '_read_primary_ip_from_fib_trie', return_value=None):
+            ip = probe_analyzer._resolve_pid_ip(1234, '0.0.0.0')
+        assert ip == '127.0.0.1'
+
+    def test_resolve_ipv6_wildcard_falls_back_to_localhost(self, probe_analyzer):
+        from unittest.mock import patch
+        with patch.object(probe_analyzer, '_read_primary_ip_from_fib_trie', return_value=None):
+            ip = probe_analyzer._resolve_pid_ip(1234, '::')
+        assert ip == '127.0.0.1'
+
+    # ── _probe_tls_endpoint ───────────────────────────────────────────────────
+
+    def test_probe_discovers_cert_from_live_tls_server(self, probe_analyzer, temp_dir):
+        """A real TLS handshake lands the leaf cert in known_certs."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop = self._start_tls_server(cert_path, key_path)
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/sbin/nginx', 1234, 'node-1', None
+            )
+        finally:
+            stop.set()
+
+        synthetic_path = f'tls-probe://127.0.0.1:{port}'
+        assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success')._value.get() == 1
+
+    def test_probe_skips_already_cached_endpoint(self, probe_analyzer, temp_dir):
+        """Probing an endpoint already in known_certs increments the skipped counter."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop = self._start_tls_server(cert_path, key_path)
+        try:
+            probe_analyzer._probe_tls_endpoint('127.0.0.1', port, '/usr/sbin/nginx', 1234, '', None)
+            probe_analyzer._probe_tls_endpoint('127.0.0.1', port, '/usr/sbin/nginx', 1234, '', None)
+        finally:
+            stop.set()
+
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='skipped')._value.get() == 1
+
+    def test_probe_fails_on_connection_refused(self, probe_analyzer):
+        """Connection to a closed port increments the failed counter."""
+        probe_analyzer._probe_tls_endpoint('127.0.0.1', 1, '/usr/sbin/nginx', 1234, '', None)
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed')._value.get() == 1
+
+    def test_probe_fails_on_plain_tcp_port(self, probe_analyzer):
+        """Connecting to a non-TLS port (no TLS handshake) increments the failed counter."""
+        import socket as _socket
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as srv:
+            srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            srv.bind(('127.0.0.1', 0))
+            srv.listen(1)
+            port = srv.getsockname()[1]
+
+            def _accept():
+                try:
+                    conn, _ = srv.accept()
+                    conn.close()
+                except OSError:
+                    pass
+
+            threading.Thread(target=_accept, daemon=True).start()
+            probe_analyzer._probe_tls_endpoint('127.0.0.1', port, '/usr/sbin/nginx', 1234, '', None)
+
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed')._value.get() == 1
+
+    def test_probe_publishes_to_kafka_on_success(self, probe_analyzer, temp_dir):
+        """Discovered cert is forwarded to the Kafka publisher when configured."""
+        from unittest.mock import MagicMock
+        mock_kafka = MagicMock()
+        probe_analyzer.kafka_publisher = mock_kafka
+
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop = self._start_tls_server(cert_path, key_path)
+        try:
+            probe_analyzer._probe_tls_endpoint('127.0.0.1', port, '/usr/sbin/nginx', 1234, '', None)
+        finally:
+            stop.set()
+
+        mock_kafka.publish.assert_called_once()
+
+    # ── _handle_tls_bind_event ────────────────────────────────────────────────
+
+    def test_handle_security_socket_bind_extracts_port_via_sock_arg(self, probe_analyzer):
+        """security_socket_bind event: port extracted from sock_arg.sport."""
+        from unittest.mock import patch
+        probed = threading.Event()
+
+        def _fake_probe(host, port, *args, **kwargs):
+            probed._port = port
+            probed._host = host
+            probed.set()
+
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(8443, '0.0.0.0')],
+        )
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint', side_effect=_fake_probe), \
+             patch.object(probe_analyzer, '_resolve_pid_ip', return_value='127.0.0.1'):
+            probe_analyzer._handle_tls_bind_event(event)
+            probed.wait(timeout=2)
+
+        assert probed.is_set(), 'probe was not triggered'
+        assert probed._port == 8443
+        assert probed._host == '127.0.0.1'
+
+    def test_handle_sys_bind_extracts_port_via_bytes_arg(self, probe_analyzer):
+        """sys_bind event: port extracted from raw sockaddr_in bytes_arg."""
+        from unittest.mock import patch
+        probed = threading.Event()
+
+        def _fake_probe(host, port, *args, **kwargs):
+            probed._port = port
+            probed.set()
+
+        sockaddr = self._sockaddr_in(9443)
+        event = self._make_bind_event(
+            'sys_bind',
+            [self._make_int_arg(), self._make_bytes_arg(sockaddr)],
+        )
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint', side_effect=_fake_probe), \
+             patch.object(probe_analyzer, '_resolve_pid_ip', return_value='127.0.0.1'):
+            probe_analyzer._handle_tls_bind_event(event)
+            probed.wait(timeout=2)
+
+        assert probed.is_set(), 'probe was not triggered'
+        assert probed._port == 9443
+
+    def test_handle_bind_uses_specific_saddr_without_fib_trie(self, probe_analyzer):
+        """When the bind address is a specific IP, _resolve_pid_ip passes it through."""
+        from unittest.mock import patch
+        resolved_ips = []
+
+        def _capture_resolve(pid, bind_addr):
+            resolved_ips.append(bind_addr)
+            return bind_addr
+
+        probed = threading.Event()
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(443, '10.0.0.5')],
+        )
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint', side_effect=lambda *a, **kw: probed.set()), \
+             patch.object(probe_analyzer, '_resolve_pid_ip', side_effect=_capture_resolve):
+            probe_analyzer._handle_tls_bind_event(event)
+            probed.wait(timeout=2)
+
+        assert resolved_ips == ['10.0.0.5']
+
+    def test_handle_bind_no_probe_when_port_is_zero(self, probe_analyzer):
+        """A bind event with an unparseable port (0) spawns no probe thread."""
+        from unittest.mock import patch
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(0, '0.0.0.0')],
+        )
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
+            probe_analyzer._handle_tls_bind_event(event)
+            time.sleep(0.1)
+
+        mock_probe.assert_not_called()
+
+    def test_handle_sys_bind_short_bytes_arg_is_ignored(self, probe_analyzer):
+        """sys_bind bytes_arg shorter than 8 bytes produces no probe."""
+        from unittest.mock import patch
+        event = self._make_bind_event(
+            'sys_bind',
+            [self._make_int_arg(), self._make_bytes_arg(b'\x02\x00')],
+        )
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
+            probe_analyzer._handle_tls_bind_event(event)
+            time.sleep(0.1)
+
+        mock_probe.assert_not_called()
+
+    # ── process_event routing ─────────────────────────────────────────────────
+
+    def test_process_event_routes_security_socket_bind_to_handler(self, probe_analyzer):
+        """process_event dispatches security_socket_bind to _handle_tls_bind_event."""
+        from unittest.mock import patch
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(443)],
+        )
+
+        with patch.object(probe_analyzer, '_handle_tls_bind_event') as mock_handler:
+            probe_analyzer.process_event(event)
+
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_routes_sys_bind_to_handler(self, probe_analyzer):
+        """process_event dispatches sys_bind to _handle_tls_bind_event."""
+        from unittest.mock import patch
+        sockaddr = self._sockaddr_in(8443)
+        event = self._make_bind_event(
+            'sys_bind',
+            [self._make_int_arg(), self._make_bytes_arg(sockaddr)],
+        )
+
+        with patch.object(probe_analyzer, '_handle_tls_bind_event') as mock_handler:
+            probe_analyzer.process_event(event)
+
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_skips_handler_when_port_probe_disabled(self, analyzer):
+        """Bind events are silently dropped when port_probe_enabled=False."""
+        from unittest.mock import patch
+        assert not analyzer._port_probe_enabled
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(443)],
+        )
+
+        with patch.object(analyzer, '_handle_tls_bind_event') as mock_handler:
+            analyzer.process_event(event)
+
+        mock_handler.assert_not_called()
+
+    def test_process_event_bind_does_not_fall_through_to_cert_extraction(self, probe_analyzer):
+        """Bind events return immediately without calling extract_cert_path_from_event."""
+        from unittest.mock import patch
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(443)],
+        )
+
+        with patch.object(probe_analyzer, '_handle_tls_bind_event'), \
+             patch.object(probe_analyzer, 'extract_cert_path_from_event') as mock_extract:
+            probe_analyzer.process_event(event)
+
+        mock_extract.assert_not_called()

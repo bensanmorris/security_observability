@@ -191,3 +191,81 @@ The DER bytes are a direct, stable pointer in native memory by the time the
 uprobe fires — no two-hop dereference is needed.  The thread-local buffer
 ensures the GC cannot move the data between the Java copy and the eBPF read.
 No `CAP_SYS_PTRACE` or `/proc/<pid>/mem` access is required.
+
+---
+
+### test_tls_port_probe (Python)
+
+Exercises the end-to-end port-probe pipeline: `security_socket_bind` kprobe →
+cert_analyzer bind event handler → TLS handshake back to the server →
+certificate extraction and Prometheus metric emission.
+
+This test uses `tls-service-tracking.yaml` (the experimental LSM hook variant),
+which hooks all TCP binds with no binary filter.  The fixed variant
+(`tls-service-tracking-fixed.yaml`) retains a `matchBinaries` allowlist for
+production use where event volume must be controlled.
+
+**Prerequisites:**
+
+```bash
+# cert_analyzer must have port probe enabled:
+# [port_probe]
+# enabled = true
+# in /etc/cert-analyzer/cert-analyzer.conf  (or PORT_PROBE_ENABLED=true env var)
+```
+
+**Step 1 — Load the policy:**
+
+```bash
+sudo tetra tracingpolicy add \
+    tetragon-policies/experimental/tls-service-tracking.yaml
+```
+
+**Step 2 — Run the probe test:**
+
+```bash
+python3 probe_tests/test_tls_port_probe.py             # default cert, port 8443
+python3 probe_tests/test_tls_port_probe.py --port 9443 # custom port
+python3 probe_tests/test_tls_port_probe.py --pause     # hold server open for manual inspection
+python3 probe_tests/test_tls_port_probe.py \
+    --cert /path/to/server.crt --key /path/to/server.key
+```
+
+**Step 3 — Verify cert_analyzer output** (within a few seconds of the bind):
+
+```
+🔍 TLS probe: discovered cert at 127.0.0.1:8443 CN=valid.example.com process=...
+✅ OK: tls-probe://127.0.0.1:8443 (process=... CN=valid.example.com) valid for ...
+```
+
+**Step 4 — Verify Prometheus metric:**
+
+```bash
+curl -s http://localhost:9090/metrics | grep tls_port_probes_total
+# Expected:
+# tls_port_probes_total{status="success"} 1
+```
+
+**Step 5 — Remove the policy:**
+
+```bash
+sudo tetra tracingpolicy delete tls-service-tracking
+```
+
+**Pipeline summary:**
+
+| Step | Component | What happens |
+|---|---|---|
+| 1 | Python script | Binds TLS server to `0.0.0.0:8443` |
+| 2 | Tetragon | `security_socket_bind` kprobe fires; event delivered to cert_analyzer via gRPC |
+| 3 | cert_analyzer `_handle_tls_bind_event` | Extracts port from `sock_arg.sport`; resolves probe IP via `/proc/<pid>/net/fib_trie` (K8s) or falls back to `127.0.0.1` (bare metal) |
+| 4 | cert_analyzer `_probe_tls_endpoint` | Connects to `127.0.0.1:8443`, completes TLS handshake, reads leaf cert via `getpeercert(binary_form=True)` |
+| 5 | cert_analyzer | Parses DER cert, updates Prometheus metrics, emits log line, publishes to Kafka if configured |
+
+**Production note:**
+
+`tls-service-tracking.yaml` hooks all TCP binds with no binary filter, making it
+suitable for broad coverage but potentially noisy on busy hosts.
+`tls-service-tracking-fixed.yaml` retains a `matchBinaries` allowlist (nginx,
+httpd) for deployments where event volume must be controlled — add any additional
+TLS server binaries there as needed.
