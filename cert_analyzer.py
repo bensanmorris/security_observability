@@ -10,6 +10,9 @@ import sys
 import json
 import logging
 import grpc
+import socket
+import ssl
+import struct
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple, List, OrderedDict as OrderedDictType
@@ -322,6 +325,12 @@ class PrometheusMetrics:
             'Configured maximum size for all LRU caches',
         )
         self.cache_max_size.set(CACHE_MAX_SIZE)
+
+        self.tls_port_probes_total = Counter(
+            'tls_port_probes_total',
+            'Total number of TLS port probe attempts triggered by bind events',
+            ['status'],  # success, failed, skipped
+        )
 
         # Tetragon policy tracking
         self.tetragon_policy_info = Gauge(
@@ -925,7 +934,10 @@ class CertificateAnalyzer:
                  kafka_publisher: Optional['KafkaPublisher'] = None,
                  checksum_enabled: bool = False,
                  demo_mode: bool = False,
-                 fips_compliance_enabled: bool = True):
+                 fips_compliance_enabled: bool = True,
+                 port_probe_enabled: bool = False,
+                 port_probe_timeout: float = 5.0,
+                 port_probe_connect_delay: float = 2.0):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -934,6 +946,9 @@ class CertificateAnalyzer:
         self.checksum_enabled = checksum_enabled
         self.demo_mode = demo_mode
         self.fips_compliance_enabled = fips_compliance_enabled
+        self._port_probe_enabled = port_probe_enabled
+        self._port_probe_timeout = port_probe_timeout
+        self._port_probe_connect_delay = port_probe_connect_delay
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -1946,9 +1961,191 @@ class CertificateAnalyzer:
         self._update_cache_metrics()
         return True
 
+    # ------------------------------------------------------------------
+    # Port-probe helpers — port-scanner-like cert discovery
+    # ------------------------------------------------------------------
+
+    def _read_primary_ip_from_fib_trie(self, pid: int) -> Optional[str]:
+        """Read the primary non-loopback IPv4 from /proc/<pid>/net/fib_trie.
+
+        Follows the process's network namespace so this returns the container's
+        own IP, not the host IP. Used to probe containerised services that bind
+        to 0.0.0.0 inside their own network namespace.
+        """
+        try:
+            with open(f'/proc/{pid}/net/fib_trie', 'r') as f:
+                lines = f.readlines()
+        except OSError:
+            return None
+
+        ip_pat = re.compile(r'(\d+\.\d+\.\d+\.\d+)/32')
+        for i, line in enumerate(lines):
+            if 'LOCAL' in line and '/32 host' in line:
+                for j in range(i - 1, max(-1, i - 5), -1):
+                    m = ip_pat.search(lines[j])
+                    if m:
+                        ip = m.group(1)
+                        if not ip.startswith('127.') and ip != '0.0.0.0':
+                            return ip
+        return None
+
+    def _resolve_pid_ip(self, pid: int, bind_addr: str) -> str:
+        """Resolve the IP address to probe for a given bind event.
+
+        If the service bound to a specific address, use it directly. For
+        wildcard binds (0.0.0.0 / ::) on K8s, read the container's primary
+        IP from its network namespace via /proc/<pid>/net/fib_trie. Falls
+        back to 127.0.0.1 for bare-metal deployments where the process
+        is in the host network namespace.
+        """
+        if bind_addr and bind_addr not in ('0.0.0.0', '::', ''):
+            return bind_addr
+        ip = None
+        try:
+            ip = self._read_primary_ip_from_fib_trie(pid)
+        except Exception as e:
+            logger.debug(f"fib_trie lookup failed for PID {pid}: {e}")
+        return ip or '127.0.0.1'
+
+    def _probe_tls_endpoint(
+        self,
+        host: str,
+        port: int,
+        process_name: str,
+        pid: int,
+        node_name: str,
+        tetragon_pod,
+    ) -> None:
+        """Connect to host:port, complete a TLS handshake, and ingest the leaf cert.
+
+        Uses no-verify mode intentionally — the goal is certificate inventory,
+        not validation. A short delay before calling (port_probe_connect_delay)
+        gives the service time to finish TLS initialisation after binding.
+        """
+        synthetic_path = f'tls-probe://{host}:{port}'
+
+        if any(k.startswith(synthetic_path + ':') for k in self.known_certs):
+            logger.debug(f"TLS probe: already cached {synthetic_path}")
+            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            return
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        try:
+            raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
+            with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
+                der_bytes = ssock.getpeercert(binary_form=True)
+        except Exception as e:
+            logger.debug(f"TLS probe failed {host}:{port}: {e}")
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        if not der_bytes:
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        try:
+            cert = x509.load_der_x509_certificate(der_bytes, default_backend())
+        except Exception as e:
+            logger.debug(f"TLS probe: DER parse failed for {host}:{port}: {e}")
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid)
+        if cert_info is None:
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        if tetragon_pod is not None:
+            self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name = node_name
+
+        self.metrics.update_certificate_metrics(cert_info)
+        self.log_certificate_status(cert_info)
+        self.known_certs[cert_info.unique_key] = cert_info
+        self._update_cache_metrics()
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        self.metrics.tls_port_probes_total.labels(status='success').inc()
+        logger.info(
+            f"TLS probe: discovered cert at {host}:{port} "
+            f"CN={cert_info.common_name} process={process_name}"
+        )
+
+    def _handle_tls_bind_event(self, event) -> None:
+        """Extract the bound address/port from a security_socket_bind or sys_bind
+        kprobe event, resolve the probe target IP, and schedule a TLS probe.
+
+        Handles two policy variants:
+          - security_socket_bind (experimental policy): sockaddr decoded by Tetragon
+            into sock_arg — port in arg[1].sock_arg.sport
+          - sys_bind (fixed policy): raw sockaddr bytes in arg[1].bytes_arg
+        """
+        kprobe = event.process_kprobe
+        fn = kprobe.function_name
+        pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(kprobe.process.binary, pid)
+        tetragon_pod = kprobe.process.pod if kprobe.process.HasField('pod') else None
+        node_name = event.node_name
+
+        port = 0
+        bind_addr = '0.0.0.0'
+
+        if fn == 'security_socket_bind':
+            # arg[0]=sock, arg[1]=sockaddr — both decoded as sock_arg by Tetragon
+            for idx, arg in enumerate(kprobe.args):
+                if arg.HasField('sock_arg') and arg.sock_arg.sport:
+                    port = arg.sock_arg.sport
+                    bind_addr = arg.sock_arg.saddr or '0.0.0.0'
+                    break
+
+        elif fn == 'sys_bind':
+            # arg[0]=int (fd), arg[1]=char_buf (raw sockaddr struct)
+            if len(kprobe.args) >= 2 and kprobe.args[1].HasField('bytes_arg'):
+                data = bytes(kprobe.args[1].bytes_arg)
+                if len(data) >= 8:
+                    family = struct.unpack_from('<H', data, 0)[0]
+                    port = struct.unpack_from('>H', data, 2)[0]
+                    if family == 2:  # AF_INET
+                        bind_addr = '.'.join(str(b) for b in data[4:8])
+
+        if not port:
+            logger.debug(f"TLS bind event: could not extract port from {fn} event")
+            return
+
+        host = self._resolve_pid_ip(pid, bind_addr)
+        delay = self._port_probe_connect_delay
+
+        def _probe():
+            if delay:
+                time.sleep(delay)
+            try:
+                self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod)
+            except Exception as e:
+                logger.debug(f"TLS probe thread error {host}:{port}: {e}")
+
+        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
+        t.start()
+        logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
+
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
+
+        # Bind events from tls-service-tracking carry no cert paths — route them
+        # to the port-probe handler and return. Other kprobe/uprobe events fall
+        # through to the normal cert extraction path below.
+        if event.HasField('process_kprobe'):
+            fn = getattr(event.process_kprobe, 'function_name', '')
+            if fn in ('security_socket_bind', 'sys_bind'):
+                if self._port_probe_enabled:
+                    self._handle_tls_bind_event(event)
+                return
+
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)
         pod_name = tetragon_pod.name if tetragon_pod is not None else ""
@@ -2405,6 +2602,11 @@ def main():
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
+    # ── Port probe (optional) ─────────────────────────────────────────────────
+    port_probe_enabled       = cfg(cp, 'port_probe', 'enabled',              'PORT_PROBE_ENABLED',       'false').lower() == 'true'
+    port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
+    port_probe_connect_delay = float(cfg(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2'))
+
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
     kafka_bootstrap        = cfg(cp, 'kafka', 'bootstrap_servers', 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
@@ -2438,6 +2640,10 @@ def main():
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
         logger.info(f"Kafka topic:       {kafka_topic}")
         logger.info(f"Kafka security:    {kafka_security}")
+    logger.info(f"Port probe:        {'enabled' if port_probe_enabled else 'disabled'}")
+    if port_probe_enabled:
+        logger.info(f"Port probe timeout:        {port_probe_timeout}s")
+        logger.info(f"Port probe connect delay:  {port_probe_connect_delay}s")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -2474,7 +2680,10 @@ def main():
                                    kafka_publisher=kafka_publisher,
                                    checksum_enabled=checksum_enabled,
                                    demo_mode=demo_mode,
-                                   fips_compliance_enabled=fips_compliance_enabled)
+                                   fips_compliance_enabled=fips_compliance_enabled,
+                                   port_probe_enabled=port_probe_enabled,
+                                   port_probe_timeout=port_probe_timeout,
+                                   port_probe_connect_delay=port_probe_connect_delay)
 
     health = HealthServer(
         analyzer=analyzer,
