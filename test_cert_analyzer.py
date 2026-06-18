@@ -5354,12 +5354,12 @@ class TestPortProbe:
     @staticmethod
     def _make_sock_arg(port, saddr='0.0.0.0'):
         from unittest.mock import MagicMock
-        sock = MagicMock()
-        sock.sport = port
-        sock.saddr = saddr
+        sockaddr = MagicMock()
+        sockaddr.port = port
+        sockaddr.addr = saddr
         arg = MagicMock()
-        arg.HasField.side_effect = lambda f: f == 'sock_arg'
-        arg.sock_arg = sock
+        arg.HasField.side_effect = lambda f: f == 'sockaddr_arg'
+        arg.sockaddr_arg = sockaddr
         return arg
 
     @staticmethod
