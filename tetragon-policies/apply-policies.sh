@@ -54,7 +54,12 @@ persist_policy() {
 apply_policy() {
     local policy_file="$1"
     local label="$2"
+    local policy_name
+    policy_name=$(awk '/^metadata:/{found=1} found && /^  name:/{print $2; exit}' "$policy_file")
     printf "  %-55s " "$label"
+    if [[ -n "$policy_name" ]]; then
+        sudo "$TETRA" tracingpolicy delete "$policy_name" 2>/dev/null || true
+    fi
     if output=$(sudo "$TETRA" tracingpolicy add "$policy_file" 2>&1); then
         printf "OK\n"
         SUCCEEDED+=("$label")

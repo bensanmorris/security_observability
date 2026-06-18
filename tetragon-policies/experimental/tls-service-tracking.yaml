@@ -12,10 +12,5 @@ spec:
     - index: 1
       type: "sockaddr"
     selectors:
-    - matchArgs:
-      - index: 1
-        operator: "Protocol"
-        values:
-        - "IPPROTO_TCP"
-      matchActions:
+    - matchActions:
       - action: Post

@@ -4,6 +4,33 @@ Programs that exercise the Tetragon uprobe hooks defined in
 `tetragon-policies/experimental/`. Run these with Tetragon active to confirm
 that `cert_analyzer.py` receives the expected events.
 
+## Generate test certificates
+
+cert-analyzer runs under systemd with `ProtectHome=true` and `PrivateTmp=true`,
+so it cannot read files under `/home` or `/tmp`.  Generate a throwaway cert and
+key in `/etc/pki/tls/certs/` — already listed in the service's `ReadOnlyPaths`
+— before running any test that exercises file-path-based uprobe hooks (tests 1
+and 2 of `test_openssl3_cert_load` and the port-probe test):
+
+```bash
+sudo openssl req -x509 -newkey rsa:2048 \
+    -keyout /etc/pki/tls/certs/cert-analyzer-test.key \
+    -out    /etc/pki/tls/certs/cert-analyzer-test.crt \
+    -days 365 -nodes \
+    -subj "/CN=cert-analyzer-test.example.com"
+sudo chmod 644 /etc/pki/tls/certs/cert-analyzer-test.key
+```
+
+Both files are placed in `/etc/pki/tls/certs/` (mode `644`) so they are
+readable by the cert-analyzer service user and by the test scripts running as a
+normal user.  Remove them when done:
+
+```bash
+sudo rm /etc/pki/tls/certs/cert-analyzer-test.{crt,key}
+```
+
+---
+
 ## Tests
 
 ### test_openssl3_cert_load (C++)
@@ -18,12 +45,14 @@ mkdir build && cd build && cmake .. && make
 
 **Run:**
 ```bash
-./test_openssl3_cert_load                        # run all three tests
-./test_openssl3_cert_load --test 1               # SSL_CTX_use_certificate_file only
-./test_openssl3_cert_load --test 2               # SSL_CTX_use_certificate_chain_file only
+# Generate test cert first — see "Generate test certificates" above
+CERT=/etc/pki/tls/certs/cert-analyzer-test.crt
+
+./test_openssl3_cert_load "$CERT"                # run all three tests
+./test_openssl3_cert_load --test 1 "$CERT"       # SSL_CTX_use_certificate_file only
+./test_openssl3_cert_load --test 2 "$CERT"       # SSL_CTX_use_certificate_chain_file only
 ./test_openssl3_cert_load --test 3               # SSL_CTX_use_certificate_ASN1 only (embedded cert, no file needed)
-./test_openssl3_cert_load --test 1 --pause       # run test 1 then hold — useful for inspecting Tetragon events
-./test_openssl3_cert_load /path/to/other.crt     # custom cert for tests 1 & 2
+./test_openssl3_cert_load --test 1 --pause "$CERT"  # run test 1 then hold — useful for inspecting Tetragon events
 ```
 
 | # | Function | Uprobe hook captures |
@@ -224,11 +253,13 @@ sudo tetra tracingpolicy add \
 **Step 2 — Run the probe test:**
 
 ```bash
-python3 probe_tests/test_tls_port_probe.py             # default cert, port 8443
-python3 probe_tests/test_tls_port_probe.py --port 9443 # custom port
-python3 probe_tests/test_tls_port_probe.py --pause     # hold server open for manual inspection
-python3 probe_tests/test_tls_port_probe.py \
-    --cert /path/to/server.crt --key /path/to/server.key
+# Generate test cert first — see "Generate test certificates" above
+CERT=/etc/pki/tls/certs/cert-analyzer-test.crt
+KEY=/etc/pki/tls/certs/cert-analyzer-test.key
+
+python3 probe_tests/test_tls_port_probe.py --cert "$CERT" --key "$KEY"
+python3 probe_tests/test_tls_port_probe.py --cert "$CERT" --key "$KEY" --port 9443
+python3 probe_tests/test_tls_port_probe.py --cert "$CERT" --key "$KEY" --pause
 ```
 
 **Step 3 — Verify cert_analyzer output** (within a few seconds of the bind):

@@ -2082,7 +2082,7 @@ class CertificateAnalyzer:
 
         Handles two policy variants:
           - security_socket_bind (experimental policy): sockaddr decoded by Tetragon
-            into sock_arg — port in arg[1].sock_arg.sport
+            into sockaddr_arg — port in arg[1].sockaddr_arg.port
           - sys_bind (fixed policy): raw sockaddr bytes in arg[1].bytes_arg
         """
         kprobe = event.process_kprobe
@@ -2096,11 +2096,11 @@ class CertificateAnalyzer:
         bind_addr = '0.0.0.0'
 
         if fn == 'security_socket_bind':
-            # arg[0]=sock, arg[1]=sockaddr — both decoded as sock_arg by Tetragon
-            for idx, arg in enumerate(kprobe.args):
-                if arg.HasField('sock_arg') and arg.sock_arg.sport:
-                    port = arg.sock_arg.sport
-                    bind_addr = arg.sock_arg.saddr or '0.0.0.0'
+            # arg[0]=sock (socket struct), arg[1]=sockaddr_arg (address being bound)
+            for arg in kprobe.args:
+                if arg.HasField('sockaddr_arg') and arg.sockaddr_arg.port:
+                    port = arg.sockaddr_arg.port
+                    bind_addr = arg.sockaddr_arg.addr or '0.0.0.0'
                     break
 
         elif fn == 'sys_bind':
