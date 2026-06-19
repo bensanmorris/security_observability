@@ -1,0 +1,103 @@
+<svg width="512" height="512" viewBox="0 0 512 512" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>CertSight icon</title>
+  <desc>A server in Barclays blue with a third eye perceiving certificates</desc>
+
+  <style>
+    .shadow { fill: #001825; opacity: 0.18; }
+    .rack-line { stroke: #00aeef; stroke-width: 1.5; fill: none; opacity: 0.4; }
+    .led { fill: #00aeef; opacity: 0.9; }
+    .led-warm { fill: #7ee8ff; }
+    .server-panel { fill: #003050; }
+    .eye-shine { fill: #ffffff; opacity: 0.85; }
+    .cert-line { stroke: #7ee8ff; stroke-width: 2; fill: none; opacity: 0.55; stroke-dasharray: 6 4; }
+  </style>
+
+  <!-- shadow -->
+  <ellipse cx="256" cy="434" rx="110" ry="12" class="shadow"/>
+
+  <!-- server chassis -->
+  <rect x="136" y="80" width="240" height="330" rx="16" fill="#00395d"/>
+
+  <!-- front face tint -->
+  <rect x="152" y="96" width="208" height="298" rx="9" fill="#00aeef" opacity="0.10"/>
+
+  <!-- rack lines -->
+  <line x1="152" y1="138" x2="360" y2="138" class="rack-line"/>
+  <line x1="152" y1="182" x2="360" y2="182" class="rack-line"/>
+  <line x1="152" y1="226" x2="360" y2="226" class="rack-line"/>
+  <line x1="152" y1="340" x2="360" y2="340" class="rack-line"/>
+  <line x1="152" y1="362" x2="360" y2="362" class="rack-line"/>
+
+  <!-- drive bays row 1 -->
+  <rect x="160" y="146" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="200" y="146" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="240" y="146" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="280" y="146" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="320" y="146" width="34" height="24" rx="4" class="server-panel"/>
+
+  <!-- drive bays row 2 -->
+  <rect x="160" y="190" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="200" y="190" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="240" y="190" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="280" y="190" width="34" height="24" rx="4" class="server-panel"/>
+  <rect x="320" y="190" width="34" height="24" rx="4" class="server-panel"/>
+
+  <!-- LEDs -->
+  <circle cx="168" cy="112" r="5" class="led-warm"/>
+  <circle cx="186" cy="112" r="5" class="led"/>
+  <circle cx="204" cy="112" r="5" class="led"/>
+  <circle cx="220" cy="112" r="4" fill="#00aeef" opacity="0.4"/>
+  <circle cx="236" cy="112" r="4" fill="#00aeef" opacity="0.4"/>
+
+  <!-- power button -->
+  <circle cx="340" cy="112" r="9" class="server-panel"/>
+  <circle cx="340" cy="112" r="6" stroke="#00aeef" stroke-width="1.5" fill="none" opacity="0.8"/>
+  <line x1="340" y1="106" x2="340" y2="112" stroke="#00aeef" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>
+
+  <!-- eye glow -->
+  <ellipse cx="256" cy="286" rx="66" ry="44" fill="#00aeef" opacity="0.15"/>
+  <ellipse cx="256" cy="286" rx="50" ry="32" fill="#00aeef" opacity="0.10"/>
+
+  <!-- eyelid shape -->
+  <path d="M164 286 Q210 238 256 236 Q302 238 348 286 Q302 334 256 336 Q210 334 164 286 Z" fill="#e8f7ff"/>
+  <path d="M164 286 Q210 238 256 236 Q302 238 348 286 Q302 334 256 336 Q210 334 164 286 Z" stroke="#00395d" stroke-width="2.5" fill="none"/>
+
+  <!-- iris -->
+  <circle cx="256" cy="286" r="32" fill="#00aeef"/>
+  <circle cx="256" cy="286" r="32" stroke="#003050" stroke-width="3" fill="none" opacity="0.5"/>
+  <circle cx="256" cy="286" r="26" stroke="#7ee8ff" stroke-width="1" fill="none" opacity="0.4"/>
+
+  <!-- pupil -->
+  <circle cx="256" cy="286" r="17" fill="#001825"/>
+  <circle cx="256" cy="286" r="11" stroke="#00aeef" stroke-width="1.5" fill="none" opacity="0.5"/>
+
+  <!-- certificate in pupil -->
+  <rect x="249" y="277" width="14" height="18" rx="2" fill="#00aeef" opacity="0.9"/>
+  <line x1="252" y1="282" x2="260" y2="282" stroke="#001825" stroke-width="1.5"/>
+  <line x1="252" y1="286" x2="260" y2="286" stroke="#001825" stroke-width="1.5"/>
+  <line x1="252" y1="290" x2="257" y2="290" stroke="#001825" stroke-width="1.5"/>
+
+  <!-- eye shine -->
+  <ellipse cx="242" cy="274" rx="5" ry="3.5" class="eye-shine"/>
+  <circle cx="250" cy="270" r="2" fill="#ffffff" opacity="0.5"/>
+
+  <!-- scanning rays -->
+  <line x1="164" y1="286" x2="134" y2="276" class="cert-line"/>
+  <line x1="164" y1="286" x2="130" y2="291" class="cert-line"/>
+  <line x1="348" y1="286" x2="378" y2="276" class="cert-line"/>
+  <line x1="348" y1="286" x2="382" y2="291" class="cert-line"/>
+  <line x1="256" y1="236" x2="256" y2="206" class="cert-line"/>
+
+  <!-- ray endpoint dots -->
+  <circle cx="132" cy="277" r="3" fill="#7ee8ff" opacity="0.7"/>
+  <circle cx="128" cy="292" r="3" fill="#7ee8ff" opacity="0.7"/>
+  <circle cx="380" cy="277" r="3" fill="#7ee8ff" opacity="0.7"/>
+  <circle cx="384" cy="292" r="3" fill="#7ee8ff" opacity="0.7"/>
+  <circle cx="256" cy="204" r="3" fill="#7ee8ff" opacity="0.7"/>
+
+  <!-- vents -->
+  <rect x="160" y="348" width="192" height="9" rx="3" class="server-panel" opacity="0.7"/>
+  <rect x="160" y="362" width="192" height="9" rx="3" class="server-panel" opacity="0.5"/>
+  <rect x="160" y="376" width="192" height="9" rx="3" class="server-panel" opacity="0.3"/>
+
+</svg>

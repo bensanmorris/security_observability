@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="extras/certsight-icon.svg" width="120" height="120">
+</p>
+
 # CertSight - Realtime certificate monitoring via eBPF
 
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
