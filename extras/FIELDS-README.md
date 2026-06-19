@@ -13,7 +13,7 @@ or consuming the Kafka topic.
 
 ### Certificate expiry and validity
 
-Three gauges carry the full certificate identity as labels and are updated
+Four gauges carry the full certificate identity as labels and are updated
 every time a certificate is seen.
 
 | Metric | Type | Description |
@@ -21,6 +21,7 @@ every time a certificate is seen.
 | `tls_certificate_expiry_days` | Gauge | Floating-point days until the certificate expires (negative when expired) |
 | `tls_certificate_expiry_timestamp` | Gauge | Unix timestamp of `not_after` |
 | `tls_certificate_valid_from_timestamp` | Gauge | Unix timestamp of `not_before` |
+| `tls_certificate_last_accessed_timestamp` | Gauge | Unix timestamp of the most recent access event for this certificate |
 
 All three share the same label set:
 
