@@ -223,6 +223,15 @@ class PrometheusMetrics:
              'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
+        self.cert_last_accessed = Gauge(
+            'tls_certificate_last_accessed_timestamp',
+            'Unix timestamp of the most recent certificate access event',
+            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
+             'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
+        )
+
         # Event counters
         self.cert_events_total = Counter(
             'tls_certificate_events_total',
@@ -375,6 +384,7 @@ class PrometheusMetrics:
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
         self.cert_valid_from.labels(**labels).set(info.not_before.timestamp())
+        self.cert_last_accessed.labels(**labels).set(datetime.utcnow().timestamp())
 
         self.cert_expired.labels(
             cert_path=info.path,
