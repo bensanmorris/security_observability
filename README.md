@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="extras/certsight-icon.svg" width="480" height="480">
+  <img src="extras/certsight-icon.svg" width="240" height="240">
 </p>
 
 # CertSight - Realtime certificate monitoring via eBPF
