@@ -181,7 +181,7 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `paths` | `/etc/ssl,/etc/pki` | Optional comma-separated directories for periodic certificate. Scanning is disabled if empty |
+| `paths` | `/etc/ssl,/etc/pki` | Optional comma-separated directories for optional periodic certificate. Scanning is disabled if empty |
 | `interval_seconds` | `3600` | Seconds between periodic scans |
 
 **[logging]**
