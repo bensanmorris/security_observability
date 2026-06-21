@@ -194,7 +194,7 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_size` | `10000` | LRU cache size for known certs, processed paths, and failed passwords (minimum 10,000) |
+| `max_size` | `10000` | LRU cache size for known certs (minimum 10,000) |
 
 **[certificates]**
 
