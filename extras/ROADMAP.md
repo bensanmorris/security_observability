@@ -15,6 +15,15 @@ Tetragon's `process_kprobe` and `process_uprobe` protos include a `parent` field
 ### Certificate rotation detection
 When a new serial appears at a previously-known path, the current code re-analyzes it after LRU eviction with no explicit signal. An explicit `tls_certificate_rotations_total` counter (incrementing when the serial changes at the same `cert_path`) makes rotation velocity visible and enables alerting on failed or stalled rotations.
 
+### SIGHUP-triggered reload tracking (`signal` tracepoints)
+Most TLS daemons (nginx, haproxy, Envoy, Postfix, Apache httpd) reload their certificates on SIGHUP rather than on a timer. The current `fd_install` kprobe catches the resulting file opens, but misses reloads where the daemon serves a cert already held in memory without re-opening the file. A `signal_generate` tracepoint policy filtered on signal 1 destined for known TLS binary paths would surface reload events explicitly — giving attribution (who sent the signal and when), enabling proactive re-probing, and catching the in-memory-reload blind spot.
+
+### Outbound TLS connection tracking (`tcp` tracepoints)
+`security_socket_bind` covers server-side TLS endpoints; the client side is currently invisible. A `tcp_connect` tracepoint policy would fire when a process opens an outbound connection to common TLS ports (443, 8443, 5671, etc.), supplying the destination address. The existing port-probe logic (TLS handshake, read the leaf cert) can then be applied in the outbound direction — making remote server certificate expiry visible without any configuration by operators.
+
+### Kernel TLS coverage auditing (`tls` tracepoints)
+When an application offloads TLS record processing to the kernel via `setsockopt(SOL_TLS, TLS_TX/RX, ...)`, the cert is still loaded in userspace first (and caught by the existing OpenSSL uprobes), but the kTLS activation event independently confirms that TLS is live on that socket. Hooking the kTLS tracepoints and cross-referencing against the set of sockets already observed via uprobes provides a coverage completeness check — any kTLS socket with no corresponding uprobe hit indicates a TLS library path not yet instrumented. Nginx and haproxy both use kTLS on RHEL 9/10 with sufficiently modern kernels.
+
 ---
 
 ## Security analysis
@@ -67,8 +76,11 @@ Kafka suits streaming pipelines, but many operators want a direct Slack, Teams, 
 | Wildcard cert metric | Medium | Low |
 | Grafana dashboard | High | Low |
 | CA/leaf key usage mismatch | Medium | Low |
+| kTLS coverage auditing (`tls` tracepoints) | Low | Low |
 | Certificate rotation counter | Medium | Medium |
+| SIGHUP reload tracking (`signal` tracepoints) | Medium | Medium |
 | Certificate inventory REST endpoint | High | Medium |
+| Outbound TLS tracking (`tcp` tracepoints) | Medium | Medium |
 | Webhook alerting output | High | Medium |
 | OCSP/CRL revocation checking | High | High |
 | Rogue CA alerting | High | High |
