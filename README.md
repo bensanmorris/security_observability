@@ -252,7 +252,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Performance tests](perf_tests/README.md) - Throughput and latency comparison across cert-analyzer configurations
 - [Surfaced fields reference](extras/FIELDS-README.md) - All Prometheus metrics and Kafka event fields
 - [Grafana dashboard](extras/DASHBOARDS.md) - Setup guide and dashboard section reference
-- [Quick start demo](extras/README-QUICKSTART.md)
-- [Kubernetes / pod enrichment demo](extras/POD-ENRICHMENT-DEMO-README.md)
-- [Deployment guide](extras/DEPLOYMENT-README.md)
-- [Testing guide](extras/TEST-README.md)
+- [Roadmap](extras/ROADMAP.md) - Planned and proposed improvements
