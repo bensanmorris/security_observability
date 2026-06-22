@@ -936,6 +936,24 @@ class CertificateAnalyzer:
     CERT_EXTENSIONS  = {'.crt', '.pem', '.cert', '.cer', '.key'}
     JKS_EXTENSIONS   = {'.jks', '.keystore', '.truststore'}
     PKCS12_EXTENSIONS = {'.p12', '.pfx'}
+    # Destination ports considered TLS for outbound connect probing.
+    # These are checked in _handle_tls_connect_event as a Python-side guard
+    # complementing the DPort filter in the tcp-connect-tls Tetragon policy.
+    # Built-in default TLS port list — used when tls_outbound_ports is not
+    # configured. Must be kept in sync with the DPort filter in
+    # tetragon-policies/tcp-connect-tls.yaml (Tetragon filters first; this is
+    # a Python-side guard for events that pass the kernel filter).
+    TLS_OUTBOUND_PORTS = frozenset({
+        443,   # HTTPS
+        636,   # LDAPS
+        5671,  # AMQP/TLS
+        5672,  # AMQP (often TLS)
+        6380,  # Redis TLS
+        8443,  # HTTPS alternate
+        8883,  # MQTT/TLS
+        9093,  # Kafka TLS
+        9094,  # Kafka TLS alternate
+    })
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
@@ -945,9 +963,11 @@ class CertificateAnalyzer:
                  checksum_enabled: bool = False,
                  demo_mode: bool = False,
                  fips_compliance_enabled: bool = True,
-                 port_probe_enabled: bool = False,
+                 bind_probe_enabled: bool = False,
+                 connect_probe_enabled: bool = False,
                  port_probe_timeout: float = 5.0,
-                 port_probe_connect_delay: float = 2.0):
+                 port_probe_connect_delay: float = 2.0,
+                 tls_outbound_ports: Optional[frozenset] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -956,9 +976,11 @@ class CertificateAnalyzer:
         self.checksum_enabled = checksum_enabled
         self.demo_mode = demo_mode
         self.fips_compliance_enabled = fips_compliance_enabled
-        self._port_probe_enabled = port_probe_enabled
+        self._bind_probe_enabled = bind_probe_enabled
+        self._connect_probe_enabled = connect_probe_enabled
         self._port_probe_timeout = port_probe_timeout
         self._port_probe_connect_delay = port_probe_connect_delay
+        self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -969,6 +991,15 @@ class CertificateAnalyzer:
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
         self._known_policy_labels: Set[Tuple[str, str, str]] = set()
+        # Per-endpoint deduplication for TLS port probes.
+        # _probed_endpoints: "host:port" strings already probed — O(1) pre-check
+        #   prevents thread creation for endpoints whose cert is already known.
+        # _probe_in_flight: "host:port" strings currently being probed — prevents
+        #   duplicate concurrent probes when several events for a new endpoint
+        #   arrive before the first probe completes (e.g. connection pooling).
+        # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
+        self._probed_endpoints: Set[str] = set()
+        self._probe_in_flight: Set[str] = set()
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -2034,8 +2065,8 @@ class CertificateAnalyzer:
         """
         synthetic_path = f'tls-probe://{host}:{port}'
 
-        if any(k.startswith(synthetic_path + ':') for k in self.known_certs):
-            logger.debug(f"TLS probe: already cached {synthetic_path}")
+        if f'{host}:{port}' in self._probed_endpoints:
+            logger.debug(f"TLS probe: already probed {synthetic_path}")
             self.metrics.tls_port_probes_total.labels(status='skipped').inc()
             return
 
@@ -2075,6 +2106,7 @@ class CertificateAnalyzer:
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
+        self._probed_endpoints.add(f'{host}:{port}')
         self._update_cache_metrics()
 
         if self.kafka_publisher is not None:
@@ -2130,6 +2162,12 @@ class CertificateAnalyzer:
         host = self._resolve_pid_ip(pid, bind_addr)
         delay = self._port_probe_connect_delay
 
+        endpoint_key = f'{host}:{port}'
+        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+            logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
+            return
+        self._probe_in_flight.add(endpoint_key)
+
         def _probe():
             if delay:
                 time.sleep(delay)
@@ -2137,23 +2175,79 @@ class CertificateAnalyzer:
                 self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod)
             except Exception as e:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
+            finally:
+                self._probe_in_flight.discard(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
         t.start()
         logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
 
+    def _handle_tls_connect_event(self, event) -> None:
+        """Extract destination address/port from a tcp_connect kprobe event and schedule a TLS probe.
+
+        tcp_connect fires when a process initiates an outbound TCP connection.
+        The sock_arg carries the destination address and port. We probe that
+        remote endpoint immediately — no startup delay is needed because the
+        remote server is already running when our process connects to it.
+        """
+        kprobe = event.process_kprobe
+        pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(kprobe.process.binary, pid)
+        tetragon_pod = kprobe.process.pod if kprobe.process.HasField('pod') else None
+        node_name = event.node_name
+
+        daddr = ''
+        dport = 0
+        for arg in kprobe.args:
+            if arg.HasField('sock_arg'):
+                daddr = arg.sock_arg.daddr
+                dport = arg.sock_arg.dport
+                break
+
+        if not dport or not daddr:
+            logger.debug("tcp_connect event: could not extract destination address/port")
+            return
+
+        if dport not in self._tls_outbound_ports:
+            logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
+            return
+
+        endpoint_key = f'{daddr}:{dport}'
+        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+            logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
+            return
+        self._probe_in_flight.add(endpoint_key)
+
+        def _probe():
+            try:
+                self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod)
+            except Exception as e:
+                logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
+            finally:
+                self._probe_in_flight.discard(endpoint_key)
+
+        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
+        t.start()
+        logger.debug(
+            f"Scheduled TLS outbound probe {daddr}:{dport} pid={pid} process={process_name}"
+        )
+
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
 
-        # Bind events from tls-service-tracking carry no cert paths — route them
-        # to the port-probe handler and return. Other kprobe/uprobe events fall
-        # through to the normal cert extraction path below.
+        # Bind and outbound-connect events carry no cert paths — route them to
+        # port-probe handlers and return. Other kprobe/uprobe events fall through
+        # to the normal cert extraction path below.
         if event.HasField('process_kprobe'):
             fn = getattr(event.process_kprobe, 'function_name', '')
             if fn in ('security_socket_bind', 'sys_bind'):
-                if self._port_probe_enabled:
+                if self._bind_probe_enabled:
                     self._handle_tls_bind_event(event)
+                return
+            if fn == 'tcp_connect':
+                if self._connect_probe_enabled:
+                    self._handle_tls_connect_event(event)
                 return
 
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
@@ -2613,9 +2707,21 @@ def main():
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
     # ── Port probe (optional) ─────────────────────────────────────────────────
-    port_probe_enabled       = cfg(cp, 'port_probe', 'enabled',              'PORT_PROBE_ENABLED',       'false').lower() == 'true'
+    bind_probe_enabled    = cfg(cp, 'port_probe', 'bind_probe_enabled',    'BIND_PROBE_ENABLED',    'false').lower() == 'true'
+    connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
     port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
     port_probe_connect_delay = float(cfg(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2'))
+    _tls_ports_raw = cfg(cp, 'port_probe', 'tls_outbound_ports', 'TLS_OUTBOUND_PORTS', '')
+    if _tls_ports_raw.strip():
+        try:
+            tls_outbound_ports: Optional[frozenset] = frozenset(
+                int(p.strip()) for p in _tls_ports_raw.split(',') if p.strip()
+            )
+        except ValueError as e:
+            logger.error(f"Invalid tls_outbound_ports value '{_tls_ports_raw}': {e} — using built-in defaults")
+            tls_outbound_ports = None
+    else:
+        tls_outbound_ports = None
 
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
@@ -2650,10 +2756,15 @@ def main():
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
         logger.info(f"Kafka topic:       {kafka_topic}")
         logger.info(f"Kafka security:    {kafka_security}")
-    logger.info(f"Port probe:        {'enabled' if port_probe_enabled else 'disabled'}")
-    if port_probe_enabled:
+    logger.info(f"Bind probe:        {'enabled' if bind_probe_enabled else 'disabled'}")
+    logger.info(f"Connect probe:     {'enabled' if connect_probe_enabled else 'disabled'}")
+    if bind_probe_enabled or connect_probe_enabled:
         logger.info(f"Port probe timeout:        {port_probe_timeout}s")
+    if bind_probe_enabled:
         logger.info(f"Port probe connect delay:  {port_probe_connect_delay}s")
+    if connect_probe_enabled:
+        _effective_ports = tls_outbound_ports if tls_outbound_ports is not None else CertificateAnalyzer.TLS_OUTBOUND_PORTS
+        logger.info(f"TLS outbound ports:        {sorted(_effective_ports)}")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -2691,9 +2802,11 @@ def main():
                                    checksum_enabled=checksum_enabled,
                                    demo_mode=demo_mode,
                                    fips_compliance_enabled=fips_compliance_enabled,
-                                   port_probe_enabled=port_probe_enabled,
+                                   bind_probe_enabled=bind_probe_enabled,
+                                   connect_probe_enabled=connect_probe_enabled,
                                    port_probe_timeout=port_probe_timeout,
-                                   port_probe_connect_delay=port_probe_connect_delay)
+                                   port_probe_connect_delay=port_probe_connect_delay,
+                                   tls_outbound_ports=tls_outbound_ports)
 
     health = HealthServer(
         analyzer=analyzer,

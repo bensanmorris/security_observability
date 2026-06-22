@@ -219,19 +219,35 @@ chmod    0640                      %{ana_conf}/cert-analyzer.conf
 _CONF=%{ana_conf}/cert-analyzer.conf
 if [ -f "$_CONF" ] && ! grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null; then
     printf '\n[port_probe]\n' >> "$_CONF" \
-    && printf '# Set enabled = true to probe TLS endpoints discovered via tls-service-tracking\n' >> "$_CONF" \
-    && printf '# bind events. Each bind event triggers a TLS handshake against the bound\n' >> "$_CONF" \
-    && printf '# address/port; the served leaf certificate is ingested into the normal pipeline.\n' >> "$_CONF" \
-    && printf '# On K8s the container IP is resolved from /proc/<pid>/net/fib_trie; on bare\n' >> "$_CONF" \
-    && printf '# metal 127.0.0.1 is used when the bind address is 0.0.0.0.\n' >> "$_CONF" \
-    && printf '# Requires the tls-service-tracking or tls-service-tracking-fixed policy to be loaded.\n' >> "$_CONF" \
-    && printf 'enabled = false\n' >> "$_CONF" \
-    && printf '\n# Seconds to wait after a bind event before probing (allows TLS initialisation\n' >> "$_CONF" \
-    && printf '# to complete before the connection attempt).\n' >> "$_CONF" \
+    && printf '# Inbound probe: trigger a TLS handshake when a process binds a port.\n' >> "$_CONF" \
+    && printf '# Requires tls-service-tracking-fixed.yaml to be loaded.\n' >> "$_CONF" \
+    && printf '# Low event volume — safe to enable broadly.\n' >> "$_CONF" \
+    && printf 'bind_probe_enabled = false\n' >> "$_CONF" \
+    && printf '\n# Outbound probe: trigger a TLS handshake when a process connects to a common\n' >> "$_CONF" \
+    && printf '# TLS port (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094).\n' >> "$_CONF" \
+    && printf '# Requires tcp-connect-tls.yaml to be loaded.\n' >> "$_CONF" \
+    && printf '# Each unique host:port is probed at most once (O(1) dedup);\n' >> "$_CONF" \
+    && printf '# enable with care on hosts with high outbound connection rates.\n' >> "$_CONF" \
+    && printf 'connect_probe_enabled = false\n' >> "$_CONF" \
+    && printf '\n# Comma-separated list of destination ports treated as TLS for outbound\n' >> "$_CONF" \
+    && printf '# probing. Leave commented to use the built-in defaults. If you change\n' >> "$_CONF" \
+    && printf '# this list, update the DPort filter in tcp-connect-tls.yaml to match.\n' >> "$_CONF" \
+    && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
+    && printf '\n# Seconds to wait after a bind event before probing (bind_probe_enabled only).\n' >> "$_CONF" \
     && printf 'connect_delay_seconds = 2\n' >> "$_CONF" \
-    && printf '\n# Seconds before the TLS probe connection attempt times out.\n' >> "$_CONF" \
+    && printf '\n# Seconds before a TLS probe connection attempt times out.\n' >> "$_CONF" \
     && printf 'timeout_seconds = 5\n' >> "$_CONF" \
     || echo "WARNING: failed to append [port_probe] section to $_CONF" >&2
+fi
+# Hosts upgraded from a release that had [port_probe] but not tls_outbound_ports:
+# append just the new key block so operators see it and can opt in.
+if [ -f "$_CONF" ] && grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null \
+        && ! grep -q '^#\?tls_outbound_ports' "$_CONF" 2>/dev/null; then
+    printf '\n# Comma-separated list of destination ports treated as TLS for outbound\n' >> "$_CONF" \
+    && printf '# probing. Leave commented to use the built-in defaults. If you change\n' >> "$_CONF" \
+    && printf '# this list, update the DPort filter in tcp-connect-tls.yaml to match.\n' >> "$_CONF" \
+    && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
+    || echo "WARNING: failed to append tls_outbound_ports to $_CONF" >&2
 fi
 unset _CONF
 
