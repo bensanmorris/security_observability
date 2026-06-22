@@ -219,8 +219,9 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Enable TLS endpoint probing. Covers two directions: (1) **inbound** — bind events from `tls-service-tracking-fixed.yaml` trigger a handshake against the newly bound port to ingest the served certificate; (2) **outbound** — `tcp_connect` events from `tcp-connect-tls.yaml` trigger an immediate probe against the remote server, making remote certificate expiry visible without per-service configuration. Each unique `host:port` is probed at most once — repeat events (e.g. a process that reconnects to the same server frequently) are deduplicated with an O(1) set lookup before any thread is created, keeping CPU overhead negligible at high event rates |
-| `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete (inbound probes only — outbound probes fire immediately) |
+| `bind_probe_enabled` | `false` | Enable inbound TLS probing. Bind events from `tls-service-tracking-fixed.yaml` trigger a TLS handshake against the newly bound address/port and ingest the served certificate. Low event volume — safe to enable broadly. Each unique `host:port` is probed at most once (O(1) dedup) |
+| `connect_probe_enabled` | `false` | Enable outbound TLS probing. `tcp_connect` events from `tcp-connect-tls.yaml` to common TLS ports (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094) trigger an immediate probe against the remote server, making remote certificate expiry visible without per-service configuration. Each unique `host:port` is probed at most once (O(1) dedup); enable with care on hosts with high outbound connection rates |
+| `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete (applies to `bind_probe_enabled` only — outbound probes fire immediately) |
 | `timeout_seconds` | `5` | Seconds before a TLS probe connection attempt times out |
 
 **[kafka]**

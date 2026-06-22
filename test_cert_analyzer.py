@@ -5314,7 +5314,7 @@ class TestPortProbe:
 
     @pytest.fixture
     def probe_analyzer(self):
-        """CertificateAnalyzer with port_probe_enabled=True and zero connect delay."""
+        """CertificateAnalyzer with both probe directions enabled and zero connect delay."""
         collectors = list(REGISTRY._collector_to_names.keys())
         for c in collectors:
             try:
@@ -5323,7 +5323,8 @@ class TestPortProbe:
                 pass
         a = CertificateAnalyzer(
             tetragon_address='unix:///dev/null',
-            port_probe_enabled=True,
+            bind_probe_enabled=True,
+            connect_probe_enabled=True,
             port_probe_timeout=2.0,
             port_probe_connect_delay=0.0,
         )
@@ -5828,9 +5829,9 @@ class TestPortProbe:
         mock_handler.assert_called_once_with(event)
 
     def test_process_event_skips_handler_when_port_probe_disabled(self, analyzer):
-        """Bind events are silently dropped when port_probe_enabled=False."""
+        """Bind events are silently dropped when bind_probe_enabled=False."""
         from unittest.mock import patch
-        assert not analyzer._port_probe_enabled
+        assert not analyzer._bind_probe_enabled
         event = self._make_bind_event(
             'security_socket_bind',
             [self._make_sock_arg(443)],
@@ -5965,15 +5966,71 @@ class TestPortProbe:
         mock_handler.assert_called_once_with(event)
 
     def test_process_event_tcp_connect_skipped_when_port_probe_disabled(self, analyzer):
-        """tcp_connect events are silently dropped when port_probe_enabled=False."""
+        """tcp_connect events are silently dropped when connect_probe_enabled=False."""
         from unittest.mock import patch
-        assert not analyzer._port_probe_enabled
+        assert not analyzer._connect_probe_enabled
         event = self._make_connect_event('1.2.3.4', 443)
 
         with patch.object(analyzer, '_handle_tls_connect_event') as mock_handler:
             analyzer.process_event(event)
 
         mock_handler.assert_not_called()
+
+    def test_bind_probe_fires_independently_of_connect_probe(self):
+        """bind_probe_enabled=True, connect_probe_enabled=False: bind handler called, connect handler not."""
+        from unittest.mock import patch
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            bind_probe_enabled=True,
+            connect_probe_enabled=False,
+        )
+        assert a._bind_probe_enabled
+        assert not a._connect_probe_enabled
+
+        bind_event = self._make_bind_event('security_socket_bind', [self._make_sock_arg(443)])
+        connect_event = self._make_connect_event('1.2.3.4', 443)
+
+        with patch.object(a, '_handle_tls_bind_event') as mock_bind, \
+             patch.object(a, '_handle_tls_connect_event') as mock_connect:
+            a.process_event(bind_event)
+            a.process_event(connect_event)
+
+        mock_bind.assert_called_once_with(bind_event)
+        mock_connect.assert_not_called()
+
+    def test_connect_probe_fires_independently_of_bind_probe(self):
+        """connect_probe_enabled=True, bind_probe_enabled=False: connect handler called, bind handler not."""
+        from unittest.mock import patch
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            bind_probe_enabled=False,
+            connect_probe_enabled=True,
+        )
+        assert not a._bind_probe_enabled
+        assert a._connect_probe_enabled
+
+        bind_event = self._make_bind_event('security_socket_bind', [self._make_sock_arg(443)])
+        connect_event = self._make_connect_event('1.2.3.4', 443)
+
+        with patch.object(a, '_handle_tls_bind_event') as mock_bind, \
+             patch.object(a, '_handle_tls_connect_event') as mock_connect:
+            a.process_event(bind_event)
+            a.process_event(connect_event)
+
+        mock_bind.assert_not_called()
+        mock_connect.assert_called_once_with(connect_event)
 
     def test_process_event_tcp_connect_does_not_fall_through_to_cert_extraction(self, probe_analyzer):
         """tcp_connect events return without calling extract_cert_path_from_event."""

@@ -237,10 +237,10 @@ production use where event volume must be controlled.
 **Prerequisites:**
 
 ```bash
-# cert_analyzer must have port probe enabled:
+# cert_analyzer must have the inbound bind probe enabled:
 # [port_probe]
-# enabled = true
-# in /etc/cert-analyzer/cert-analyzer.conf  (or PORT_PROBE_ENABLED=true env var)
+# bind_probe_enabled = true
+# in /etc/cert-analyzer/cert-analyzer.conf  (or BIND_PROBE_ENABLED=true env var)
 ```
 
 **Step 1 — Load the policy:**
@@ -322,10 +322,10 @@ DPort filter, does not require root, and is unlikely to be in use on test machin
 **Prerequisites:**
 
 ```bash
-# cert_analyzer must have port probe enabled:
+# cert_analyzer must have the outbound connect probe enabled:
 # [port_probe]
-# enabled = true
-# in /etc/cert-analyzer/cert-analyzer.conf  (or PORT_PROBE_ENABLED=true env var)
+# connect_probe_enabled = true
+# in /etc/cert-analyzer/cert-analyzer.conf  (or CONNECT_PROBE_ENABLED=true env var)
 ```
 
 **Step 1 — Load the policy:**

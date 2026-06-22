@@ -959,7 +959,8 @@ class CertificateAnalyzer:
                  checksum_enabled: bool = False,
                  demo_mode: bool = False,
                  fips_compliance_enabled: bool = True,
-                 port_probe_enabled: bool = False,
+                 bind_probe_enabled: bool = False,
+                 connect_probe_enabled: bool = False,
                  port_probe_timeout: float = 5.0,
                  port_probe_connect_delay: float = 2.0):
         self.tetragon_address = tetragon_address
@@ -970,7 +971,8 @@ class CertificateAnalyzer:
         self.checksum_enabled = checksum_enabled
         self.demo_mode = demo_mode
         self.fips_compliance_enabled = fips_compliance_enabled
-        self._port_probe_enabled = port_probe_enabled
+        self._bind_probe_enabled = bind_probe_enabled
+        self._connect_probe_enabled = connect_probe_enabled
         self._port_probe_timeout = port_probe_timeout
         self._port_probe_connect_delay = port_probe_connect_delay
         self.metrics = PrometheusMetrics()
@@ -2234,11 +2236,11 @@ class CertificateAnalyzer:
         if event.HasField('process_kprobe'):
             fn = getattr(event.process_kprobe, 'function_name', '')
             if fn in ('security_socket_bind', 'sys_bind'):
-                if self._port_probe_enabled:
+                if self._bind_probe_enabled:
                     self._handle_tls_bind_event(event)
                 return
             if fn == 'tcp_connect':
-                if self._port_probe_enabled:
+                if self._connect_probe_enabled:
                     self._handle_tls_connect_event(event)
                 return
 
@@ -2699,7 +2701,8 @@ def main():
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
     # ── Port probe (optional) ─────────────────────────────────────────────────
-    port_probe_enabled       = cfg(cp, 'port_probe', 'enabled',              'PORT_PROBE_ENABLED',       'false').lower() == 'true'
+    bind_probe_enabled    = cfg(cp, 'port_probe', 'bind_probe_enabled',    'BIND_PROBE_ENABLED',    'false').lower() == 'true'
+    connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
     port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
     port_probe_connect_delay = float(cfg(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2'))
 
@@ -2736,9 +2739,11 @@ def main():
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
         logger.info(f"Kafka topic:       {kafka_topic}")
         logger.info(f"Kafka security:    {kafka_security}")
-    logger.info(f"Port probe:        {'enabled' if port_probe_enabled else 'disabled'}")
-    if port_probe_enabled:
+    logger.info(f"Bind probe:        {'enabled' if bind_probe_enabled else 'disabled'}")
+    logger.info(f"Connect probe:     {'enabled' if connect_probe_enabled else 'disabled'}")
+    if bind_probe_enabled or connect_probe_enabled:
         logger.info(f"Port probe timeout:        {port_probe_timeout}s")
+    if bind_probe_enabled:
         logger.info(f"Port probe connect delay:  {port_probe_connect_delay}s")
     logger.info("="*60)
 
@@ -2777,7 +2782,8 @@ def main():
                                    checksum_enabled=checksum_enabled,
                                    demo_mode=demo_mode,
                                    fips_compliance_enabled=fips_compliance_enabled,
-                                   port_probe_enabled=port_probe_enabled,
+                                   bind_probe_enabled=bind_probe_enabled,
+                                   connect_probe_enabled=connect_probe_enabled,
                                    port_probe_timeout=port_probe_timeout,
                                    port_probe_connect_delay=port_probe_connect_delay)
 
