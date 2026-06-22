@@ -983,6 +983,15 @@ class CertificateAnalyzer:
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
         self._known_policy_labels: Set[Tuple[str, str, str]] = set()
+        # Per-endpoint deduplication for TLS port probes.
+        # _probed_endpoints: "host:port" strings already probed — O(1) pre-check
+        #   prevents thread creation for endpoints whose cert is already known.
+        # _probe_in_flight: "host:port" strings currently being probed — prevents
+        #   duplicate concurrent probes when several events for a new endpoint
+        #   arrive before the first probe completes (e.g. connection pooling).
+        # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
+        self._probed_endpoints: Set[str] = set()
+        self._probe_in_flight: Set[str] = set()
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -2048,8 +2057,8 @@ class CertificateAnalyzer:
         """
         synthetic_path = f'tls-probe://{host}:{port}'
 
-        if any(k.startswith(synthetic_path + ':') for k in self.known_certs):
-            logger.debug(f"TLS probe: already cached {synthetic_path}")
+        if f'{host}:{port}' in self._probed_endpoints:
+            logger.debug(f"TLS probe: already probed {synthetic_path}")
             self.metrics.tls_port_probes_total.labels(status='skipped').inc()
             return
 
@@ -2089,6 +2098,7 @@ class CertificateAnalyzer:
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
+        self._probed_endpoints.add(f'{host}:{port}')
         self._update_cache_metrics()
 
         if self.kafka_publisher is not None:
@@ -2144,6 +2154,12 @@ class CertificateAnalyzer:
         host = self._resolve_pid_ip(pid, bind_addr)
         delay = self._port_probe_connect_delay
 
+        endpoint_key = f'{host}:{port}'
+        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+            logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
+            return
+        self._probe_in_flight.add(endpoint_key)
+
         def _probe():
             if delay:
                 time.sleep(delay)
@@ -2151,6 +2167,8 @@ class CertificateAnalyzer:
                 self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod)
             except Exception as e:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
+            finally:
+                self._probe_in_flight.discard(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
         t.start()
@@ -2186,11 +2204,19 @@ class CertificateAnalyzer:
             logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
             return
 
+        endpoint_key = f'{daddr}:{dport}'
+        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+            logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
+            return
+        self._probe_in_flight.add(endpoint_key)
+
         def _probe():
             try:
                 self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod)
             except Exception as e:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
+            finally:
+                self._probe_in_flight.discard(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
         t.start()

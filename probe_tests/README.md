@@ -289,9 +289,9 @@ sudo tetra tracingpolicy delete tls-service-tracking
 |---|---|---|
 | 1 | Python script | Binds TLS server to `0.0.0.0:8443` |
 | 2 | Tetragon | `security_socket_bind` kprobe fires; event delivered to cert_analyzer via gRPC |
-| 3 | cert_analyzer `_handle_tls_bind_event` | Extracts port from `sock_arg.sport`; resolves probe IP via `/proc/<pid>/net/fib_trie` (K8s) or falls back to `127.0.0.1` (bare metal) |
+| 3 | cert_analyzer `_handle_tls_bind_event` | Extracts port; checks `_probed_endpoints` and `_probe_in_flight` (O(1)) — returns immediately if already probed or in flight; otherwise resolves probe IP via `/proc/<pid>/net/fib_trie` (K8s) or falls back to `127.0.0.1` (bare metal) and spawns probe thread |
 | 4 | cert_analyzer `_probe_tls_endpoint` | Connects to `127.0.0.1:8443`, completes TLS handshake, reads leaf cert via `getpeercert(binary_form=True)` |
-| 5 | cert_analyzer | Parses DER cert, updates Prometheus metrics, emits log line, publishes to Kafka if configured |
+| 5 | cert_analyzer | Parses DER cert, registers endpoint in `_probed_endpoints`, updates Prometheus metrics, emits log line, publishes to Kafka if configured |
 
 **Production note:**
 
@@ -376,9 +376,9 @@ sudo tetra tracingpolicy delete tcp-connect-tls
 | 1 | Python script | Starts TLS server on `127.0.0.1:9093` |
 | 2 | Python script | Calls `socket.connect(("127.0.0.1", 9093))` — fires `tcp_connect` kprobe |
 | 3 | Tetragon | `tcp_connect` kprobe fires; event with `sock_arg.daddr=127.0.0.1, sock_arg.dport=9093` delivered to cert_analyzer via gRPC |
-| 4 | cert_analyzer `_handle_tls_connect_event` | Port matches `TLS_OUTBOUND_PORTS`; spawns probe thread immediately (no connect delay) |
+| 4 | cert_analyzer `_handle_tls_connect_event` | Port matches `TLS_OUTBOUND_PORTS`; checks `_probed_endpoints` and `_probe_in_flight` (O(1)) — returns immediately if already probed or in flight; otherwise spawns probe thread (no connect delay) |
 | 5 | cert_analyzer `_probe_tls_endpoint` | Connects to `127.0.0.1:9093`, completes TLS handshake, reads leaf cert via `getpeercert(binary_form=True)` |
-| 6 | cert_analyzer | Parses DER cert, updates Prometheus metrics, emits log line, publishes to Kafka if configured |
+| 6 | cert_analyzer | Parses DER cert, registers endpoint in `_probed_endpoints`, updates Prometheus metrics, emits log line, publishes to Kafka if configured |
 
 **How this differs from test_tls_port_probe:**
 
