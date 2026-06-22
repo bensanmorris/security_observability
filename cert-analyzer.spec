@@ -239,6 +239,16 @@ if [ -f "$_CONF" ] && ! grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null; then
     && printf 'timeout_seconds = 5\n' >> "$_CONF" \
     || echo "WARNING: failed to append [port_probe] section to $_CONF" >&2
 fi
+# Hosts upgraded from a release that had [port_probe] but not tls_outbound_ports:
+# append just the new key block so operators see it and can opt in.
+if [ -f "$_CONF" ] && grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null \
+        && ! grep -q '^#\?tls_outbound_ports' "$_CONF" 2>/dev/null; then
+    printf '\n# Comma-separated list of destination ports treated as TLS for outbound\n' >> "$_CONF" \
+    && printf '# probing. Leave commented to use the built-in defaults. If you change\n' >> "$_CONF" \
+    && printf '# this list, update the DPort filter in tcp-connect-tls.yaml to match.\n' >> "$_CONF" \
+    && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
+    || echo "WARNING: failed to append tls_outbound_ports to $_CONF" >&2
+fi
 unset _CONF
 
 # Reload systemd to pick up the Tetragon drop-in
