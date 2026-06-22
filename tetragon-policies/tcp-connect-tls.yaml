@@ -2,6 +2,11 @@ apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
   name: tcp-connect-tls
+  # IMPORTANT: if you add or remove ports from the DPort list below you must
+  # also update tls_outbound_ports in /etc/cert-analyzer/cert-analyzer.conf
+  # (or TLS_OUTBOUND_PORTS env var). Tetragon filters events here at the kernel
+  # boundary; cert-analyzer applies the same list as a Python-side guard.
+  # Both must agree or events will be silently dropped by one side.
 spec:
   kprobes:
   - call: "tcp_connect"

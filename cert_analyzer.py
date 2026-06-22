@@ -939,6 +939,10 @@ class CertificateAnalyzer:
     # Destination ports considered TLS for outbound connect probing.
     # These are checked in _handle_tls_connect_event as a Python-side guard
     # complementing the DPort filter in the tcp-connect-tls Tetragon policy.
+    # Built-in default TLS port list — used when tls_outbound_ports is not
+    # configured. Must be kept in sync with the DPort filter in
+    # tetragon-policies/tcp-connect-tls.yaml (Tetragon filters first; this is
+    # a Python-side guard for events that pass the kernel filter).
     TLS_OUTBOUND_PORTS = frozenset({
         443,   # HTTPS
         636,   # LDAPS
@@ -962,7 +966,8 @@ class CertificateAnalyzer:
                  bind_probe_enabled: bool = False,
                  connect_probe_enabled: bool = False,
                  port_probe_timeout: float = 5.0,
-                 port_probe_connect_delay: float = 2.0):
+                 port_probe_connect_delay: float = 2.0,
+                 tls_outbound_ports: Optional[frozenset] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -975,6 +980,7 @@ class CertificateAnalyzer:
         self._connect_probe_enabled = connect_probe_enabled
         self._port_probe_timeout = port_probe_timeout
         self._port_probe_connect_delay = port_probe_connect_delay
+        self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self.metrics = PrometheusMetrics()
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -2202,7 +2208,7 @@ class CertificateAnalyzer:
             logger.debug("tcp_connect event: could not extract destination address/port")
             return
 
-        if dport not in self.TLS_OUTBOUND_PORTS:
+        if dport not in self._tls_outbound_ports:
             logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
             return
 
@@ -2705,6 +2711,17 @@ def main():
     connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
     port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
     port_probe_connect_delay = float(cfg(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2'))
+    _tls_ports_raw = cfg(cp, 'port_probe', 'tls_outbound_ports', 'TLS_OUTBOUND_PORTS', '')
+    if _tls_ports_raw.strip():
+        try:
+            tls_outbound_ports: Optional[frozenset] = frozenset(
+                int(p.strip()) for p in _tls_ports_raw.split(',') if p.strip()
+            )
+        except ValueError as e:
+            logger.error(f"Invalid tls_outbound_ports value '{_tls_ports_raw}': {e} — using built-in defaults")
+            tls_outbound_ports = None
+    else:
+        tls_outbound_ports = None
 
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
@@ -2745,6 +2762,9 @@ def main():
         logger.info(f"Port probe timeout:        {port_probe_timeout}s")
     if bind_probe_enabled:
         logger.info(f"Port probe connect delay:  {port_probe_connect_delay}s")
+    if connect_probe_enabled:
+        _effective_ports = tls_outbound_ports if tls_outbound_ports is not None else CertificateAnalyzer.TLS_OUTBOUND_PORTS
+        logger.info(f"TLS outbound ports:        {sorted(_effective_ports)}")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -2785,7 +2805,8 @@ def main():
                                    bind_probe_enabled=bind_probe_enabled,
                                    connect_probe_enabled=connect_probe_enabled,
                                    port_probe_timeout=port_probe_timeout,
-                                   port_probe_connect_delay=port_probe_connect_delay)
+                                   port_probe_connect_delay=port_probe_connect_delay,
+                                   tls_outbound_ports=tls_outbound_ports)
 
     health = HealthServer(
         analyzer=analyzer,

@@ -229,6 +229,10 @@ if [ -f "$_CONF" ] && ! grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null; then
     && printf '# Each unique host:port is probed at most once (O(1) dedup);\n' >> "$_CONF" \
     && printf '# enable with care on hosts with high outbound connection rates.\n' >> "$_CONF" \
     && printf 'connect_probe_enabled = false\n' >> "$_CONF" \
+    && printf '\n# Comma-separated list of destination ports treated as TLS for outbound\n' >> "$_CONF" \
+    && printf '# probing. Leave commented to use the built-in defaults. If you change\n' >> "$_CONF" \
+    && printf '# this list, update the DPort filter in tcp-connect-tls.yaml to match.\n' >> "$_CONF" \
+    && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
     && printf '\n# Seconds to wait after a bind event before probing (bind_probe_enabled only).\n' >> "$_CONF" \
     && printf 'connect_delay_seconds = 2\n' >> "$_CONF" \
     && printf '\n# Seconds before a TLS probe connection attempt times out.\n' >> "$_CONF" \

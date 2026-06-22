@@ -5912,12 +5912,75 @@ class TestPortProbe:
         assert probed._port == 443
 
     def test_handle_tls_connect_skips_non_tls_port(self, probe_analyzer):
-        """tcp_connect to a port not in TLS_OUTBOUND_PORTS spawns no probe."""
+        """tcp_connect to a port not in _tls_outbound_ports spawns no probe."""
         from unittest.mock import patch
         event = self._make_connect_event('93.184.216.34', 80)
 
         with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
             probe_analyzer._handle_tls_connect_event(event)
+            time.sleep(0.1)
+
+        mock_probe.assert_not_called()
+
+    def test_custom_tls_outbound_ports_accepted(self):
+        """tls_outbound_ports constructor arg overrides the built-in default."""
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        custom = frozenset({7443, 9443})
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            connect_probe_enabled=True,
+            tls_outbound_ports=custom,
+        )
+        assert a._tls_outbound_ports == custom
+        assert 443 not in a._tls_outbound_ports
+
+    def test_custom_tls_outbound_port_triggers_probe(self):
+        """A port not in the built-in list fires a probe when added via tls_outbound_ports."""
+        from unittest.mock import patch
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            connect_probe_enabled=True,
+            port_probe_connect_delay=0.0,
+            tls_outbound_ports=frozenset({7443}),
+        )
+        event = self._make_connect_event('10.0.0.1', 7443)
+
+        with patch.object(a, '_probe_tls_endpoint') as mock_probe:
+            a._handle_tls_connect_event(event)
+            time.sleep(0.1)
+
+        mock_probe.assert_called_once()
+        assert mock_probe.call_args[0][1] == 7443
+
+    def test_port_absent_from_custom_list_is_skipped(self):
+        """A port present in the built-in list but not in tls_outbound_ports is skipped."""
+        from unittest.mock import patch
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            connect_probe_enabled=True,
+            tls_outbound_ports=frozenset({7443}),
+        )
+        event = self._make_connect_event('10.0.0.1', 443)
+
+        with patch.object(a, '_probe_tls_endpoint') as mock_probe:
+            a._handle_tls_connect_event(event)
             time.sleep(0.1)
 
         mock_probe.assert_not_called()
@@ -5936,7 +5999,7 @@ class TestPortProbe:
         mock_probe.assert_not_called()
 
     def test_handle_tls_connect_probes_alternate_tls_ports(self, probe_analyzer):
-        """tcp_connect to each port in TLS_OUTBOUND_PORTS triggers a probe."""
+        """tcp_connect to each port in _tls_outbound_ports triggers a probe."""
         from unittest.mock import patch
         for port in (8443, 5671, 6380, 9093):
             probed = threading.Event()
@@ -6049,9 +6112,9 @@ class TestPortProbe:
         port, stop = self._start_tls_server(cert_path, key_path)
         try:
             event = self._make_connect_event('127.0.0.1', port)
-            # Port must be in TLS_OUTBOUND_PORTS for the handler to fire
-            probe_analyzer.TLS_OUTBOUND_PORTS = frozenset(
-                list(probe_analyzer.TLS_OUTBOUND_PORTS) + [port]
+            # Port must be in _tls_outbound_ports for the handler to fire
+            probe_analyzer._tls_outbound_ports = frozenset(
+                list(probe_analyzer._tls_outbound_ports) + [port]
             )
             probed = threading.Event()
             original_probe = probe_analyzer._probe_tls_endpoint
