@@ -6,9 +6,8 @@
 # =============================================================================
 ARG UBI_VERSION=9
 ARG PYTHON_VERSION=311
-ARG PYTHON_BUILDER_IMAGE=registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest
 
-FROM ${PYTHON_BUILDER_IMAGE} AS proto-builder
+FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest AS proto-builder
 
 ARG TETRAGON_VERSION=v1.7.0
 ARG PIP_INDEX_URL=https://pypi.org/simple/
