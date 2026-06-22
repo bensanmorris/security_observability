@@ -79,6 +79,8 @@ jobs:
             python-version: "311"
           - ubi-version: "9"
             python-version: "311"
+          - ubi-version: "10"
+            python-version: "312"
 
     steps:
     - name: Checkout code
@@ -188,14 +190,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ubi-version: ["8", "9"]
+        include:
+          - ubi-version: "8"
+            python-version: "3.11"
+          - ubi-version: "9"
+            python-version: "3.11"
+          - ubi-version: "10"
+            python-version: "3.12"
 
     steps:
     - name: Install build prerequisites
       run: |
         dnf install -y \
-          python3.11 \
-          python3.11-devel \
+          python${{ matrix.python-version }} \
+          python${{ matrix.python-version }}-devel \
           rpm-build \
           git \
           gcc \
@@ -229,8 +237,8 @@ jobs:
 
     - name: Generate Tetragon protobuf bindings
       run: |
-        python3.11 -m ensurepip --upgrade
-        python3.11 -m venv /tmp/proto-venv
+        python${{ matrix.python-version }} -m ensurepip --upgrade
+        python${{ matrix.python-version }} -m venv /tmp/proto-venv
         /tmp/proto-venv/bin/pip install --quiet \
             grpcio-tools==1.60.1 \
             protobuf==4.25.3
@@ -242,7 +250,7 @@ jobs:
         cd /tmp/tetragon-src && git sparse-checkout set api/v1/tetragon
 
         mkdir -p /tmp/generated/tetragon
-        /tmp/proto-venv/bin/python3.11 -m grpc_tools.protoc \
+        /tmp/proto-venv/bin/python${{ matrix.python-version }} -m grpc_tools.protoc \
             -I /tmp/tetragon-src/api/v1 \
             --python_out=/tmp/generated \
             --grpc_python_out=/tmp/generated \
@@ -278,6 +286,7 @@ jobs:
           --define "_version ${{ steps.version.outputs.value }}" \
           --define "_release ${{ steps.version.outputs.release }}" \
           --define "_tetragon_version ${{ env.TETRAGON_VERSION }}" \
+          --define "_python_version ${{ matrix.python-version }}" \
           "${HOME}/rpmbuild/SPECS/cert-analyzer.spec"
 
     - name: Locate built RPMs
@@ -552,13 +561,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ubi-version: ["8", "9"]
+        include:
+          - ubi-version: "8"
+            java-version: "11"
+          - ubi-version: "9"
+            java-version: "11"
+          - ubi-version: "10"
+            java-version: "17"
 
     steps:
     - name: Install build prerequisites
       run: |
         dnf install -y --allowerasing \
-          java-11-openjdk-devel \
+          java-${{ matrix.java-version }}-openjdk-devel \
           gcc \
           make \
           rpm-build \
@@ -620,7 +635,8 @@ jobs:
       run: |
         bash java-agent/build-rpm.sh \
           --version "${{ steps.version.outputs.value }}" \
-          --release "${{ steps.version.outputs.release }}"
+          --release "${{ steps.version.outputs.release }}" \
+          --java-version "${{ matrix.java-version }}"
 
     - name: Locate built RPMs
       id: rpms
@@ -713,6 +729,7 @@ jobs:
         POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
         CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" | head -1)
         CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" | head -1)
+        CONTAINER_UBI10_PATH=$(find ./release-assets -name "cert-analyzer-ubi10-*.tar.gz" | head -1)
         GENERATOR_PATH=$(find ./release-assets -name "cert-test-generator-*.tar.gz" | head -1)
         echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
         echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
@@ -720,6 +737,8 @@ jobs:
         echo "container_ubi8_name=$(basename ${CONTAINER_UBI8_PATH})" >> $GITHUB_OUTPUT
         echo "container_ubi9_path=${CONTAINER_UBI9_PATH}" >> $GITHUB_OUTPUT
         echo "container_ubi9_name=$(basename ${CONTAINER_UBI9_PATH})" >> $GITHUB_OUTPUT
+        echo "container_ubi10_path=${CONTAINER_UBI10_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi10_name=$(basename ${CONTAINER_UBI10_PATH})" >> $GITHUB_OUTPUT
         echo "generator_path=${GENERATOR_PATH}" >> $GITHUB_OUTPUT
         echo "generator_name=$(basename ${GENERATOR_PATH})" >> $GITHUB_OUTPUT
         PROBE_TESTS_PATH=$(find ./release-assets -name "probe-tests-*.tar.gz" | head -1)
@@ -738,6 +757,7 @@ jobs:
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
+          ${{ steps.assets.outputs.container_ubi10_path }}
           ${{ steps.assets.outputs.generator_path }}
           ${{ steps.assets.outputs.probe_tests_path }}
         fail_on_unmatched_files: true
@@ -750,6 +770,7 @@ jobs:
           ```
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9
+          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi10
           ghcr.io/${{ github.repository_owner }}/cert-test-generator:${{ github.ref_name }}
           ```
 
@@ -757,17 +778,19 @@ jobs:
           ```bash
           docker load < ${{ steps.assets.outputs.container_ubi8_name }}
           docker load < ${{ steps.assets.outputs.container_ubi9_name }}
+          docker load < ${{ steps.assets.outputs.container_ubi10_name }}
           docker load < ${{ steps.assets.outputs.generator_name }}
           ```
 
           ### RPM Packages
 
-          RPMs for RHEL 8 (`.el8`) and RHEL 9 (`.el9`) are attached below.
+          RPMs for RHEL 8 (`.el8`), RHEL 9 (`.el9`), and RHEL 10 (`.el10`) are attached below.
 
           **cert-analyzer** (Tetragon event consumer):
           ```bash
           sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
           sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm   # RHEL 9
+          sudo dnf install ./cert-analyzer-<version>.el10.x86_64.rpm  # RHEL 10
           ```
 
           **Java agent** (JVM certificate interception — install on hosts running JVMs):

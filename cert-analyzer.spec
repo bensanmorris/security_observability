@@ -32,6 +32,8 @@
     %{__os_install_post} \
 %{nil}
 
+%{!?_python_version: %global _python_version 3.11}
+
 Name:           cert-analyzer
 Version:        %{_version}
 Release:        %{_release}%{?dist}
@@ -42,12 +44,12 @@ URL:            https://github.com/your-org/cert-analyzer
 # Source tarball created by build-rpm.sh
 Source0:        %{name}-%{version}.tar.gz
 
-BuildRequires:  python3.11
-BuildRequires:  python3.11-devel
+BuildRequires:  python%{_python_version}
+BuildRequires:  python%{_python_version}-devel
 BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
 
-Requires:       python3.11
+Requires:       python%{_python_version}
 Requires:       systemd
 
 # Tetragon is a runtime dependency but is installed manually rather than via
@@ -82,12 +84,12 @@ workload enrichment.
 rm -rf %{_builddir}/venv
 
 # ── Bootstrap pip (not available as a separate package on UBI9) ──────────────
-python3.11 -m ensurepip --upgrade
+python%{_python_version} -m ensurepip --upgrade
 
 # ── Build the bundled virtualenv ──────────────────────────────────────────────
 # Tetragon protobuf bindings are pre-generated and included in the source
 # tarball under tetragon/ — the spec does not clone or fetch external repos.
-python3.11 -m venv %{_builddir}/venv
+python%{_python_version} -m venv %{_builddir}/venv
 
 %{_builddir}/venv/bin/pip install --quiet --upgrade pip
 
@@ -109,7 +111,7 @@ python3.11 -m venv %{_builddir}/venv
 # or by sed on the activate script.
 sed -i "s|%{_builddir}/venv|%{ana_venv}|g" \
     %{_builddir}/venv/bin/activate \
-    %{_builddir}/venv/bin/python3.11 \
+    %{_builddir}/venv/bin/python%{_python_version} \
     %{_builddir}/venv/pyvenv.cfg || true
 
 
