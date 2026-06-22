@@ -508,12 +508,14 @@ jobs:
       run: |
         ARCHIVE_NAME="probe-tests-${{ steps.version.outputs.value }}.tar.gz"
         mkdir -p probe-tests-stage/java
-        cp probe_tests/build/test_openssl3_cert_load    probe-tests-stage/
-        cp probe_tests/java/FipsJavaCertLoad.class      probe-tests-stage/java/
-        cp probe_tests/java/FipsJavaCertLoad.java       probe-tests-stage/java/
-        cp probe_tests/java/CertAgentTest.class         probe-tests-stage/java/
-        cp probe_tests/java/CertAgentTest.java          probe-tests-stage/java/
-        cp probe_tests/README.md                        probe-tests-stage/
+        cp probe_tests/build/test_openssl3_cert_load        probe-tests-stage/
+        cp probe_tests/java/FipsJavaCertLoad.class          probe-tests-stage/java/
+        cp probe_tests/java/FipsJavaCertLoad.java           probe-tests-stage/java/
+        cp probe_tests/java/CertAgentTest.class             probe-tests-stage/java/
+        cp probe_tests/java/CertAgentTest.java              probe-tests-stage/java/
+        cp probe_tests/test_tls_port_probe.py               probe-tests-stage/
+        cp probe_tests/test_tcp_connect_probe.py            probe-tests-stage/
+        cp probe_tests/README.md                            probe-tests-stage/
         tar -czf "${ARCHIVE_NAME}" -C probe-tests-stage .
         echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
         echo "path=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT

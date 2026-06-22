@@ -936,6 +936,20 @@ class CertificateAnalyzer:
     CERT_EXTENSIONS  = {'.crt', '.pem', '.cert', '.cer', '.key'}
     JKS_EXTENSIONS   = {'.jks', '.keystore', '.truststore'}
     PKCS12_EXTENSIONS = {'.p12', '.pfx'}
+    # Destination ports considered TLS for outbound connect probing.
+    # These are checked in _handle_tls_connect_event as a Python-side guard
+    # complementing the DPort filter in the tcp-connect-tls Tetragon policy.
+    TLS_OUTBOUND_PORTS = frozenset({
+        443,   # HTTPS
+        636,   # LDAPS
+        5671,  # AMQP/TLS
+        5672,  # AMQP (often TLS)
+        6380,  # Redis TLS
+        8443,  # HTTPS alternate
+        8883,  # MQTT/TLS
+        9093,  # Kafka TLS
+        9094,  # Kafka TLS alternate
+    })
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
@@ -2142,18 +2156,64 @@ class CertificateAnalyzer:
         t.start()
         logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
 
+    def _handle_tls_connect_event(self, event) -> None:
+        """Extract destination address/port from a tcp_connect kprobe event and schedule a TLS probe.
+
+        tcp_connect fires when a process initiates an outbound TCP connection.
+        The sock_arg carries the destination address and port. We probe that
+        remote endpoint immediately — no startup delay is needed because the
+        remote server is already running when our process connects to it.
+        """
+        kprobe = event.process_kprobe
+        pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(kprobe.process.binary, pid)
+        tetragon_pod = kprobe.process.pod if kprobe.process.HasField('pod') else None
+        node_name = event.node_name
+
+        daddr = ''
+        dport = 0
+        for arg in kprobe.args:
+            if arg.HasField('sock_arg'):
+                daddr = arg.sock_arg.daddr
+                dport = arg.sock_arg.dport
+                break
+
+        if not dport or not daddr:
+            logger.debug("tcp_connect event: could not extract destination address/port")
+            return
+
+        if dport not in self.TLS_OUTBOUND_PORTS:
+            logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
+            return
+
+        def _probe():
+            try:
+                self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod)
+            except Exception as e:
+                logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
+
+        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
+        t.start()
+        logger.debug(
+            f"Scheduled TLS outbound probe {daddr}:{dport} pid={pid} process={process_name}"
+        )
+
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
 
-        # Bind events from tls-service-tracking carry no cert paths — route them
-        # to the port-probe handler and return. Other kprobe/uprobe events fall
-        # through to the normal cert extraction path below.
+        # Bind and outbound-connect events carry no cert paths — route them to
+        # port-probe handlers and return. Other kprobe/uprobe events fall through
+        # to the normal cert extraction path below.
         if event.HasField('process_kprobe'):
             fn = getattr(event.process_kprobe, 'function_name', '')
             if fn in ('security_socket_bind', 'sys_bind'):
                 if self._port_probe_enabled:
                     self._handle_tls_bind_event(event)
+                return
+            if fn == 'tcp_connect':
+                if self._port_probe_enabled:
+                    self._handle_tls_connect_event(event)
                 return
 
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \

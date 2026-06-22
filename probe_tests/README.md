@@ -300,3 +300,90 @@ suitable for broad coverage but potentially noisy on busy hosts.
 `tls-service-tracking-fixed.yaml` retains a `matchBinaries` allowlist (nginx,
 httpd) for deployments where event volume must be controlled — add any additional
 TLS server binaries there as needed.
+
+---
+
+### test_tcp_connect_probe (Python)
+
+Exercises the end-to-end outbound port-probe pipeline: `tcp_connect` kprobe →
+cert_analyzer connect event handler → TLS handshake back to the same server →
+certificate extraction and Prometheus metric emission.
+
+Unlike the bind probe test (where the script only runs the server and cert_analyzer
+acts as the client), this test plays both roles.  It binds a local TLS server on
+port 9093, then makes an outbound `socket.connect()` to it — the connect fires
+the `tcp_connect` kprobe.  cert_analyzer receives the destination address and port
+from the `sock_arg`, then independently probes that endpoint to retrieve the leaf
+certificate.
+
+Port 9093 (Kafka TLS) is used because it is already in the `tcp-connect-tls.yaml`
+DPort filter, does not require root, and is unlikely to be in use on test machines.
+
+**Prerequisites:**
+
+```bash
+# cert_analyzer must have port probe enabled:
+# [port_probe]
+# enabled = true
+# in /etc/cert-analyzer/cert-analyzer.conf  (or PORT_PROBE_ENABLED=true env var)
+```
+
+**Step 1 — Load the policy:**
+
+```bash
+sudo tetra tracingpolicy add tetragon-policies/tcp-connect-tls.yaml
+```
+
+**Step 2 — Run the probe test:**
+
+```bash
+# Uses test-certs/valid.crt and valid.key by default
+python3 probe_tests/test_tcp_connect_probe.py
+
+# Custom cert / port (port must be in tcp-connect-tls.yaml DPort filter):
+python3 probe_tests/test_tcp_connect_probe.py --cert /etc/pki/tls/certs/cert-analyzer-test.crt \
+    --key /etc/pki/tls/certs/cert-analyzer-test.key --port 8443
+
+# Keep server running after the wait period (useful for inspecting events):
+python3 probe_tests/test_tcp_connect_probe.py --pause
+```
+
+**Step 3 — Verify cert_analyzer output** (within a few seconds of the connect):
+
+```
+🔍 TLS probe: discovered cert at 127.0.0.1:9093 CN=valid.example.com process=...
+✅ OK: tls-probe://127.0.0.1:9093 (process=... CN=valid.example.com) valid for ...
+```
+
+**Step 4 — Verify Prometheus metric:**
+
+```bash
+curl -s http://localhost:9090/metrics | grep tls_port_probes_total
+# Expected:
+# tls_port_probes_total{status="success"} 1
+```
+
+**Step 5 — Remove the policy:**
+
+```bash
+sudo tetra tracingpolicy delete tcp-connect-tls
+```
+
+**Pipeline summary:**
+
+| Step | Component | What happens |
+|---|---|---|
+| 1 | Python script | Starts TLS server on `127.0.0.1:9093` |
+| 2 | Python script | Calls `socket.connect(("127.0.0.1", 9093))` — fires `tcp_connect` kprobe |
+| 3 | Tetragon | `tcp_connect` kprobe fires; event with `sock_arg.daddr=127.0.0.1, sock_arg.dport=9093` delivered to cert_analyzer via gRPC |
+| 4 | cert_analyzer `_handle_tls_connect_event` | Port matches `TLS_OUTBOUND_PORTS`; spawns probe thread immediately (no connect delay) |
+| 5 | cert_analyzer `_probe_tls_endpoint` | Connects to `127.0.0.1:9093`, completes TLS handshake, reads leaf cert via `getpeercert(binary_form=True)` |
+| 6 | cert_analyzer | Parses DER cert, updates Prometheus metrics, emits log line, publishes to Kafka if configured |
+
+**How this differs from test_tls_port_probe:**
+
+The inbound probe test only needs to bind a server — cert_analyzer probes it
+reactively when it sees the bind event.  The outbound probe test must also make
+the client-side connect itself, because the kprobe trigger is the connect, not
+the bind.  Both tests use the same `_probe_tls_endpoint` path inside cert_analyzer;
+the difference is which Tetragon event starts the chain.

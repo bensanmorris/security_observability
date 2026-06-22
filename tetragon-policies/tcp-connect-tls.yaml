@@ -1,0 +1,27 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: tcp-connect-tls
+spec:
+  kprobes:
+  - call: "tcp_connect"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "DPort"
+        values:
+        - "443"
+        - "636"
+        - "8443"
+        - "5671"
+        - "5672"
+        - "6380"
+        - "8883"
+        - "9093"
+        - "9094"
+      matchActions:
+      - action: Post

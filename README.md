@@ -24,7 +24,7 @@ Furthermore on 15th March 2026 SSL certificate validity dropped to 200 days and 
 | Network scanner | Certs on open ports | In-memory certs, internal services, file-only loads |
 | Binary scanner | Vulnerable components in artefacts at build time | Runtime execution paths, dynamically loaded certs |
 | Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
-| **CertSight** | • Every certificate file access system-wide <br>• In-memory certificates post-handshake <br>• Dynamically linked crypto <br>• Java certificate operations in both FIPS and non-FIPS environments <br>• Certs on open ports via optional port probe (triggered by bind events, no port sweep required) <br><br> Every cert access is FIPS compliance checked with full process and k8s context surfaced | Statically linked crypto (excluding Java / JCA - we've got that covered) |
+| **CertSight** | • Every certificate file access system-wide <br>• In-memory certificates post-handshake <br>• Dynamically linked crypto <br>• Java certificate operations in both FIPS and non-FIPS environments <br>• Certs on open ports via optional port probe (triggered by bind events, no port sweep required) <br>• Remote server certificates via outbound connect probe (triggered by `tcp_connect` to TLS ports, no configuration required) <br><br> Every cert access is FIPS compliance checked with full process and k8s context surfaced | Statically linked crypto (excluding Java / JCA - we've got that covered) |
 
 An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
 
@@ -32,7 +32,8 @@ An application is not a single binary. It is a tree of executables and shared li
 
 - Every certificate file access system-wide via eBPF fd_install kprobe (PEM, DER, JKS, PKCS12)
 - In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
-- TLS endpoints discovered via bind events - triggers a TLS handshake against the bound address / port and [ingests the served certificate](https://github.com/bensanmorris/security_observability/releases/tag/v0.47)
+- TLS endpoints discovered via bind events — triggers a TLS handshake against the bound address/port and [ingests the served certificate](https://github.com/bensanmorris/security_observability/releases/tag/v0.47)
+- Remote server certificates discovered via outbound `tcp_connect` events to common TLS ports (443, 8443, 5671, 6380, 9093, …) — makes remote server expiry visible without any per-service configuration
 - Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
 - Which process accessed which certificate, when, and from which Kubernetes pod
 - An extensive set of surfaced fields and metrics per certificate access. Refer to our [surfaced fields guide](extras/FIELDS-README.md)
@@ -68,7 +69,8 @@ The installer will fail with a clear error if Tetragon is not found.
 | Policy | Purpose | RHEL |
 |---|---|---|
 | `certificate-file-access.yaml` | Detects certificate file opens by process (`.pem`, `.crt`, `.jks`, `.p12`, etc.) | 8 and 9 |
-| `tls-service-tracking-fixed.yaml` | Identifies processes binding on TLS-capable ports (nginx, httpd) via `sys_bind` | 8 and 9 |
+| `tls-service-tracking-fixed.yaml` | Identifies processes binding on TLS-capable ports (nginx, httpd) via `sys_bind` — used with `port_probe` to ingest the served certificate | 8 and 9 |
+| `tcp-connect-tls.yaml` | Fires on outbound `tcp_connect` calls to common TLS ports (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094) — used with `port_probe` to probe remote server certificate expiry without any per-service configuration | 8 and 9 |
 | `experimental/openssl1_1-cert-load.yaml` | Intercepts in-memory certificate loads via OpenSSL 1.1 (`libssl.so.1.1`) | 8 only |
 | `experimental/openssl3-cert-load.yaml` | Intercepts in-memory certificate loads via OpenSSL 3 (`libssl.so.3`) | 9 only |
 | `experimental/java-fips-nss-cert.yaml` | Intercepts certificate objects created via NSS/PKCS11 (FIPS-mode JVMs) | 9 only |
@@ -217,9 +219,9 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Probe TLS endpoints discovered via bind events — triggers a TLS handshake against the bound address/port and ingests the served certificate into the normal pipeline |
-| `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete |
-| `timeout_seconds` | `5` | Seconds before the TLS probe connection attempt times out |
+| `enabled` | `false` | Enable TLS endpoint probing. Covers two directions: (1) **inbound** — bind events from `tls-service-tracking-fixed.yaml` trigger a handshake against the newly bound port to ingest the served certificate; (2) **outbound** — `tcp_connect` events from `tcp-connect-tls.yaml` trigger an immediate probe against the remote server, making remote certificate expiry visible without per-service configuration |
+| `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete (inbound probes only — outbound probes fire immediately) |
+| `timeout_seconds` | `5` | Seconds before a TLS probe connection attempt times out |
 
 **[kafka]**
 

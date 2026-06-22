@@ -5740,3 +5740,161 @@ class TestPortProbe:
             probe_analyzer.process_event(event)
 
         mock_extract.assert_not_called()
+
+    # ── _handle_tls_connect_event ─────────────────────────────────────────────
+
+    @staticmethod
+    def _make_sock_connect_arg(daddr, dport):
+        """Build a MagicMock kprobe arg with sock_arg carrying daddr/dport."""
+        from unittest.mock import MagicMock
+        sock = MagicMock()
+        sock.daddr = daddr
+        sock.dport = dport
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'sock_arg'
+        arg.sock_arg = sock
+        return arg
+
+    @staticmethod
+    def _make_connect_event(daddr, dport, pid=2222, binary='/usr/bin/curl'):
+        """Build a process_kprobe event for tcp_connect."""
+        from unittest.mock import MagicMock
+        kprobe = MagicMock()
+        kprobe.function_name = 'tcp_connect'
+        kprobe.process.binary = binary
+        kprobe.process.pid.value = pid
+        kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        sock = MagicMock()
+        sock.daddr = daddr
+        sock.dport = dport
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'sock_arg'
+        arg.sock_arg = sock
+        kprobe.args = [arg]
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        event.process_kprobe = kprobe
+        event.node_name = 'test-node'
+        return event
+
+    def test_handle_tls_connect_probes_tls_port(self, probe_analyzer):
+        """tcp_connect to a TLS port schedules a probe to the destination address."""
+        from unittest.mock import patch
+        probed = threading.Event()
+
+        def _fake_probe(host, port, *args, **kwargs):
+            probed._host = host
+            probed._port = port
+            probed.set()
+
+        event = self._make_connect_event('93.184.216.34', 443)
+        with patch.object(probe_analyzer, '_probe_tls_endpoint', side_effect=_fake_probe):
+            probe_analyzer._handle_tls_connect_event(event)
+            probed.wait(timeout=2)
+
+        assert probed.is_set(), 'probe was not triggered'
+        assert probed._host == '93.184.216.34'
+        assert probed._port == 443
+
+    def test_handle_tls_connect_skips_non_tls_port(self, probe_analyzer):
+        """tcp_connect to a port not in TLS_OUTBOUND_PORTS spawns no probe."""
+        from unittest.mock import patch
+        event = self._make_connect_event('93.184.216.34', 80)
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
+            probe_analyzer._handle_tls_connect_event(event)
+            time.sleep(0.1)
+
+        mock_probe.assert_not_called()
+
+    def test_handle_tls_connect_skips_missing_sock_arg(self, probe_analyzer):
+        """tcp_connect event with no sock_arg spawns no probe."""
+        from unittest.mock import patch, MagicMock
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: False
+        event = self._make_bind_event('tcp_connect', [arg])
+
+        with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
+            probe_analyzer._handle_tls_connect_event(event)
+            time.sleep(0.1)
+
+        mock_probe.assert_not_called()
+
+    def test_handle_tls_connect_probes_alternate_tls_ports(self, probe_analyzer):
+        """tcp_connect to each port in TLS_OUTBOUND_PORTS triggers a probe."""
+        from unittest.mock import patch
+        for port in (8443, 5671, 6380, 9093):
+            probed = threading.Event()
+
+            def _fake_probe(host, p, *args, _port=port, _ev=probed, **kwargs):
+                _ev._port = p
+                _ev.set()
+
+            event = self._make_connect_event('10.0.0.1', port)
+            with patch.object(probe_analyzer, '_probe_tls_endpoint', side_effect=_fake_probe):
+                probe_analyzer._handle_tls_connect_event(event)
+                probed.wait(timeout=2)
+
+            assert probed.is_set(), f'probe not triggered for port {port}'
+            assert probed._port == port
+
+    # ── process_event routing for tcp_connect ─────────────────────────────────
+
+    def test_process_event_routes_tcp_connect_to_handler(self, probe_analyzer):
+        """process_event dispatches tcp_connect to _handle_tls_connect_event."""
+        from unittest.mock import patch
+        event = self._make_connect_event('1.2.3.4', 443)
+
+        with patch.object(probe_analyzer, '_handle_tls_connect_event') as mock_handler:
+            probe_analyzer.process_event(event)
+
+        mock_handler.assert_called_once_with(event)
+
+    def test_process_event_tcp_connect_skipped_when_port_probe_disabled(self, analyzer):
+        """tcp_connect events are silently dropped when port_probe_enabled=False."""
+        from unittest.mock import patch
+        assert not analyzer._port_probe_enabled
+        event = self._make_connect_event('1.2.3.4', 443)
+
+        with patch.object(analyzer, '_handle_tls_connect_event') as mock_handler:
+            analyzer.process_event(event)
+
+        mock_handler.assert_not_called()
+
+    def test_process_event_tcp_connect_does_not_fall_through_to_cert_extraction(self, probe_analyzer):
+        """tcp_connect events return without calling extract_cert_path_from_event."""
+        from unittest.mock import patch
+        event = self._make_connect_event('1.2.3.4', 443)
+
+        with patch.object(probe_analyzer, '_handle_tls_connect_event'), \
+             patch.object(probe_analyzer, 'extract_cert_path_from_event') as mock_extract:
+            probe_analyzer.process_event(event)
+
+        mock_extract.assert_not_called()
+
+    def test_handle_tls_connect_discovers_cert_from_live_tls_server(self, probe_analyzer, temp_dir):
+        """A real TLS handshake via a connect event lands the cert in known_certs."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop = self._start_tls_server(cert_path, key_path)
+        try:
+            event = self._make_connect_event('127.0.0.1', port)
+            # Port must be in TLS_OUTBOUND_PORTS for the handler to fire
+            probe_analyzer.TLS_OUTBOUND_PORTS = frozenset(
+                list(probe_analyzer.TLS_OUTBOUND_PORTS) + [port]
+            )
+            probed = threading.Event()
+            original_probe = probe_analyzer._probe_tls_endpoint
+
+            def _wrap(*args, **kwargs):
+                original_probe(*args, **kwargs)
+                probed.set()
+
+            import unittest.mock as _mock
+            with _mock.patch.object(probe_analyzer, '_probe_tls_endpoint', side_effect=_wrap):
+                probe_analyzer._handle_tls_connect_event(event)
+                probed.wait(timeout=5)
+        finally:
+            stop.set()
+
+        synthetic_path = f'tls-probe://127.0.0.1:{port}'
+        assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
