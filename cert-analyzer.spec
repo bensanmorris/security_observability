@@ -220,7 +220,7 @@ _CONF=%{ana_conf}/cert-analyzer.conf
 if [ -f "$_CONF" ] && ! grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null; then
     printf '\n[port_probe]\n' >> "$_CONF" \
     && printf '# Inbound probe: trigger a TLS handshake when a process binds a port.\n' >> "$_CONF" \
-    && printf '# Requires tls-service-tracking-fixed.yaml to be loaded.\n' >> "$_CONF" \
+    && printf '# Requires experimental-tls-service-tracking.yaml to be loaded.\n' >> "$_CONF" \
     && printf '# Low event volume — safe to enable broadly.\n' >> "$_CONF" \
     && printf 'bind_probe_enabled = false\n' >> "$_CONF" \
     && printf '\n# Outbound probe: trigger a TLS handshake when a process connects to a common\n' >> "$_CONF" \
