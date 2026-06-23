@@ -92,7 +92,7 @@ sudo ./tetragon-policies/apply-policies.sh
 > sudo dnf debuginfo-install nss-softokn
 > ```
 
-**Java agent (non-FIPS JVMs):**
+**(Optional) Java agent (non-FIPS JVMs):**
 
 For JVMs running without FIPS mode, install the two Java agent RPMs from the [latest release](../../releases/latest) and enable the deployer service:
 
