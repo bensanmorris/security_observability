@@ -29,6 +29,7 @@ jobs:
       test-generator: ${{ steps.filter.outputs.test-generator }}
       probe-tests: ${{ steps.filter.outputs.probe-tests }}
       java-agent: ${{ steps.filter.outputs.java-agent }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -56,6 +57,9 @@ jobs:
             - 'java-agent/**'
             - 'java-agent/java_agent_deployer.py'
             - 'probe_tests/java/cert-agent/**'
+            - '.github/workflows/build.yml'
+          dashboard:
+            - 'extras/examples/grafana-dashboard.json'
             - '.github/workflows/build.yml'
 
   build:
@@ -307,11 +311,12 @@ jobs:
     name: Build Tetragon Policies Archive
     runs-on: ubuntu-latest
     needs: changes
-    # Always run on tags and PRs; on branch pushes only run if relevant files changed
+    # Always run on tags and PRs; on branch pushes only run if relevant or dashboard files changed
     if: |
       github.ref_type == 'tag' ||
       github.event_name == 'pull_request' ||
-      needs.changes.outputs.relevant == 'true'
+      needs.changes.outputs.relevant == 'true' ||
+      needs.changes.outputs.dashboard == 'true'
     permissions:
       contents: read
 
@@ -345,6 +350,21 @@ jobs:
         path: ${{ steps.archive.outputs.path }}
         retention-days: 30
 
+    - name: Package Grafana dashboard
+      id: dashboard
+      run: |
+        DASHBOARD_NAME="grafana-dashboard-${{ steps.version.outputs.value }}.json"
+        cp extras/examples/grafana-dashboard.json "${DASHBOARD_NAME}"
+        echo "name=${DASHBOARD_NAME}" >> $GITHUB_OUTPUT
+        echo "path=${DASHBOARD_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Upload Grafana dashboard as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.dashboard.outputs.name }}
+        path: ${{ steps.dashboard.outputs.path }}
+        retention-days: 30
+
     - name: Build summary
       run: |
         echo "## 📋 Tetragon Policies Archive" >> $GITHUB_STEP_SUMMARY
@@ -356,6 +376,8 @@ jobs:
         echo '```' >> $GITHUB_STEP_SUMMARY
         tar -tzf "${{ steps.archive.outputs.path }}" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Grafana dashboard:** \`${{ steps.dashboard.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
 
   build-test-generator:
     name: Build Test Cert Generator (k8s_enrich_demo)
@@ -709,6 +731,13 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download Grafana dashboard artifact
+      uses: actions/download-artifact@v4
+      with:
+        pattern: grafana-dashboard-*.json
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Locate release assets
       id: assets
       run: |
@@ -727,6 +756,9 @@ jobs:
         PROBE_TESTS_PATH=$(find ./release-assets -name "probe-tests-*.tar.gz" | head -1)
         echo "probe_tests_path=${PROBE_TESTS_PATH}" >> $GITHUB_OUTPUT
         echo "probe_tests_name=$(basename ${PROBE_TESTS_PATH})" >> $GITHUB_OUTPUT
+        DASHBOARD_PATH=$(find ./release-assets -name "grafana-dashboard-*.json" | head -1)
+        echo "dashboard_path=${DASHBOARD_PATH}" >> $GITHUB_OUTPUT
+        echo "dashboard_name=$(basename ${DASHBOARD_PATH})" >> $GITHUB_OUTPUT
 
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v2
@@ -742,6 +774,7 @@ jobs:
           ${{ steps.assets.outputs.container_ubi9_path }}
           ${{ steps.assets.outputs.generator_path }}
           ${{ steps.assets.outputs.probe_tests_path }}
+          ${{ steps.assets.outputs.dashboard_path }}
         fail_on_unmatched_files: true
         body: |
           ## cert-analyzer ${{ github.ref_name }}
@@ -800,6 +833,10 @@ jobs:
           tar -xzf ${{ steps.assets.outputs.probe_tests_name }}
           ./test_openssl3_cert_load /path/to/cert.pem
           ```
+
+          ### Grafana Dashboard
+
+          `${{ steps.assets.outputs.dashboard_name }}` — attached below. Import into Grafana via **Dashboards → Import → Upload JSON file**. Requires Prometheus to be configured to scrape cert-analyzer metrics. See `extras/examples/` in the repository for a reference Prometheus scrape config.
 
           ### Tetragon Version
           Built against Tetragon `${{ env.TETRAGON_VERSION }}`.
