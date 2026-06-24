@@ -41,6 +41,7 @@ An application is not a single binary. It is a tree of executables and shared li
 Instructions are below but if you prefer to watch video guides:
 
 - [CertSight - Installation & Operation](https://youtu.be/9QpfuU0TKec)
+- [CertSight - Dashboard demo](https://youtu.be/6z2XjeAkj24)
 
 ![CertSight Grafana dashboard](extras/dashboard.png)
 
