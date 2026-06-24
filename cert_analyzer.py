@@ -71,6 +71,11 @@ TETRAGON_BUILD_VERSION: str = os.getenv('TETRAGON_BUILD_VERSION', 'unknown')
 # Falls back to 'dev' when running outside of a built container.
 CERT_ANALYZER_VERSION: str = os.getenv('CERT_ANALYZER_VERSION', 'dev')
 
+# Node identity used as a Prometheus label on health/Tetragon metrics so that
+# multi-node dashboards can join on node_name. In Kubernetes, inject the real
+# node name via: env: [{name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}]
+_NODE_NAME: str = os.getenv('NODE_NAME', socket.gethostname())
+
 # Map TracingPolicyState enum integers to clean label strings.
 # Prefix TP_STATE_ is stripped and the remainder lowercased (e.g. TP_STATE_LOAD_ERROR → load_error).
 _POLICY_STATE_NAMES: Dict[int, str] = {
@@ -194,7 +199,8 @@ class CertificateInfo:
 class PrometheusMetrics:
     """Prometheus metrics for certificate monitoring"""
 
-    def __init__(self):
+    def __init__(self, node_name: str = ""):
+        self._node_name = node_name
         # Certificate expiry metrics - includes k8s workload labels
         self.cert_expiry_days = Gauge(
             'tls_certificate_expiry_days',
@@ -277,19 +283,22 @@ class PrometheusMetrics:
         # System health
         self.analyzer_healthy = Gauge(
             'cert_analyzer_healthy',
-            'Health status of the analyzer (1=healthy, 0=unhealthy)'
+            'Health status of the analyzer (1=healthy, 0=unhealthy)',
+            ['node_name']
         )
-        self.analyzer_healthy.set(1)
+        self.analyzer_healthy.labels(node_name=self._node_name).set(1)
 
         self.tetragon_connected = Gauge(
             'tetragon_connected',
             'Whether the analyzer has an active gRPC event stream to Tetragon (1=connected, 0=disconnected)',
+            ['node_name']
         )
-        self.tetragon_connected.set(0)
+        self.tetragon_connected.labels(node_name=self._node_name).set(0)
 
         self.last_event_timestamp = Gauge(
             'cert_analyzer_last_event_timestamp',
-            'Timestamp of last processed event'
+            'Timestamp of last processed event',
+            ['node_name']
         )
 
         # Tetragon version tracking — detects build/runtime version mismatch
@@ -301,6 +310,7 @@ class PrometheusMetrics:
         self.tetragon_version_match = Gauge(
             'cert_analyzer_tetragon_version_match',
             'Whether the build and runtime Tetragon versions match (1=match, 0=mismatch)',
+            ['node_name']
         )
 
         # Build info — single source of truth for version diagnostics.
@@ -345,12 +355,12 @@ class PrometheusMetrics:
         self.tetragon_policy_info = Gauge(
             'tetragon_policy_info',
             'Tetragon tracing policies and their current state (1=present)',
-            ['name', 'namespace', 'state'],
+            ['name', 'namespace', 'state', 'node_name'],
         )
         self.tetragon_policies_total = Gauge(
             'tetragon_policies_total',
             'Number of Tetragon tracing policies by state',
-            ['state'],
+            ['state', 'node_name'],
         )
 
     def update_certificate_metrics(self, info: CertificateInfo):
@@ -442,6 +452,7 @@ class PrometheusMetrics:
 _kafka_delivery_errors = Counter(
     'kafka_delivery_errors_total',
     'Total number of Kafka message delivery failures (async, broker-side)',
+    ['node_name'],
 )
 
 
@@ -660,7 +671,7 @@ class KafkaPublisher:
 
     def _on_error(self, exc: Exception) -> None:
         logger.warning(f"Kafka delivery error: {exc}")
-        _kafka_delivery_errors.inc()
+        _kafka_delivery_errors.labels(node_name=_NODE_NAME).inc()
         # Nullify the producer so the next publish attempt triggers reconnect.
         # Without this, a broker that drops messages in-flight (broker down,
         # auth failure, topic deleted) would leave the producer in a state where
@@ -858,7 +869,9 @@ class HealthServer:
         if uptime < self.grace_period:
             return True, f"grace_period ({int(self.grace_period - uptime)}s remaining)"
 
-        last_event = self.analyzer.metrics.last_event_timestamp._value.get()
+        last_event = self.analyzer.metrics.last_event_timestamp.labels(
+            node_name=self.analyzer.metrics._node_name
+        )._value.get()
 
         if last_event == 0:
             # No events ever seen — if we're past the grace period but the node
@@ -981,7 +994,7 @@ class CertificateAnalyzer:
         self._port_probe_timeout = port_probe_timeout
         self._port_probe_connect_delay = port_probe_connect_delay
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
-        self.metrics = PrometheusMetrics()
+        self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
         # Paths that failed password attempts — cached to avoid repeating expensive
@@ -990,7 +1003,7 @@ class CertificateAnalyzer:
         # other activity, which is desirable if JKS_PASSWORD has since been set.
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
-        self._known_policy_labels: Set[Tuple[str, str, str]] = set()
+        self._known_policy_labels: Set[Tuple[str, str, str, str]] = set()
         # Per-endpoint deduplication for TLS port probes.
         # _probed_endpoints: "host:port" strings already probed — O(1) pre-check
         #   prevents thread creation for endpoints whose cert is already known.
@@ -1846,7 +1859,7 @@ class CertificateAnalyzer:
         serial = str(cert.serial_number)
         synthetic_path = f"uprobe://NSC_CreateObject/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
         logger.info(
             f"🔍 Detected Java FIPS in-memory certificate: {synthetic_path} "
             f"by {process_name} (PID: {pid})"
@@ -1977,7 +1990,7 @@ class CertificateAnalyzer:
         symbol = uprobe.symbol if uprobe.symbol else "undetermined_symbol_name"
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
         logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
@@ -2286,7 +2299,7 @@ class CertificateAnalyzer:
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
         # even when all active keystores are password-protected and being skipped.
-        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
 
         # Check if we've already analyzed this file
         if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
@@ -2374,7 +2387,7 @@ class CertificateAnalyzer:
             and runtime_version != 'unknown'
             and build_version   == runtime_version
         )
-        self.metrics.tetragon_version_match.set(1 if versions_match else 0)
+        self.metrics.tetragon_version_match.labels(node_name=self.metrics._node_name).set(1 if versions_match else 0)
 
         if build_version == 'unknown' or runtime_version == 'unknown':
             logger.warning(
@@ -2446,28 +2459,28 @@ class CertificateAnalyzer:
             logger.warning(f"Could not list Tetragon tracing policies: {e}")
             return
 
-        new_labels: Set[Tuple[str, str, str]] = set()
+        new_labels: Set[Tuple[str, str, str, str]] = set()
         state_counts: Dict[str, int] = {}
 
         for policy in response.policies:
             state_str = _POLICY_STATE_NAMES.get(policy.state, 'unknown')
             ns = policy.namespace or ''
-            key = (policy.name, ns, state_str)
+            key = (policy.name, ns, state_str, self.metrics._node_name)
             new_labels.add(key)
             state_counts[state_str] = state_counts.get(state_str, 0) + 1
 
         # Remove series for policies that were deleted or changed state
-        for name, ns, state_str in self._known_policy_labels - new_labels:
-            self.metrics.tetragon_policy_info.remove(name, ns, state_str)
+        for name, ns, state_str, node_name in self._known_policy_labels - new_labels:
+            self.metrics.tetragon_policy_info.remove(name, ns, state_str, node_name)
 
-        for name, ns, state_str in new_labels:
+        for name, ns, state_str, node_name in new_labels:
             self.metrics.tetragon_policy_info.labels(
-                name=name, namespace=ns, state=state_str
+                name=name, namespace=ns, state=state_str, node_name=node_name
             ).set(1)
 
         # Always emit a count for every known state so queries don't return no-data
         for state_str in _POLICY_STATE_NAMES.values():
-            self.metrics.tetragon_policies_total.labels(state=state_str).set(
+            self.metrics.tetragon_policies_total.labels(state=state_str, node_name=self.metrics._node_name).set(
                 state_counts.get(state_str, 0)
             )
 
@@ -2548,8 +2561,8 @@ class CertificateAnalyzer:
             while True:
                 try:
                     logger.info("Listening for Tetragon certificate events...")
-                    self.metrics.analyzer_healthy.set(1)
-                    self.metrics.tetragon_connected.set(1)
+                    self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(1)
+                    self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(1)
 
                     for response in stub.GetEvents(request):
                         try:
@@ -2565,8 +2578,8 @@ class CertificateAnalyzer:
                     retry_delay = 5
 
                 except grpc.RpcError as e:
-                    self.metrics.analyzer_healthy.set(0)
-                    self.metrics.tetragon_connected.set(0)
+                    self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
+                    self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
                     logger.warning(
                         f"Tetragon connection lost ({e.code().name}), "
                         f"retrying in {retry_delay}s..."
@@ -2575,8 +2588,8 @@ class CertificateAnalyzer:
                     retry_delay = min(retry_delay * 2, max_delay)
 
                 except Exception as e:
-                    self.metrics.analyzer_healthy.set(0)
-                    self.metrics.tetragon_connected.set(0)
+                    self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
+                    self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
                     logger.error(
                         f"Unexpected error in event stream: {e} — "
                         f"retrying in {retry_delay}s",
@@ -2587,8 +2600,8 @@ class CertificateAnalyzer:
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")
-            self.metrics.analyzer_healthy.set(0)
-            self.metrics.tetragon_connected.set(0)
+            self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
+            self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
         finally:
             channel.close()
 

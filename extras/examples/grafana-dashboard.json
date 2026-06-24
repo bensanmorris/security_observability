@@ -70,7 +70,7 @@
       }
     ]
   },
-  "description": "CertSight \u2014 Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
+  "description": "CertSight — Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -94,7 +94,7 @@
   "timezone": "browser",
   "title": "CertSight",
   "uid": "certsight-v1",
-  "version": 3,
+  "version": 6,
   "templating": {
     "list": [
       {
@@ -181,12 +181,12 @@
       "panels": []
     },
     {
-      "id": 1,
-      "title": "Analyzer Health",
-      "type": "stat",
+      "id": 40,
+      "title": "Node Health Status",
+      "type": "table",
       "gridPos": {
-        "h": 4,
-        "w": 4,
+        "h": 6,
+        "w": 24,
         "x": 0,
         "y": 1
       },
@@ -202,77 +202,9 @@
           },
           "expr": "cert_analyzer_healthy",
           "instant": true,
+          "format": "table",
           "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Unhealthy",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "Healthy",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 32,
-      "title": "Tetragon Connected",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 1
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -280,211 +212,9 @@
           },
           "expr": "tetragon_connected",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "B"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Disconnected",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "Connected",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 29,
-      "title": "Active Policies",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 1
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "tetragon_policies_total{state=\"enabled\"} or vector(0)",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "yellow",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 30,
-      "title": "Policy Errors",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 1
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(tetragon_policies_total{state=~\"load_error|error\"}) or vector(0)",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "None",
-                  "color": "green",
-                  "index": 0
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 19,
-      "title": "Tetragon Version Match",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -492,77 +222,29 @@
           },
           "expr": "cert_analyzer_tetragon_version_match",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "C"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Mismatch",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "Match",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
           },
-          "color": {
-            "mode": "thresholds"
-          }
+          "expr": "tetragon_policies_total{state=\"enabled\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "D"
         },
-        "overrides": []
-      }
-    },
-    {
-      "id": 20,
-      "title": "Kafka Delivery Errors (5m rate)",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node_name) (tetragon_policies_total{state=~\"load_error|error\"})",
+          "instant": true,
+          "format": "table",
+          "refId": "E"
+        },
         {
           "datasource": {
             "type": "prometheus",
@@ -570,45 +252,357 @@
           },
           "expr": "rate(kafka_delivery_errors_total[5m])",
           "instant": true,
-          "refId": "A"
+          "format": "table",
+          "refId": "F"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "node_name",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "state": true,
+              "state 1": true,
+              "state 2": true
+            },
+            "indexByName": {
+              "node_name": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4,
+              "Value #E": 5,
+              "Value #F": 6
+            },
+            "renameByName": {
+              "node_name": "Node",
+              "Value #A": "Analyzer Health",
+              "Value #B": "Tetragon Connected",
+              "Value #C": "Version Match",
+              "Value #D": "Active Policies",
+              "Value #E": "Policy Errors",
+              "Value #F": "Kafka Err/s"
+            }
+          }
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "showHeader": true
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Analyzer Health"
+            },
+            "properties": [
               {
-                "color": "green",
-                "value": null
+                "id": "custom.displayMode",
+                "value": "color-background"
               },
               {
-                "color": "orange",
-                "value": 0.01
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Unhealthy",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "Healthy",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
               }
             ]
           },
-          "color": {
-            "mode": "thresholds"
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tetragon Connected"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Disconnected",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "Connected",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Version Match"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Mismatch",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "Match",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Active Policies"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "yellow",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Policy Errors"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "None",
+                        "color": "green",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Kafka Err/s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 0.01
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
           }
-        },
-        "overrides": []
+        ]
       }
     },
     {
@@ -620,19 +614,19 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 7
       },
       "panels": []
     },
     {
-      "id": 2,
-      "title": "Total Certificates",
-      "type": "stat",
+      "id": 41,
+      "title": "Certificate Summary by Node",
+      "type": "table",
       "gridPos": {
-        "h": 4,
-        "w": 3,
+        "h": 6,
+        "w": 24,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "datasource": {
         "type": "prometheus",
@@ -644,364 +638,61 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"}) or vector(0)",
+          "expr": "count by (node_name) (tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"})",
           "instant": true,
+          "format": "table",
           "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "blue",
-            "mode": "fixed"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3,
-      "title": "Expired",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 3,
-        "y": 6
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(tls_certificate_expired{namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
+          "expr": "count by (node_name) (tls_certificate_expired{namespace=~\"$namespace\",node_name=~\"$node\"} == 1)",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "B"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "title": "Expiring \u22647 Days",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 6,
-        "y": 6
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(tls_certificate_expiring_soon{threshold_days=\"7\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
+          "expr": "count by (node_name) (tls_certificate_expiring_soon{threshold_days=\"7\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1)",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "C"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "dark-red",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 5,
-      "title": "Expiring \u226430 Days",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 9,
-        "y": 6
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(tls_certificate_expiring_soon{threshold_days=\"30\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
+          "expr": "count by (node_name) (tls_certificate_expiring_soon{threshold_days=\"30\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1)",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "D"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 6,
-      "title": "FIPS Non-Compliant",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 12,
-        "y": 6
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0) or vector(0)",
+          "expr": "count by (node_name) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0)",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "E"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 7,
-      "title": "Self-Signed",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 15,
-        "y": 6
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1) or vector(0)",
+          "expr": "count by (node_name) (tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1)",
           "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          "format": "table",
+          "refId": "F"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 8,
-      "title": "Last Event",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 18,
-        "y": 6
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -1009,48 +700,348 @@
           },
           "expr": "time() - cert_analyzer_last_event_timestamp",
           "instant": true,
-          "refId": "A"
+          "format": "table",
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count by (node_name) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 1)",
+          "instant": true,
+          "format": "table",
+          "refId": "H"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "node_name",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Time 8": true
+            },
+            "indexByName": {
+              "node_name": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4,
+              "Value #E": 5,
+              "Value #H": 6,
+              "Value #F": 7,
+              "Value #G": 8
+            },
+            "renameByName": {
+              "node_name": "Node",
+              "Value #A": "Total",
+              "Value #B": "Expired",
+              "Value #C": "Expiring ≤7d",
+              "Value #D": "Expiring ≤30d",
+              "Value #E": "FIPS Non-Compliant",
+              "Value #F": "Self-Signed",
+              "Value #G": "Last Event",
+              "Value #H": "FIPS Compliant"
+            }
+          }
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "showHeader": true
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
               {
-                "color": "green",
-                "value": null
+                "id": "custom.displayMode",
+                "value": "color-background"
               },
               {
-                "color": "yellow",
-                "value": 300
-              },
-              {
-                "color": "red",
-                "value": 600
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
               }
             ]
           },
-          "color": {
-            "mode": "thresholds"
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expired"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expiring ≤7d"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "dark-red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expiring ≤30d"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "FIPS Non-Compliant"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Self-Signed"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last Event"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 300
+                    },
+                    {
+                      "color": "red",
+                      "value": 600
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "FIPS Compliant"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
           }
-        },
-        "overrides": []
+        ]
       }
     },
     {
@@ -1062,7 +1053,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 14
       },
       "panels": []
     },
@@ -1074,7 +1065,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 11
+        "y": 15
       },
       "datasource": {
         "type": "prometheus",
@@ -1239,7 +1230,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 25
       },
       "datasource": {
         "type": "prometheus",
@@ -1364,7 +1355,7 @@
         "h": 8,
         "w": 7,
         "x": 0,
-        "y": 29
+        "y": 33
       },
       "datasource": {
         "type": "prometheus",
@@ -1398,7 +1389,7 @@
           },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 30) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 7) or vector(0))",
           "instant": true,
-          "legendFormat": "Warning (7\u201330d)",
+          "legendFormat": "Warning (7–30d)",
           "refId": "C"
         },
         {
@@ -1408,7 +1399,7 @@
           },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 90) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 30) or vector(0))",
           "instant": true,
-          "legendFormat": "Soon (30\u201390d)",
+          "legendFormat": "Soon (30–90d)",
           "refId": "D"
         },
         {
@@ -1483,7 +1474,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Warning (7\u201330d)"
+              "options": "Warning (7–30d)"
             },
             "properties": [
               {
@@ -1498,7 +1489,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Soon (30\u201390d)"
+              "options": "Soon (30–90d)"
             },
             "properties": [
               {
@@ -1536,7 +1527,7 @@
         "h": 8,
         "w": 17,
         "x": 7,
-        "y": 29
+        "y": 33
       },
       "datasource": {
         "type": "prometheus",
@@ -1550,7 +1541,7 @@
           },
           "expr": "sort(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 90)",
           "instant": true,
-          "legendFormat": "{{common_name}} \u00b7 {{cert_path}} ({{namespace}})",
+          "legendFormat": "{{common_name}} · {{cert_path}} ({{namespace}}) [{{node_name}}]",
           "refId": "A"
         }
       ],
@@ -1617,7 +1608,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 41
       },
       "panels": []
     },
@@ -1629,7 +1620,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 38
+        "y": 42
       },
       "datasource": {
         "type": "prometheus",
@@ -1726,7 +1717,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 38
+        "y": 42
       },
       "datasource": {
         "type": "prometheus",
@@ -1783,7 +1774,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 42
       },
       "datasource": {
         "type": "prometheus",
@@ -1891,7 +1882,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 50
       },
       "panels": []
     },
@@ -1903,7 +1894,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 51
       },
       "datasource": {
         "type": "prometheus",
@@ -1988,7 +1979,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 55
+        "y": 59
       },
       "datasource": {
         "type": "prometheus",
@@ -2041,7 +2032,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 63
       },
       "datasource": {
         "type": "prometheus",
@@ -2217,7 +2208,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 67
+        "y": 71
       },
       "datasource": {
         "type": "prometheus",
@@ -2358,7 +2349,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 75
+        "y": 79
       },
       "panels": []
     },
@@ -2370,7 +2361,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 76
+        "y": 80
       },
       "datasource": {
         "type": "prometheus",
@@ -2422,7 +2413,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 76
+        "y": 80
       },
       "datasource": {
         "type": "prometheus",
@@ -2487,7 +2478,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 84
+        "y": 88
       },
       "datasource": {
         "type": "prometheus",
@@ -2594,7 +2585,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 84
+        "y": 88
       },
       "datasource": {
         "type": "prometheus",
@@ -2690,7 +2681,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 90
+        "y": 94
       },
       "panels": []
     },
@@ -2706,7 +2697,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 91
+        "y": 95
       },
       "targets": [
         {
@@ -2732,14 +2723,16 @@
               "Value": true
             },
             "indexByName": {
-              "name": 0,
-              "namespace": 1,
-              "state": 2
+              "name": 1,
+              "namespace": 2,
+              "state": 3,
+              "node_name": 0
             },
             "renameByName": {
               "name": "Policy",
               "namespace": "Namespace",
-              "state": "State"
+              "state": "State",
+              "node_name": "Node"
             }
           }
         },

@@ -1447,12 +1447,12 @@ class TestProcessEventTimestamp:
         # prefixed path so the file is recognised as previously failed
         host_path = '/host' + disk_path
         analyzer.password_failed_paths.add(host_path)
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
 
         # Event carries the bare (non-/host) path; analyzer adds /host
         analyzer.process_event(self._make_mock_event(disk_path))
 
-        assert analyzer.metrics.last_event_timestamp._value.get() > 0, \
+        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0, \
             "last_event_timestamp was not updated for a skipped password-failed file"
 
     def test_timestamp_updated_when_cert_file_successfully_parsed(
@@ -1480,11 +1480,11 @@ class TestProcessEventTimestamp:
             process='test', pid=1,
         )
         analyzer.known_certs[dummy.unique_key] = dummy
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
 
         analyzer.process_event(self._make_mock_event(disk_path))
 
-        assert analyzer.metrics.last_event_timestamp._value.get() > 0
+        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0
 
 
 class TestLRUCache:
@@ -2344,7 +2344,7 @@ class TestTetragonVersionCheck:
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.1.0')
         analyzer.check_tetragon_version(stub)
-        assert analyzer.metrics.tetragon_version_match._value.get() == 1.0
+        assert analyzer.metrics.tetragon_version_match.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
 
     def test_check_version_mismatch_sets_metric_to_0(self, analyzer, monkeypatch):
         """Differing build and runtime versions set the match gauge to 0."""
@@ -2352,7 +2352,7 @@ class TestTetragonVersionCheck:
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.2.0')
         analyzer.check_tetragon_version(stub)
-        assert analyzer.metrics.tetragon_version_match._value.get() == 0.0
+        assert analyzer.metrics.tetragon_version_match.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_check_version_unknown_build_sets_metric_to_0(self, analyzer, monkeypatch):
         """Unknown build version (env var not set) sets match gauge to 0."""
@@ -2360,7 +2360,7 @@ class TestTetragonVersionCheck:
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'unknown')
         stub = _MockVersionStub(version='v1.1.0')
         analyzer.check_tetragon_version(stub)
-        assert analyzer.metrics.tetragon_version_match._value.get() == 0.0
+        assert analyzer.metrics.tetragon_version_match.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_check_version_unknown_runtime_sets_metric_to_0(self, analyzer, monkeypatch):
         """Unreachable Tetragon daemon (unknown runtime) sets match gauge to 0."""
@@ -2368,7 +2368,7 @@ class TestTetragonVersionCheck:
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(raise_exc=Exception("timeout"))
         analyzer.check_tetragon_version(stub)
-        assert analyzer.metrics.tetragon_version_match._value.get() == 0.0
+        assert analyzer.metrics.tetragon_version_match.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_check_version_sets_info_metric(self, analyzer, monkeypatch):
         """Version info metric carries both build and runtime version labels."""
@@ -2465,7 +2465,9 @@ class TestTetragonPolicyCheck:
 
     def _policy_total(self, analyzer, state: str) -> float:
         """Current value of tetragon_policies_total for a given state label."""
-        return analyzer.metrics.tetragon_policies_total.labels(state=state)._value.get()
+        return analyzer.metrics.tetragon_policies_total.labels(
+            state=state, node_name=analyzer.metrics._node_name
+        )._value.get()
 
     def test_enabled_policy_sets_policy_info(self, analyzer):
         """A single enabled policy creates a tetragon_policy_info series set to 1."""
@@ -2475,7 +2477,7 @@ class TestTetragonPolicyCheck:
         analyzer.check_tetragon_policies(stub)
         samples = self._policy_info_samples(analyzer)
         assert len(samples) == 1
-        assert samples[0].labels == {'name': 'cert-access', 'namespace': '', 'state': 'enabled'}
+        assert samples[0].labels == {'name': 'cert-access', 'namespace': '', 'state': 'enabled', 'node_name': analyzer.metrics._node_name}
         assert samples[0].value == 1.0
 
     def test_enabled_count_reflects_policy_list(self, analyzer):
@@ -2808,7 +2810,7 @@ class TestReconnection:
         t.start()
         connected.wait(timeout=2.0)
 
-        assert analyzer.metrics.analyzer_healthy._value.get() == 1.0
+        assert analyzer.metrics.analyzer_healthy.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
         stopped.set()
 
     def test_healthy_metric_set_to_0_on_disconnect(self, analyzer, monkeypatch):
@@ -2816,14 +2818,15 @@ class TestReconnection:
         analyzer_healthy drops to 0 when the gRPC stream raises RpcError.
         """
         metric_set_to_zero = _threading.Event()
-        original_set = analyzer.metrics.analyzer_healthy.set
+        _labeled = analyzer.metrics.analyzer_healthy.labels(node_name=analyzer.metrics._node_name)
+        original_set = _labeled.set
 
         def _watched_set(value):
             original_set(value)
             if value == 0:
                 metric_set_to_zero.set()
 
-        analyzer.metrics.analyzer_healthy.set = _watched_set
+        _labeled.set = _watched_set
 
         class _DisconnectingStub:
             def GetEvents(self_, request, **kwargs):
@@ -2844,7 +2847,7 @@ class TestReconnection:
 
         assert metric_set_to_zero.wait(timeout=3.0), \
             "analyzer_healthy was never set to 0 after disconnect"
-        assert analyzer.metrics.analyzer_healthy._value.get() == 0.0
+        assert analyzer.metrics.analyzer_healthy.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_reconnect_reissues_get_events(self, analyzer, monkeypatch):
         """
@@ -2961,7 +2964,7 @@ class TestVersionMonitor:
             real_stub = _MockVersionStub(version=v)
             # Call the real implementation bypassing the monkeypatch
             CertificateAnalyzer.check_tetragon_version(analyzer, real_stub)
-            if analyzer.metrics.tetragon_version_match._value.get() == 0.0:
+            if analyzer.metrics.tetragon_version_match.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0:
                 mismatch_detected.set()
 
         monkeypatch.setattr(analyzer, 'check_tetragon_version', _mock_check)
@@ -3328,7 +3331,7 @@ class TestHealthServerReadiness:
         """
         hs = _make_health_server(analyzer, grace=0)
         # Ensure last_event_timestamp is 0 (never set)
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -3338,7 +3341,7 @@ class TestHealthServerReadiness:
     def test_readiness_returns_200_when_recent_event(self, analyzer):
         """Readiness is 200 when the last event was recent."""
         hs = _make_health_server(analyzer, grace=0, staleness=300)
-        analyzer.metrics.last_event_timestamp._value.set(_time.time())
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(_time.time())
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -3348,7 +3351,7 @@ class TestHealthServerReadiness:
         """Readiness is 503 when the last event is older than the staleness window."""
         hs = _make_health_server(analyzer, grace=0, staleness=10)
         # Set last event to 60 seconds ago — well past the 10s staleness window
-        analyzer.metrics.last_event_timestamp._value.set(_time.time() - 60)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(_time.time() - 60)
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -3366,7 +3369,7 @@ class TestHealthServerReadiness:
     def test_is_ready_true_with_no_events_after_grace(self, analyzer):
         """is_ready() returns True with no events seen after grace period."""
         hs = _make_health_server(analyzer, grace=0)
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
         ok, reason = hs.is_ready()
         assert ok is True
         assert reason == 'no_events_seen'
@@ -3374,7 +3377,7 @@ class TestHealthServerReadiness:
     def test_is_ready_false_when_stale(self, analyzer):
         """is_ready() returns False when last_event_timestamp is too old."""
         hs = _make_health_server(analyzer, grace=0, staleness=10)
-        analyzer.metrics.last_event_timestamp._value.set(_time.time() - 60)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(_time.time() - 60)
         ok, reason = hs.is_ready()
         assert ok is False
         assert 'stale' in reason
@@ -4360,18 +4363,18 @@ class TestOpensslUprobeHooking:
 
     def test_handle_bytes_updates_last_event_timestamp(self, analyzer):
         """last_event_timestamp is updated when a bytes_arg cert is successfully parsed."""
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
         _, der = self._cert_der()
         event = self._make_uprobe_event([self._make_bytes_arg(der)])
         analyzer._handle_uprobe_in_memory_cert(event)
-        assert analyzer.metrics.last_event_timestamp._value.get() > 0
+        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0
 
     def test_handle_bytes_timestamp_not_updated_on_invalid_der(self, analyzer):
         """last_event_timestamp is NOT updated when DER parsing fails."""
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
         event = self._make_uprobe_event([self._make_bytes_arg(b'not-a-cert')])
         analyzer._handle_uprobe_in_memory_cert(event)
-        assert analyzer.metrics.last_event_timestamp._value.get() == 0
+        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() == 0
 
     def test_handle_bytes_self_filter_by_process_name(self, analyzer):
         """cert-analyzer process is silently dropped when filter_self_events is True."""
@@ -4735,14 +4738,14 @@ class TestJavaNSSFIPSHooking:
     def test_create_object_updates_event_timestamp(self, analyzer):
         """last_event_timestamp is updated after a successful cert extraction."""
         import unittest.mock as mock
-        analyzer.metrics.last_event_timestamp._value.set(0)
+        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
         _, der = self._cert_der()
         tmpl, ck_cert, _ = self._cert_template(der)
         event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
         with mock.patch.object(analyzer, '_read_process_memory',
                                side_effect=[tmpl, ck_cert, der]):
             analyzer._handle_nsc_create_object(event)
-        assert analyzer.metrics.last_event_timestamp._value.get() > 0
+        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0
 
     def test_create_object_applies_pod_context(self, analyzer):
         """Pod namespace from the uprobe event is stored on the resulting CertificateInfo."""
@@ -5250,7 +5253,7 @@ class TestTetragonConnected:
 
     def test_initial_value_is_0(self, analyzer):
         """tetragon_connected starts at 0 before any connection is attempted."""
-        assert analyzer.metrics.tetragon_connected._value.get() == 0.0
+        assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_set_to_1_when_event_stream_is_active(self, analyzer, monkeypatch):
         """tetragon_connected is 1 while GetEvents is actively streaming."""
@@ -5258,7 +5261,7 @@ class TestTetragonConnected:
         self._start_in_thread(analyzer, stub, monkeypatch)
 
         assert stub.streaming_started.wait(timeout=3), "Event stream did not start"
-        assert analyzer.metrics.tetragon_connected._value.get() == 1.0
+        assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
         stub.stop.set()
 
     def test_set_to_0_on_grpc_error(self, analyzer, monkeypatch):
@@ -5280,7 +5283,7 @@ class TestTetragonConnected:
         # The except grpc.RpcError handler sets tetragon_connected=0 immediately
         # after the raise. A short real sleep ensures the except block has run.
         time.sleep(0.05)
-        assert analyzer.metrics.tetragon_connected._value.get() == 0.0
+        assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_recovers_to_1_after_grpc_error(self, analyzer, monkeypatch):
         """tetragon_connected returns to 1 once the event stream reconnects."""
@@ -5291,7 +5294,7 @@ class TestTetragonConnected:
         )
 
         assert stub.streaming_started.wait(timeout=3), "Stream did not recover"
-        assert analyzer.metrics.tetragon_connected._value.get() == 1.0
+        assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
         stub.stop.set()
 
     def test_is_independent_of_analyzer_healthy(self, analyzer):
