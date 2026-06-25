@@ -11,7 +11,10 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from .health import HealthServer
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend

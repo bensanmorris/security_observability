@@ -4,7 +4,10 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .analyzer import CertificateAnalyzer
 
 logger = logging.getLogger(__name__)
 
