@@ -263,6 +263,7 @@ jobs:
         mkdir -p "${TMPDIR}/${TARNAME}"
         cp cert_analyzer.py           "${TMPDIR}/${TARNAME}/"
         cp fips_compliance_checker.py "${TMPDIR}/${TARNAME}/"
+        cp -r agent                   "${TMPDIR}/${TARNAME}/agent"
         cp LICENSE                    "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.service     "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.conf        "${TMPDIR}/${TARNAME}/"
