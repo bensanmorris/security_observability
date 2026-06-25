@@ -89,6 +89,7 @@ RUN pip install --upgrade pip --no-cache-dir \
 
 # Copy application code
 COPY cert_analyzer.py fips_compliance_checker.py ./
+COPY agent/ ./agent/
 
 # Copy compiled proto bindings from builder stage (not the compiler)
 COPY --from=proto-builder /build/generated/tetragon ./tetragon

@@ -936,7 +936,7 @@ class TestLogCertificateStatusOutput:
             common_name="expired.example.com",
         )
 
-        with caplog.at_level(logging.ERROR, logger="cert_analyzer"):
+        with caplog.at_level(logging.ERROR, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         assert any("EXPIRED" in r.message for r in caplog.records)
@@ -949,7 +949,7 @@ class TestLogCertificateStatusOutput:
             common_name="critical.example.com",
         )
 
-        with caplog.at_level(logging.CRITICAL, logger="cert_analyzer"):
+        with caplog.at_level(logging.CRITICAL, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         assert any("CRITICAL" in r.message for r in caplog.records)
@@ -962,7 +962,7 @@ class TestLogCertificateStatusOutput:
             common_name="warning.example.com",
         )
 
-        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+        with caplog.at_level(logging.WARNING, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         assert any("WARNING" in r.message for r in caplog.records)
@@ -975,7 +975,7 @@ class TestLogCertificateStatusOutput:
             common_name="valid.example.com",
         )
 
-        with caplog.at_level(logging.INFO, logger="cert_analyzer"):
+        with caplog.at_level(logging.INFO, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         assert any("OK" in r.message for r in caplog.records)
@@ -991,7 +991,7 @@ class TestLogCertificateStatusOutput:
             workload_name="cert-test",
         )
 
-        with caplog.at_level(logging.ERROR, logger="cert_analyzer"):
+        with caplog.at_level(logging.ERROR, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         log_messages = " ".join(r.message for r in caplog.records)
@@ -1005,7 +1005,7 @@ class TestLogCertificateStatusOutput:
             not_after=datetime.utcnow() + timedelta(days=365),
         )
 
-        with caplog.at_level(logging.INFO, logger="cert_analyzer"):
+        with caplog.at_level(logging.INFO, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         log_messages = " ".join(r.message for r in caplog.records)
@@ -1021,7 +1021,7 @@ class TestLogCertificateStatusOutput:
             container_name="sidecar",
         )
 
-        with caplog.at_level(logging.ERROR, logger="cert_analyzer"):
+        with caplog.at_level(logging.ERROR, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         log_messages = " ".join(r.message for r in caplog.records)
@@ -1034,7 +1034,7 @@ class TestLogCertificateStatusOutput:
             cert_index=2,
         )
 
-        with caplog.at_level(logging.INFO, logger="cert_analyzer"):
+        with caplog.at_level(logging.INFO, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_info)
 
         log_messages = " ".join(r.message for r in caplog.records)
@@ -1228,7 +1228,7 @@ class TestJKSParsing:
         The JKS password list only tries env var, 'changeit', and empty string.
         'changeme' and 'password' are not attempted.
         """
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'JKS_AVAILABLE', True)
         monkeypatch.delenv('JKS_PASSWORD', raising=False)
 
@@ -1375,7 +1375,7 @@ class TestJKSParsing:
         Patches the module-level JKS_AVAILABLE flag so this test runs
         regardless of whether pyjks is installed in the test environment.
         """
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'JKS_AVAILABLE', False)
 
         jks_path = os.path.join(temp_dir, "dummy.jks")
@@ -1918,7 +1918,7 @@ class TestFipsComplianceEnabled:
 
         calls = []
 
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         from fips_compliance_checker import check_certificate as _real
 
         def _spy(cert, **kwargs):
@@ -1940,7 +1940,7 @@ class TestFipsComplianceEnabled:
 
         calls = []
 
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         from fips_compliance_checker import check_certificate as _real
 
         def _spy(cert, **kwargs):
@@ -1958,7 +1958,7 @@ class TestFipsComplianceEnabled:
 
     def test_fips_check_error_is_non_fatal(self, analyzer, temp_dir, monkeypatch):
         """If _fips_check() raises, extract_certificate_info still returns CertificateInfo."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
 
         def _raising(cert, **kwargs):
             raise RuntimeError("simulated fips error")
@@ -2340,7 +2340,7 @@ class TestTetragonVersionCheck:
 
     def test_check_version_match_sets_metric_to_1(self, analyzer, monkeypatch):
         """Matching build and runtime versions set the match gauge to 1."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.1.0')
         analyzer.check_tetragon_version(stub)
@@ -2348,7 +2348,7 @@ class TestTetragonVersionCheck:
 
     def test_check_version_mismatch_sets_metric_to_0(self, analyzer, monkeypatch):
         """Differing build and runtime versions set the match gauge to 0."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.2.0')
         analyzer.check_tetragon_version(stub)
@@ -2356,7 +2356,7 @@ class TestTetragonVersionCheck:
 
     def test_check_version_unknown_build_sets_metric_to_0(self, analyzer, monkeypatch):
         """Unknown build version (env var not set) sets match gauge to 0."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'unknown')
         stub = _MockVersionStub(version='v1.1.0')
         analyzer.check_tetragon_version(stub)
@@ -2364,7 +2364,7 @@ class TestTetragonVersionCheck:
 
     def test_check_version_unknown_runtime_sets_metric_to_0(self, analyzer, monkeypatch):
         """Unreachable Tetragon daemon (unknown runtime) sets match gauge to 0."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(raise_exc=Exception("timeout"))
         analyzer.check_tetragon_version(stub)
@@ -2372,7 +2372,7 @@ class TestTetragonVersionCheck:
 
     def test_check_version_sets_info_metric(self, analyzer, monkeypatch):
         """Version info metric carries both build and runtime version labels."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.2.0')
         analyzer.check_tetragon_version(stub)
@@ -2387,11 +2387,11 @@ class TestTetragonVersionCheck:
 
     def test_check_version_mismatch_logs_warning(self, analyzer, monkeypatch, caplog):
         """A version mismatch produces a WARNING log containing both versions."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.2.0')
 
-        with caplog.at_level(logging.WARNING, logger='cert_analyzer'):
+        with caplog.at_level(logging.WARNING, logger='agent.analyzer'):
             analyzer.check_tetragon_version(stub)
 
         messages = ' '.join(r.message for r in caplog.records)
@@ -2401,11 +2401,11 @@ class TestTetragonVersionCheck:
 
     def test_check_version_match_logs_info(self, analyzer, monkeypatch, caplog):
         """Matching versions produce an INFO log confirming the version."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         stub = _MockVersionStub(version='v1.1.0')
 
-        with caplog.at_level(logging.INFO, logger='cert_analyzer'):
+        with caplog.at_level(logging.INFO, logger='agent.analyzer'):
             analyzer.check_tetragon_version(stub)
 
         messages = ' '.join(r.message for r in caplog.records)
@@ -2591,7 +2591,7 @@ class TestTetragonPolicyCheck:
     def test_grpc_error_logs_warning(self, analyzer, caplog):
         """A gRPC failure is surfaced as a WARNING log."""
         stub = _MockPolicyStub(raise_exc=Exception("timeout"))
-        with caplog.at_level(logging.WARNING, logger='cert_analyzer'):
+        with caplog.at_level(logging.WARNING, logger='agent.analyzer'):
             analyzer.check_tetragon_policies(stub)
         assert any('tracing polic' in r.message.lower() for r in caplog.records)
 
@@ -2606,7 +2606,7 @@ class TestTetragonPolicyCheck:
 
     def test_missing_proto_type_skips_gracefully(self, analyzer, monkeypatch):
         """If ListTracingPoliciesRequest is absent from the bindings, the check is skipped."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.delattr(_ca.sensors_pb2, 'ListTracingPoliciesRequest')
         stub = _MockPolicyStub(policies=[
             _MockPolicyStatus('policy-a', state=1),
@@ -2618,11 +2618,11 @@ class TestTetragonPolicyCheck:
         self, analyzer, monkeypatch, caplog
     ):
         """Tetragon <= v1.1.0 lacks GetVersionRequest — must return 'unknown' and warn."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
         stub = _MockVersionStub(version='v1.0.0')
 
-        with caplog.at_level(logging.WARNING, logger='cert_analyzer'):
+        with caplog.at_level(logging.WARNING, logger='agent.analyzer'):
             result = analyzer.get_runtime_tetragon_version(stub)
 
         assert result == 'unknown'
@@ -2632,7 +2632,7 @@ class TestTetragonPolicyCheck:
         self, analyzer, monkeypatch
     ):
         """No RPC call is made when GetVersionRequest is missing from the bindings."""
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
 
         calls = []
@@ -2949,7 +2949,7 @@ class TestVersionMonitor:
         If Tetragon is upgraded while the analyzer is running the mismatch
         metric updates to reflect the new version.
         """
-        import cert_analyzer as _ca
+        import agent.analyzer as _ca
         monkeypatch.setattr(_ca, 'TETRAGON_BUILD_VERSION', 'v1.1.0')
         monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '0')
 
@@ -3460,7 +3460,7 @@ class TestKafkaPublisher:
 
     def test_noop_when_kafka_not_available(self, sample_cert_info, monkeypatch):
         """publish() is silent and never raises when kafka-python is absent."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', False)
 
         from cert_analyzer import KafkaPublisher
@@ -3471,11 +3471,11 @@ class TestKafkaPublisher:
 
     def test_noop_when_producer_init_fails(self, monkeypatch, sample_cert_info):
         """publish() is silent when KafkaProducer.__init__ raises."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer', side_effect=Exception('broker down')):
+        with patch('agent.kafka.KafkaProducer', side_effect=Exception('broker down')):
             from cert_analyzer import KafkaPublisher
             publisher = KafkaPublisher(bootstrap_servers='broker:9092', topic='t')
             assert publisher._producer is None
@@ -3485,11 +3485,11 @@ class TestKafkaPublisher:
 
     def test_producer_initialised_with_correct_brokers(self, monkeypatch):
         """KafkaProducer is constructed with the parsed bootstrap_servers list."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             KafkaPublisher(bootstrap_servers='b1:9092, b2:9092', topic='t')
@@ -3498,11 +3498,11 @@ class TestKafkaPublisher:
 
     def test_producer_plaintext_omits_security_protocol(self, monkeypatch):
         """security_protocol kwarg is absent when protocol is PLAINTEXT."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             KafkaPublisher(
@@ -3515,11 +3515,11 @@ class TestKafkaPublisher:
 
     def test_producer_sasl_kwargs_passed_through(self, monkeypatch):
         """SASL kwargs are forwarded when security_protocol is SASL_SSL."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             KafkaPublisher(
@@ -3540,11 +3540,11 @@ class TestKafkaPublisher:
 
     def test_publish_sends_correct_event_type(self, monkeypatch, sample_cert_info):
         """Published message contains event_type = 'certificate_discovered'."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
 
@@ -3559,11 +3559,11 @@ class TestKafkaPublisher:
 
     def test_publish_message_contains_all_fields(self, monkeypatch, sample_cert_info):
         """Published message contains all expected CertificateInfo fields."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
 
@@ -3587,11 +3587,11 @@ class TestKafkaPublisher:
 
     def test_publish_message_values_match_cert_info(self, monkeypatch, sample_cert_info):
         """Published message values correctly reflect the CertificateInfo."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
 
@@ -3616,11 +3616,11 @@ class TestKafkaPublisher:
 
     def test_publish_uses_unique_key_as_partition_key(self, monkeypatch, sample_cert_info):
         """Message key is unique_key (path:cert_index:serial) for partition locality."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
 
@@ -3638,11 +3638,11 @@ class TestKafkaPublisher:
 
     def test_publish_sends_to_configured_topic(self, monkeypatch, sample_cert_info):
         """Message is sent to the topic specified in configuration."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
 
@@ -3657,11 +3657,11 @@ class TestKafkaPublisher:
 
     def test_publish_silent_on_send_error(self, monkeypatch, sample_cert_info):
         """publish() logs a warning and never raises when send() throws."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_producer.send.side_effect = Exception('broker unavailable')
             mock_cls.return_value = mock_producer
@@ -3672,11 +3672,11 @@ class TestKafkaPublisher:
 
     def test_on_error_callback_logs_warning(self, monkeypatch, caplog):
         """_on_error() logs a warning without raising."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
@@ -3691,11 +3691,11 @@ class TestKafkaPublisher:
 
     def test_close_flushes_and_closes_producer(self, monkeypatch):
         """close() calls flush() then close() on the underlying producer."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock, call
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
 
@@ -3872,11 +3872,11 @@ class TestKafkaReconnection:
         reconnect tests. Returns (publisher, mock_producer_class) so tests
         can control subsequent KafkaProducer() calls.
         """
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
             from cert_analyzer import KafkaPublisher
@@ -3916,11 +3916,11 @@ class TestKafkaReconnection:
 
     def test_send_failure_nullifies_producer(self, monkeypatch, sample_cert_info):
         """A send() exception sets _producer to None so next publish retries."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_producer.send.side_effect = Exception('broker down')
             mock_cls.return_value = mock_producer
@@ -3938,11 +3938,11 @@ class TestKafkaReconnection:
 
     def test_connect_respects_cooldown(self, monkeypatch, sample_cert_info):
         """_connect() returns False immediately if called within the cooldown window."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
@@ -3959,11 +3959,11 @@ class TestKafkaReconnection:
 
     def test_connect_proceeds_after_cooldown(self, monkeypatch, sample_cert_info):
         """_connect() creates a new producer once the cooldown has elapsed."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
@@ -3983,11 +3983,11 @@ class TestKafkaReconnection:
         self, monkeypatch, sample_cert_info
     ):
         """publish() silently skips sending if reconnect is still on cooldown."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
             publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
@@ -4006,11 +4006,11 @@ class TestKafkaReconnection:
         self, monkeypatch, sample_cert_info
     ):
         """publish() calls _connect() and sends when producer is None and cooldown elapsed."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
             from cert_analyzer import KafkaPublisher
@@ -4032,11 +4032,11 @@ class TestKafkaReconnection:
         self, monkeypatch, sample_cert_info
     ):
         """After reconnect the published message has the correct event_type and path."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_cls.return_value = mock_producer
             from cert_analyzer import KafkaPublisher
@@ -4059,11 +4059,11 @@ class TestKafkaReconnection:
         self, monkeypatch, sample_cert_info
     ):
         """_connect() calls close() on an existing broken producer before creating a new one."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             broken_producer = MagicMock()
             new_producer = MagicMock()
             mock_cls.side_effect = [broken_producer, new_producer]
@@ -4085,11 +4085,11 @@ class TestKafkaReconnection:
         self, monkeypatch, sample_cert_info
     ):
         """Three consecutive send failures all log warnings and never raise."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_producer = MagicMock()
             mock_producer.send.side_effect = Exception('broker down')
             mock_cls.return_value = mock_producer
@@ -4107,11 +4107,11 @@ class TestKafkaReconnection:
         self, monkeypatch, sample_cert_info
     ):
         """If the initial connection fails, publish() retries once cooldown elapses."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             # First call (init) fails, second call (reconnect) succeeds
             working_producer = MagicMock()
             mock_cls.side_effect = [Exception('broker down on startup'), working_producer]
@@ -4132,11 +4132,11 @@ class TestKafkaReconnection:
 
     def test_reconnect_failure_logs_warning(self, monkeypatch, caplog):
         """A failed reconnect attempt logs a warning with retry interval."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.side_effect = Exception('broker down')
             from cert_analyzer import KafkaPublisher
 
@@ -4150,11 +4150,11 @@ class TestKafkaReconnection:
 
     def test_successful_reconnect_logs_info(self, monkeypatch, caplog):
         """A successful reconnect logs an info message."""
-        import cert_analyzer as _ca
+        import agent.kafka as _ca
         monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
 
         from unittest.mock import patch, MagicMock
-        with patch('cert_analyzer.KafkaProducer') as mock_cls:
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
             mock_cls.return_value = MagicMock()
             from cert_analyzer import KafkaPublisher
 
@@ -5092,7 +5092,7 @@ class TestSelfSignedDetection:
 
         cert_infos = analyzer.analyze_certificate(path, "test", 1)
 
-        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+        with caplog.at_level(logging.WARNING, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_infos[0])
 
         assert any("SELF-SIGNED" in r.message for r in caplog.records)
@@ -5109,7 +5109,7 @@ class TestSelfSignedDetection:
 
         cert_infos = analyzer.analyze_certificate(path, "test", 1)
 
-        with caplog.at_level(logging.WARNING, logger="cert_analyzer"):
+        with caplog.at_level(logging.WARNING, logger="agent.analyzer"):
             analyzer.log_certificate_status(cert_infos[0])
 
         assert not any("SELF-SIGNED" in r.message for r in caplog.records)
