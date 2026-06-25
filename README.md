@@ -1,22 +1,56 @@
+<p align="center">
+  <img src="extras/certsight-icon.svg" width="240" height="240">
+</p>
+
 # CertSight - Realtime certificate monitoring via eBPF
 
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 
-Utilises eBPF to hook kprobes and uprobes for safe and low overhead detection of certificate accesses in realtime. Parses and surfaces certificate, process and k8s data (where applicable) as both Prometheus metrics and Kafka topics.
+CertSight provides real-time certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes.
 
-Supports in-memory certificate intercepts (via system crypto lib uprobe hooks) for post-decrypt inspection (no keys required) in addition to file-based PEM (`.pem`, `.crt`, `.cert`, `.cer`), DER, Java KeyStore (`.jks`, `.keystore`, `.truststore`), and PKCS12 (`.p12`, `.pfx`) formats.
+---
 
-Each detected certificate is automatically checked for FIPS 140-2/140-3 algorithm compliance including key type, minimum key size, approved curves, and signature hash with results surfaced in the same Prometheus metrics and Kafka events alongside expiry data.
+## The problem
 
-Java certificate visibility is supported in both FIPS and non-FIPS environments. In FIPS mode, uprobe hooks on NSS (`libsoftokn3.so`) capture certificates at the native layer. In non-FIPS mode, a lightweight Java agent instruments the JCA `KeyStore` API and reports certificates via a native stub hooked by Tetragon — see the [cert-agent (Java, non-FIPS)](probe_tests/README.md#cert-agent-java-non-fips) test for details.
+Certificate expiry causes outages that are entirely preventable. At scale with hundreds of machines and thousands of certificates tracking what's actually running in your estate is hard, especially when certificates are loaded dynamically, passed in memory between TLS stack components, or processed by runtimes that never call system crypto libraries.
+
+Furthermore on 15th March 2026 SSL certificate validity dropped to 200 days and in 2029 it will drop to just 47 days strengthening the case for always-on low overhead real time certificate monitoring.
+
+## How CertSight differs from existing approaches
+
+| Approach | What it sees | What it misses |
+|---|---|---|
+| Network scanner | Certs on open ports | In-memory certs, internal services, file-only loads |
+| Binary scanner | Vulnerable components in artefacts at build time | Runtime execution paths, dynamically loaded certs |
+| Scheduled filesystem scan | File-backed certs | In-memory certs, blind spots between scans |
+| **CertSight** | • Every certificate file access system-wide <br>• In-memory certificates post-handshake <br>• Dynamically linked crypto <br>• Java certificate operations in both FIPS and non-FIPS environments <br>• Certs on open ports via optional port probe (triggered by bind events, no port sweep required) <br>• Remote server certificates via outbound connect probe (triggered by `tcp_connect` to TLS ports, no configuration required) <br><br> Every cert access is FIPS compliance checked with full process and k8s context surfaced <br><br> Ships with a multinode dashboard [a video demo of which is here](https://youtu.be/oe7yznJaDTM) | Statically linked crypto (excluding Java / JCA - we've got that covered) |
+
+An application is not a single binary. It is a tree of executables and shared libraries (and kernel activity) where each node may have its own dependencies. A binary scanner inventories each node in isolation. An exploit may target a specific branch of that tree that the scanner considers clean. CertSight observes what is actually executing and performing certificate operations at runtime, irrespective of where in the dependency tree that activity originates.
+
+## What CertSight detects
+
+- Every certificate file access system-wide via eBPF fd_install kprobe (PEM, DER, JKS, PKCS12)
+- In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
+- TLS endpoints discovered via bind events — triggers a TLS handshake against the bound address/port and [ingests the served certificate](https://github.com/bensanmorris/security_observability/releases/tag/v0.47)
+- Remote server certificates discovered via outbound `tcp_connect` events to common TLS ports (443, 8443, 5671, 6380, 9093, …) — makes remote server expiry visible without any per-service configuration
+- Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
+- Which process accessed which certificate, when, and from which Kubernetes pod
+- An extensive set of surfaced fields and metrics per certificate access. Refer to our [surfaced fields guide](extras/FIELDS-README.md)
+
+Instructions are below but if you prefer to watch video guides:
+
+- [CertSight - Installation & Operation](https://youtu.be/9QpfuU0TKec)
+- [CertSight - Dashboard demo](https://youtu.be/oe7yznJaDTM)
+
+![CertSight Grafana dashboard](extras/dashboard.png)
 
 ---
 
 ## Prerequisites
 
-- RHEL 8 or RHEL 9 (x86_64)
-- [Tetragon](https://tetragon.io) installed and running
+- Linux x86_64, kernel >= 4.18 (for eBPF kprobe / uprobe support)
+- [Tetragon](https://tetragon.io) installed and running (for policy-based eBPF hooking support)
 
 ---
 
@@ -31,12 +65,13 @@ sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
 
 The installer will fail with a clear error if Tetragon is not found.
 
-**Applying Tetragon policies:**
+**Applying our certificate-related Tetragon policies:**
 
 | Policy | Purpose | RHEL |
 |---|---|---|
 | `certificate-file-access.yaml` | Detects certificate file opens by process (`.pem`, `.crt`, `.jks`, `.p12`, etc.) | 8 and 9 |
-| `tls-service-tracking-fixed.yaml` | Identifies processes binding on TLS-capable ports (nginx, httpd) via `sys_bind` | 8 and 9 |
+| `tls-service-tracking-fixed.yaml` | Identifies processes binding on TLS-capable ports (nginx, httpd) via `sys_bind` — used with `port_probe` to ingest the served certificate | 8 and 9 |
+| `tcp-connect-tls.yaml` | Fires on outbound `tcp_connect` calls to common TLS ports (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094) — used with `port_probe` to probe remote server certificate expiry without any per-service configuration. **If you add or remove ports from the `DPort` filter in this policy you must also update `tls_outbound_ports` in `cert-analyzer.conf` to match** — the policy filters events at the kernel boundary; cert-analyzer applies the same list as a Python-side guard | 8 and 9 |
 | `experimental/openssl1_1-cert-load.yaml` | Intercepts in-memory certificate loads via OpenSSL 1.1 (`libssl.so.1.1`) | 8 only |
 | `experimental/openssl3-cert-load.yaml` | Intercepts in-memory certificate loads via OpenSSL 3 (`libssl.so.3`) | 9 only |
 | `experimental/java-fips-nss-cert.yaml` | Intercepts certificate objects created via NSS/PKCS11 (FIPS-mode JVMs) | 9 only |
@@ -48,13 +83,9 @@ Policies are not bundled in the RPM — they are shipped separately so they can 
 ```bash
 tar -xzf tetragon-policies-<version>.tar.gz
 
-# Load all policies immediately (active until Tetragon restarts):
+# Detects your RHEL version, loads all appropriate policies, and persists
+# them to /etc/tetragon/tetragon.tp.d/ so they survive Tetragon restarts:
 sudo ./tetragon-policies/apply-policies.sh
-
-# Or install persistently (loaded automatically on Tetragon start):
-sudo cp tetragon-policies/*.yaml /etc/tetragon/tetragon.tp.d/
-sudo cp tetragon-policies/experimental/*.yaml /etc/tetragon/tetragon.tp.d/
-sudo systemctl restart tetragon
 ```
 
 > **Note:** `experimental/java-fips-nss-cert.yaml` hooks `NSC_CreateObject` and `NSC_FindObjectsInit` inside `libsoftokn3.so`. These symbols are not exported in the stripped RHEL package, so Tetragon resolves them via build-ID debuginfo lookup. Install the debuginfo package before loading this policy or the uprobe will fail to attach:
@@ -62,7 +93,7 @@ sudo systemctl restart tetragon
 > sudo dnf debuginfo-install nss-softokn
 > ```
 
-**Java agent (non-FIPS JVMs):**
+**(Optional) Java agent (non-FIPS JVMs):**
 
 For JVMs running without FIPS mode, install the two Java agent RPMs from the [latest release](../../releases/latest) and enable the deployer service:
 
@@ -72,13 +103,7 @@ sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
 sudo systemctl enable --now cert-agent-deployer
 ```
 
-The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). Once the `.so` is mapped into a JVM process, load the policy:
-
-```bash
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
-```
-
-> **Note:** the policy must be loaded _after_ the deployer has attached to at least one JVM. Tetragon enumerates processes with `libcert_agent_stub.so` mapped at policy-load time — if no JVM has it mapped yet, the uprobe will not attach to JVMs that load it later.
+The deployer scans `/proc` every 30 seconds and uses `jattach` to inject `cert-agent.jar` into each new JVM it finds. The RPM automatically installs and loads a bundled SELinux policy module (`cert_agent_deployer`) that grants the permissions jattach requires (ptrace, signal, `/proc` reads, `/tmp` socket access). The `experimental/java-non-fips-cert.yaml` policy is included in `apply-policies.sh` — if you have already run it, no additional step is needed. The uprobe is installed on the `libcert_agent_stub.so` file inode, so it fires for any JVM that subsequently loads the library with no ordering constraint relative to the deployer.
 
 **Verifying with the probe-tests archive:**
 
@@ -98,9 +123,6 @@ sudo journalctl -u cert-agent-deployer -f
 # bundled SELinux module has not yet taken effect), attach manually as a one-off:
 sudo jattach <pid> load instrument false \
     /opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stub.so
-
-# Once attached, load (or reload) the policy:
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/java-non-fips-cert.yaml
 
 # Confirm detection in cert-analyzer:
 sudo journalctl -u cert-analyzer -f | grep java_cert_agent_write
@@ -162,7 +184,7 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `paths` | `/etc/ssl,/etc/pki` | Comma-separated directories for periodic certificate scanning |
+| `paths` | `/etc/ssl,/etc/pki` | Optional comma-separated directories for optional periodic certificate scanning. Scanning is disabled if empty |
 | `interval_seconds` | `3600` | Seconds between periodic scans |
 
 **[logging]**
@@ -175,7 +197,7 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_size` | `10000` | LRU cache size for known certs, processed paths, and failed passwords (minimum 10,000) |
+| `max_size` | `10000` | LRU cache size for known certs (minimum 10,000) |
 
 **[certificates]**
 
@@ -193,6 +215,16 @@ sudo systemctl enable --now cert-analyzer
 |---|---|---|
 | `jks_password` | _(unset)_ | Password tried when opening encrypted JKS keystores |
 | `pkcs12_password` | _(unset)_ | Password tried when opening encrypted PKCS12 keystores |
+
+**[port_probe]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `bind_probe_enabled` | `false` | Enable inbound TLS probing. Bind events from `tls-service-tracking-fixed.yaml` trigger a TLS handshake against the newly bound address/port and ingest the served certificate. Low event volume — safe to enable broadly. Each unique `host:port` is probed at most once (O(1) dedup) |
+| `connect_probe_enabled` | `false` | Enable outbound TLS probing. `tcp_connect` events from `tcp-connect-tls.yaml` to common TLS ports trigger an immediate probe against the remote server, making remote certificate expiry visible without per-service configuration. Each unique `host:port` is probed at most once (O(1) dedup); enable with care on hosts with high outbound connection rates |
+| `tls_outbound_ports` | _(built-in list)_ | Comma-separated list of destination ports to treat as TLS for outbound connect probing. Defaults to `443,636,5671,5672,6380,8443,8883,9093,9094`. If you add or remove ports, you must also update the `DPort` filter in `tcp-connect-tls.yaml` — the Tetragon policy filters events at the kernel boundary; this list is the Python-side guard. Both must agree |
+| `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete (applies to `bind_probe_enabled` only — outbound probes fire immediately) |
+| `timeout_seconds` | `5` | Seconds before a TLS probe connection attempt times out |
 
 **[kafka]**
 
@@ -218,13 +250,11 @@ sudo journalctl -u cert-analyzer -f
 curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 ```
 
----
-
 ## Further reading
 
 - [Linux capabilities reference](linux-capabilities.md) - Required Linux capabilities for each component
 - [Uprobe hook tests](probe_tests/README.md) - Programs for verifying Tetragon uprobe policies fire correctly
-- [Quick start demo](extras/README-QUICKSTART.md)
-- [Kubernetes / pod enrichment demo](extras/POD-ENRICHMENT-DEMO-README.md)
-- [Deployment guide](extras/DEPLOYMENT-README.md)
-- [Testing guide](extras/TEST-README.md)
+- [Performance tests](perf_tests/README.md) - Throughput and latency comparison across cert-analyzer configurations
+- [Surfaced fields reference](extras/FIELDS-README.md) - All Prometheus metrics and Kafka event fields
+- [Grafana dashboard](extras/DASHBOARDS.md) - Setup guide and dashboard section reference
+- [Roadmap](extras/ROADMAP.md) - Planned and proposed improvements

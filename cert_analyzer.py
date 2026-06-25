@@ -10,6 +10,9 @@ import sys
 import json
 import logging
 import grpc
+import socket
+import ssl
+import struct
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple, List, OrderedDict as OrderedDictType
@@ -37,7 +40,7 @@ from fips_compliance_checker import (
 
 # Import generated Tetragon protos
 try:
-    from tetragon import tetragon_pb2, events_pb2, sensors_pb2_grpc
+    from tetragon import tetragon_pb2, events_pb2, sensors_pb2, sensors_pb2_grpc
 except ImportError:
     print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
     sys.exit(1)
@@ -74,6 +77,23 @@ TETRAGON_BUILD_VERSION: str = os.getenv('TETRAGON_BUILD_VERSION', 'unknown')
 # Falls back to 'dev' when running outside of a built container.
 CERT_ANALYZER_VERSION: str = os.getenv('CERT_ANALYZER_VERSION', 'dev')
 
+# Node identity used as a Prometheus label on health/Tetragon metrics so that
+# multi-node dashboards can join on node_name. In Kubernetes, inject the real
+# node name via: env: [{name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}]
+_NODE_NAME: str = os.getenv('NODE_NAME', socket.gethostname())
+
+# Map TracingPolicyState enum integers to clean label strings.
+# Prefix TP_STATE_ is stripped and the remainder lowercased (e.g. TP_STATE_LOAD_ERROR → load_error).
+_POLICY_STATE_NAMES: Dict[int, str] = {
+    0: 'unknown',
+    1: 'enabled',
+    2: 'disabled',
+    3: 'load_error',
+    4: 'error',
+    5: 'loading',
+    6: 'unloading',
+}
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -83,6 +103,17 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Friendly names for the most common Extended Key Usage OIDs (RFC 5280 §4.2.1.12).
+# Unknown OIDs fall back to their dotted-string representation.
+_EKU_NAMES = {
+    '1.3.6.1.5.5.7.3.1': 'server_auth',
+    '1.3.6.1.5.5.7.3.2': 'client_auth',
+    '1.3.6.1.5.5.7.3.3': 'code_signing',
+    '1.3.6.1.5.5.7.3.4': 'email_protection',
+    '1.3.6.1.5.5.7.3.8': 'time_stamping',
+    '1.3.6.1.5.5.7.3.9': 'ocsp_signing',
+}
 
 
 @dataclass
@@ -99,6 +130,7 @@ class CertificateInfo:
     namespace: str = ""
     common_name: str = ""
     san_dns_names: list = field(default_factory=list)
+    san_ip_addresses: list = field(default_factory=list)
     cert_index: int = 0
     # Kubernetes context sourced directly from the Tetragon event Pod proto
     pod_name: str = ""
@@ -117,6 +149,11 @@ class CertificateInfo:
     container_pid: Optional[int] = None
     container_start_time: Optional[datetime] = None
     container_maybe_exec_probe: bool = False
+    # Spawning process — binary path and PID of the process that launched
+    # the cert loader. Empty when Tetragon's process cache didn't have the
+    # parent at event time (common at startup).
+    parent_process: str = ""
+    parent_pid: int = 0
     # SHA-256 of the DER-encoded certificate bytes. Empty string when
     # CERT_CHECKSUM_ENABLED=false (the default).
     checksum: str = ""
@@ -127,6 +164,15 @@ class CertificateInfo:
     curve_name: str = ""       # secp256r1 etc. (EC only)
     fips_compliant: bool = False
     fips_violations: list = field(default_factory=list)
+    # RFC 5280 extension fields — None means the extension is absent from the certificate
+    key_usage: Optional[list] = None
+    extended_key_usage: Optional[list] = None
+    is_ca: Optional[bool] = None
+    basic_constraints_path_length: Optional[int] = None
+    # True when the certificate is self-signed (subject == issuer and signature
+    # verifies against its own public key). Root CA certificates are legitimately
+    # self-signed; self-signed leaf certificates are typically a configuration risk.
+    is_self_signed: bool = False
 
     @property
     def days_until_expiry(self) -> float:
@@ -201,30 +247,43 @@ class HandshakeConfigInfo:
 class PrometheusMetrics:
     """Prometheus metrics for certificate monitoring"""
 
-    def __init__(self):
+    def __init__(self, node_name: str = ""):
+        self._node_name = node_name
         # Certificate expiry metrics - includes k8s workload labels
         self.cert_expiry_days = Gauge(
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
         self.cert_expiry_timestamp = Gauge(
             'tls_certificate_expiry_timestamp',
             'Unix timestamp of certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
         self.cert_valid_from = Gauge(
             'tls_certificate_valid_from_timestamp',
             'Unix timestamp of certificate valid from date',
             ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
+        )
+
+        self.cert_last_accessed = Gauge(
+            'tls_certificate_last_accessed_timestamp',
+            'Unix timestamp of the most recent certificate access event',
+            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+             'san_dns_names', 'san_ip_addresses',
+             'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
+             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
         )
 
         # Event counters
@@ -262,16 +321,32 @@ class PrometheusMetrics:
              'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash']
         )
 
+        self.cert_self_signed = Gauge(
+            'tls_certificate_self_signed',
+            'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
+            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+             'workload_kind', 'workload_name', 'node_name', 'is_ca']
+        )
+
         # System health
         self.analyzer_healthy = Gauge(
             'cert_analyzer_healthy',
-            'Health status of the analyzer (1=healthy, 0=unhealthy)'
+            'Health status of the analyzer (1=healthy, 0=unhealthy)',
+            ['node_name']
         )
-        self.analyzer_healthy.set(1)
+        self.analyzer_healthy.labels(node_name=self._node_name).set(1)
+
+        self.tetragon_connected = Gauge(
+            'tetragon_connected',
+            'Whether the analyzer has an active gRPC event stream to Tetragon (1=connected, 0=disconnected)',
+            ['node_name']
+        )
+        self.tetragon_connected.labels(node_name=self._node_name).set(0)
 
         self.last_event_timestamp = Gauge(
             'cert_analyzer_last_event_timestamp',
-            'Timestamp of last processed event'
+            'Timestamp of last processed event',
+            ['node_name']
         )
 
         # Tetragon version tracking — detects build/runtime version mismatch
@@ -283,6 +358,7 @@ class PrometheusMetrics:
         self.tetragon_version_match = Gauge(
             'cert_analyzer_tetragon_version_match',
             'Whether the build and runtime Tetragon versions match (1=match, 0=mismatch)',
+            ['node_name']
         )
 
         # Build info — single source of truth for version diagnostics.
@@ -337,32 +413,56 @@ class PrometheusMetrics:
             ['symbol', 'fips_compliant'],
         )
 
+        self.tls_port_probes_total = Counter(
+            'tls_port_probes_total',
+            'Total number of TLS port probe attempts triggered by bind events',
+            ['status'],  # success, failed, skipped
+        )
+
+        # Tetragon policy tracking
+        self.tetragon_policy_info = Gauge(
+            'tetragon_policy_info',
+            'Tetragon tracing policies and their current state (1=present)',
+            ['name', 'namespace', 'state', 'node_name'],
+        )
+        self.tetragon_policies_total = Gauge(
+            'tetragon_policies_total',
+            'Number of Tetragon tracing policies by state',
+            ['state', 'node_name'],
+        )
+
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
         labels = {
-            'cert_path':      info.path,
-            'subject':        info.subject[:100],
-            'issuer':         info.issuer[:100],
-            'serial':         info.serial_number,
-            'process':        info.process,
-            'common_name':    info.common_name,
-            'cert_index':     str(info.cert_index),
-            'pod_name':       info.pod_name,
-            'namespace':      info.namespace,
-            'workload_kind':  info.workload_kind,
-            'workload_name':  info.workload_name,
-            'node_name':      info.node_name,
-            'app_label':      info.app_label,
-            'container_name': info.container_name,
+            'cert_path':        info.path,
+            'subject':          info.subject[:100],
+            'issuer':           info.issuer[:100],
+            'serial':           info.serial_number,
+            'process':          info.process,
+            'common_name':      info.common_name,
+            'san_dns_names':    ','.join(info.san_dns_names),
+            'san_ip_addresses': ','.join(info.san_ip_addresses),
+            'cert_index':       str(info.cert_index),
+            'pod_name':         info.pod_name,
+            'namespace':        info.namespace,
+            'workload_kind':    info.workload_kind,
+            'workload_name':    info.workload_name,
+            'node_name':        info.node_name,
+            'app_label':        info.app_label,
+            'container_name':   info.container_name,
             # Empty string when CERT_CHECKSUM_ENABLED=false — Prometheus
             # handles empty label values cleanly and the label is simply
             # omitted from query results when filtering
-            'checksum':       info.checksum,
+            'checksum':         info.checksum,
+            # Empty string when Tetragon's process cache didn't have the
+            # parent at event time
+            'parent_process':   info.parent_process,
         }
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
         self.cert_valid_from.labels(**labels).set(info.not_before.timestamp())
+        self.cert_last_accessed.labels(**labels).set(datetime.utcnow().timestamp())
 
         self.cert_expired.labels(
             cert_path=info.path,
@@ -402,6 +502,18 @@ class PrometheusMetrics:
                 signature_hash=info.signature_hash,
             ).set(1 if info.fips_compliant else 0)
 
+        self.cert_self_signed.labels(
+            cert_path=info.path,
+            process=info.process,
+            cert_index=str(info.cert_index),
+            pod_name=info.pod_name,
+            namespace=info.namespace,
+            workload_kind=info.workload_kind,
+            workload_name=info.workload_name,
+            node_name=info.node_name,
+            is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
+        ).set(1 if info.is_self_signed else 0)
+
 
 
 
@@ -427,6 +539,7 @@ class PrometheusMetrics:
 _kafka_delivery_errors = Counter(
     'kafka_delivery_errors_total',
     'Total number of Kafka message delivery failures (async, broker-side)',
+    ['node_name'],
 )
 
 
@@ -454,6 +567,7 @@ class KafkaPublisher:
         "serial_number":    "abc123",
         "common_name":      "example.com",
         "san_dns_names":    ["example.com", "www.example.com"],
+        "san_ip_addresses": ["10.96.0.1", "192.168.1.1"],
         "not_before":       "2024-01-01T00:00:00",
         "not_after":        "2025-01-01T00:00:00",
         "days_until_expiry": 44.9,
@@ -473,7 +587,12 @@ class KafkaPublisher:
         "signature_hash":   "sha256",
         "curve_name":       "",
         "fips_compliant":   true,
-        "fips_violations":  []
+        "fips_violations":  [],
+        "key_usage":                     ["digital_signature", "key_encipherment"],
+        "extended_key_usage":            ["server_auth", "client_auth"],
+        "is_ca":                         false,
+        "basic_constraints_path_length": null,
+        "is_self_signed":                false
     }
     """
 
@@ -579,12 +698,15 @@ class KafkaPublisher:
             'serial_number':     cert_info.serial_number,
             'common_name':       cert_info.common_name,
             'san_dns_names':     cert_info.san_dns_names,
+            'san_ip_addresses':  cert_info.san_ip_addresses,
             'not_before':        cert_info.not_before.isoformat(),
             'not_after':         cert_info.not_after.isoformat(),
             'days_until_expiry': round(cert_info.days_until_expiry, 2),
             'is_expired':        cert_info.is_expired,
             'process':           cert_info.process,
             'pid':               cert_info.pid,
+            'parent_process':    cert_info.parent_process,
+            'parent_pid':        cert_info.parent_pid,
             'namespace':                  cert_info.namespace,
             'pod_name':                   cert_info.pod_name,
             'pod_uid':                    cert_info.pod_uid,
@@ -608,6 +730,11 @@ class KafkaPublisher:
             'curve_name':        cert_info.curve_name,
             'fips_compliant':    cert_info.fips_compliant,
             'fips_violations':   cert_info.fips_violations,
+            'key_usage':                     cert_info.key_usage,
+            'extended_key_usage':            cert_info.extended_key_usage,
+            'is_ca':                         cert_info.is_ca,
+            'basic_constraints_path_length': cert_info.basic_constraints_path_length,
+            'is_self_signed':                cert_info.is_self_signed,
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
@@ -631,7 +758,7 @@ class KafkaPublisher:
 
     def _on_error(self, exc: Exception) -> None:
         logger.warning(f"Kafka delivery error: {exc}")
-        _kafka_delivery_errors.inc()
+        _kafka_delivery_errors.labels(node_name=_NODE_NAME).inc()
         # Nullify the producer so the next publish attempt triggers reconnect.
         # Without this, a broker that drops messages in-flight (broker down,
         # auth failure, topic deleted) would leave the producer in a state where
@@ -901,7 +1028,9 @@ class HealthServer:
         if uptime < self.grace_period:
             return True, f"grace_period ({int(self.grace_period - uptime)}s remaining)"
 
-        last_event = self.analyzer.metrics.last_event_timestamp._value.get()
+        last_event = self.analyzer.metrics.last_event_timestamp.labels(
+            node_name=self.analyzer.metrics._node_name
+        )._value.get()
 
         if last_event == 0:
             # No events ever seen — if we're past the grace period but the node
@@ -979,6 +1108,24 @@ class CertificateAnalyzer:
     CERT_EXTENSIONS  = {'.crt', '.pem', '.cert', '.cer', '.key'}
     JKS_EXTENSIONS   = {'.jks', '.keystore', '.truststore'}
     PKCS12_EXTENSIONS = {'.p12', '.pfx'}
+    # Destination ports considered TLS for outbound connect probing.
+    # These are checked in _handle_tls_connect_event as a Python-side guard
+    # complementing the DPort filter in the tcp-connect-tls Tetragon policy.
+    # Built-in default TLS port list — used when tls_outbound_ports is not
+    # configured. Must be kept in sync with the DPort filter in
+    # tetragon-policies/tcp-connect-tls.yaml (Tetragon filters first; this is
+    # a Python-side guard for events that pass the kernel filter).
+    TLS_OUTBOUND_PORTS = frozenset({
+        443,   # HTTPS
+        636,   # LDAPS
+        5671,  # AMQP/TLS
+        5672,  # AMQP (often TLS)
+        6380,  # Redis TLS
+        8443,  # HTTPS alternate
+        8883,  # MQTT/TLS
+        9093,  # Kafka TLS
+        9094,  # Kafka TLS alternate
+    })
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
@@ -989,7 +1136,12 @@ class CertificateAnalyzer:
                  demo_mode: bool = False,
                  fips_compliance_enabled: bool = True,
                  handshake_fips_enabled: bool = False,
-                 handshake_kafka_publisher: Optional['HandshakeKafkaPublisher'] = None):
+                 handshake_kafka_publisher: Optional['HandshakeKafkaPublisher'] = None,
+                 bind_probe_enabled: bool = False,
+                 connect_probe_enabled: bool = False,
+                 port_probe_timeout: float = 5.0,
+                 port_probe_connect_delay: float = 2.0,
+                 tls_outbound_ports: Optional[frozenset] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -1000,7 +1152,12 @@ class CertificateAnalyzer:
         self.fips_compliance_enabled = fips_compliance_enabled
         self.handshake_fips_enabled = handshake_fips_enabled
         self.handshake_kafka_publisher = handshake_kafka_publisher
-        self.metrics = PrometheusMetrics()
+        self._bind_probe_enabled = bind_probe_enabled
+        self._connect_probe_enabled = connect_probe_enabled
+        self._port_probe_timeout = port_probe_timeout
+        self._port_probe_connect_delay = port_probe_connect_delay
+        self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
+        self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
         # Paths that failed password attempts — cached to avoid repeating expensive
@@ -1010,7 +1167,16 @@ class CertificateAnalyzer:
         self.password_failed_paths: LRUCache = LRUCache()
         self.known_handshakes: LRUCache = LRUCache()
         self.health_server = health_server
-
+        self._known_policy_labels: Set[Tuple[str, str, str, str]] = set()
+        # Per-endpoint deduplication for TLS port probes.
+        # _probed_endpoints: "host:port" strings already probed — O(1) pre-check
+        #   prevents thread creation for endpoints whose cert is already known.
+        # _probe_in_flight: "host:port" strings currently being probed — prevents
+        #   duplicate concurrent probes when several events for a new endpoint
+        #   arrive before the first probe completes (e.g. connection pooling).
+        # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
+        self._probed_endpoints: Set[str] = set()
+        self._probe_in_flight: Set[str] = set()
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -1321,15 +1487,81 @@ class CertificateAnalyzer:
             common_name = ""
 
         san_dns_names = []
+        san_ip_addresses = []
         try:
             san_ext = cert.extensions.get_extension_for_oid(
                 x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
             )
             san_dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+            san_ip_addresses = [
+                str(ip) for ip in san_ext.value.get_values_for_type(x509.IPAddress)
+            ]
         except x509.ExtensionNotFound:
             pass
         except Exception as e:
             logger.debug(f"Error extracting SAN: {e}")
+
+        key_usage = None
+        try:
+            ku_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.KEY_USAGE
+            )
+            ku = ku_ext.value
+            flags = [
+                'digital_signature', 'content_commitment', 'key_encipherment',
+                'data_encipherment', 'key_agreement', 'key_cert_sign', 'crl_sign',
+            ]
+            key_usage = [f for f in flags if getattr(ku, f)]
+            if ku.key_agreement:
+                if ku.encipher_only:
+                    key_usage.append('encipher_only')
+                if ku.decipher_only:
+                    key_usage.append('decipher_only')
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Key Usage: {e}")
+
+        extended_key_usage = None
+        try:
+            eku_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.EXTENDED_KEY_USAGE
+            )
+            extended_key_usage = [
+                _EKU_NAMES.get(oid.dotted_string, oid.dotted_string)
+                for oid in eku_ext.value
+            ]
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Extended Key Usage: {e}")
+
+        is_ca = None
+        basic_constraints_path_length = None
+        try:
+            bc_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.BASIC_CONSTRAINTS
+            )
+            is_ca = bc_ext.value.ca
+            basic_constraints_path_length = bc_ext.value.path_length
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Basic Constraints: {e}")
+
+        # A certificate is self-signed when its subject name matches its issuer
+        # and the signature verifies against its own public key.
+        # verify_directly_issued_by() (cryptography ≥40) performs both checks atomically;
+        # on older versions (e.g. RHEL8 ships 3.2.1) fall back to name-match heuristic.
+        is_self_signed = False
+        try:
+            cert.verify_directly_issued_by(cert)
+            is_self_signed = True
+        except AttributeError:
+            # cryptography < 40: Name.__eq__ does proper attribute-set comparison.
+            is_self_signed = cert.subject == cert.issuer
+        except Exception:
+            pass
 
         # Compute SHA-256 of DER-encoded certificate when enabled.
         # Uses public_bytes() which is always available for a parsed cert object.
@@ -1345,7 +1577,11 @@ class CertificateAnalyzer:
         fips_result = None
         if self.fips_compliance_enabled:
             try:
-                fips_result = _fips_check(cert)
+                pub_key = cert.public_key()
+            except Exception:
+                pub_key = None
+            try:
+                fips_result = _fips_check(cert, pub_key=pub_key)
             except Exception as e:
                 logger.debug(f"FIPS check failed for cert {cert_index} in {cert_path}: {e}")
                 fips_result = FipsComplianceResult(
@@ -1366,6 +1602,7 @@ class CertificateAnalyzer:
             namespace=namespace,
             common_name=common_name,
             san_dns_names=san_dns_names,
+            san_ip_addresses=san_ip_addresses,
             cert_index=cert_index,
             checksum=checksum,
             key_algorithm=fips_result.key_algorithm if fips_result is not None else '',
@@ -1374,6 +1611,11 @@ class CertificateAnalyzer:
             curve_name=fips_result.curve_name if fips_result is not None else '',
             fips_compliant=fips_result.compliant if fips_result is not None else False,
             fips_violations=fips_result.violations if fips_result is not None else [],
+            key_usage=key_usage,
+            extended_key_usage=extended_key_usage,
+            is_ca=is_ca,
+            basic_constraints_path_length=basic_constraints_path_length,
+            is_self_signed=is_self_signed,
         )
 
     def analyze_certificate(
@@ -1521,6 +1763,17 @@ class CertificateAnalyzer:
         )
         if info.san_dns_names:
             detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
+        if info.san_ip_addresses:
+            detail_log(f"   SAN IP:  {', '.join(info.san_ip_addresses[:5])}")
+        if info.key_usage is not None or info.extended_key_usage is not None:
+            ku  = ', '.join(info.key_usage)         if info.key_usage         else '—'
+            eku = ', '.join(info.extended_key_usage) if info.extended_key_usage else '—'
+            detail_log(f"   Key Usage: {ku} | EKU: {eku}")
+        if info.is_ca is not None:
+            bc = "CA" if info.is_ca else "end-entity"
+            if info.is_ca and info.basic_constraints_path_length is not None:
+                bc += f" (path length {info.basic_constraints_path_length})"
+            detail_log(f"   Basic Constraints: {bc}")
         if info.fips_compliant:
             alg = info.key_algorithm
             if info.key_size:
@@ -1534,6 +1787,12 @@ class CertificateAnalyzer:
             logger.warning(
                 f"⚠️  FIPS NON-COMPLIANT: {display_path} — "
                 + " | ".join(info.fips_violations)
+            )
+        if info.is_self_signed:
+            logger.warning(
+                f"⚠️  SELF-SIGNED: {display_path} "
+                f"(process={info.process} CN={info.common_name})"
+                f"{k8s_ctx}"
             )
         if info.pod_name:
             detail_log(f"   Pod: {info.namespace}/{info.pod_name}")
@@ -1567,11 +1826,13 @@ class CertificateAnalyzer:
         so that _apply_pod_context can read all available pod metadata (name,
         namespace, workload, labels) in one place without multiple return values.
         """
-        cert_path    = None
-        process_name = ""
-        pid          = 0
-        namespace    = ""
-        tetragon_pod = None
+        cert_path      = None
+        process_name   = ""
+        pid            = 0
+        namespace      = ""
+        tetragon_pod   = None
+        parent_process = ""
+        parent_pid     = 0
 
         # Handle kprobe events
         if event.HasField('process_kprobe'):
@@ -1582,6 +1843,10 @@ class CertificateAnalyzer:
             if kprobe.process.HasField('pod'):
                 tetragon_pod = kprobe.process.pod
                 namespace    = tetragon_pod.namespace
+
+            if kprobe.HasField('parent'):
+                parent_process = kprobe.parent.binary
+                parent_pid = kprobe.parent.pid.value if kprobe.parent.HasField('pid') else 0
 
             for arg in kprobe.args:
                 if arg.HasField('file_arg'):
@@ -1607,6 +1872,10 @@ class CertificateAnalyzer:
                 tetragon_pod = uprobe.process.pod
                 namespace    = tetragon_pod.namespace
 
+            if uprobe.HasField('parent'):
+                parent_process = uprobe.parent.binary
+                parent_pid = uprobe.parent.pid.value if uprobe.parent.HasField('pid') else 0
+
             for arg in uprobe.args:
                 if arg.HasField('string_arg'):
                     path = arg.string_arg
@@ -1628,7 +1897,7 @@ class CertificateAnalyzer:
             if not cert_path.startswith(self.host_prefix):
                 cert_path = self.host_prefix + cert_path
 
-        return cert_path, process_name, pid, namespace, tetragon_pod
+        return cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid
 
     # ------------------------------------------------------------------
     # PKCS11 / NSS helpers (Java FIPS mode)
@@ -1682,6 +1951,8 @@ class CertificateAnalyzer:
         process_name = self._resolve_process_binary(uprobe.process.binary, pid)
         tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
         namespace = tetragon_pod.namespace if tetragon_pod else ""
+        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
+        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
 
         if self.filter_self_events:
             if "cert-analyzer" in process_name or "cert_analyzer" in process_name:
@@ -1753,7 +2024,7 @@ class CertificateAnalyzer:
         serial = str(cert.serial_number)
         synthetic_path = f"uprobe://NSC_CreateObject/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
         logger.info(
             f"🔍 Detected Java FIPS in-memory certificate: {synthetic_path} "
             f"by {process_name} (PID: {pid})"
@@ -1768,7 +2039,9 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name = event.node_name
+        cert_info.node_name      = event.node_name
+        cert_info.parent_process = parent_process
+        cert_info.parent_pid     = parent_pid
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -2068,6 +2341,8 @@ class CertificateAnalyzer:
         process_name = self._resolve_process_binary(uprobe.process.binary, pid)
         tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
         namespace = tetragon_pod.namespace if tetragon_pod else ""
+        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
+        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
 
         if self.filter_self_events:
             if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
@@ -2096,7 +2371,7 @@ class CertificateAnalyzer:
         symbol = uprobe.symbol if uprobe.symbol else "undetermined_symbol_name"
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
         logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
@@ -2108,7 +2383,9 @@ class CertificateAnalyzer:
             return False
 
         self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name = event.node_name
+        cert_info.node_name      = event.node_name
+        cert_info.parent_process = parent_process
+        cert_info.parent_pid     = parent_pid
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
@@ -2119,10 +2396,255 @@ class CertificateAnalyzer:
         self._update_cache_metrics()
         return True
 
+    # ------------------------------------------------------------------
+    # Port-probe helpers — port-scanner-like cert discovery
+    # ------------------------------------------------------------------
+
+    def _read_primary_ip_from_fib_trie(self, pid: int) -> Optional[str]:
+        """Read the primary non-loopback IPv4 from /proc/<pid>/net/fib_trie.
+
+        Follows the process's network namespace so this returns the container's
+        own IP, not the host IP. Used to probe containerised services that bind
+        to 0.0.0.0 inside their own network namespace.
+        """
+        try:
+            with open(f'/proc/{pid}/net/fib_trie', 'r') as f:
+                lines = f.readlines()
+        except OSError:
+            return None
+
+        ip_pat = re.compile(r'(\d+\.\d+\.\d+\.\d+)/32')
+        for i, line in enumerate(lines):
+            if 'LOCAL' in line and '/32 host' in line:
+                for j in range(i - 1, max(-1, i - 5), -1):
+                    m = ip_pat.search(lines[j])
+                    if m:
+                        ip = m.group(1)
+                        if not ip.startswith('127.') and ip != '0.0.0.0':
+                            return ip
+        return None
+
+    def _resolve_pid_ip(self, pid: int, bind_addr: str) -> str:
+        """Resolve the IP address to probe for a given bind event.
+
+        If the service bound to a specific address, use it directly. For
+        wildcard binds (0.0.0.0 / ::) on K8s, read the container's primary
+        IP from its network namespace via /proc/<pid>/net/fib_trie. Falls
+        back to 127.0.0.1 for bare-metal deployments where the process
+        is in the host network namespace.
+        """
+        if bind_addr and bind_addr not in ('0.0.0.0', '::', ''):
+            return bind_addr
+        ip = None
+        try:
+            ip = self._read_primary_ip_from_fib_trie(pid)
+        except Exception as e:
+            logger.debug(f"fib_trie lookup failed for PID {pid}: {e}")
+        return ip or '127.0.0.1'
+
+    def _probe_tls_endpoint(
+        self,
+        host: str,
+        port: int,
+        process_name: str,
+        pid: int,
+        node_name: str,
+        tetragon_pod,
+    ) -> None:
+        """Connect to host:port, complete a TLS handshake, and ingest the leaf cert.
+
+        Uses no-verify mode intentionally — the goal is certificate inventory,
+        not validation. A short delay before calling (port_probe_connect_delay)
+        gives the service time to finish TLS initialisation after binding.
+        """
+        synthetic_path = f'tls-probe://{host}:{port}'
+
+        if f'{host}:{port}' in self._probed_endpoints:
+            logger.debug(f"TLS probe: already probed {synthetic_path}")
+            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            return
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        try:
+            raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
+            with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
+                der_bytes = ssock.getpeercert(binary_form=True)
+        except Exception as e:
+            logger.debug(f"TLS probe failed {host}:{port}: {e}")
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        if not der_bytes:
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        try:
+            cert = x509.load_der_x509_certificate(der_bytes, default_backend())
+        except Exception as e:
+            logger.debug(f"TLS probe: DER parse failed for {host}:{port}: {e}")
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid)
+        if cert_info is None:
+            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            return
+
+        if tetragon_pod is not None:
+            self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name = node_name
+
+        self.metrics.update_certificate_metrics(cert_info)
+        self.log_certificate_status(cert_info)
+        self.known_certs[cert_info.unique_key] = cert_info
+        self._probed_endpoints.add(f'{host}:{port}')
+        self._update_cache_metrics()
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        self.metrics.tls_port_probes_total.labels(status='success').inc()
+        logger.info(
+            f"TLS probe: discovered cert at {host}:{port} "
+            f"CN={cert_info.common_name} process={process_name}"
+        )
+
+    def _handle_tls_bind_event(self, event) -> None:
+        """Extract the bound address/port from a security_socket_bind or sys_bind
+        kprobe event, resolve the probe target IP, and schedule a TLS probe.
+
+        Handles two policy variants:
+          - security_socket_bind (experimental policy): sockaddr decoded by Tetragon
+            into sockaddr_arg — port in arg[1].sockaddr_arg.port
+          - sys_bind (fixed policy): raw sockaddr bytes in arg[1].bytes_arg
+        """
+        kprobe = event.process_kprobe
+        fn = kprobe.function_name
+        pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(kprobe.process.binary, pid)
+        tetragon_pod = kprobe.process.pod if kprobe.process.HasField('pod') else None
+        node_name = event.node_name
+
+        port = 0
+        bind_addr = '0.0.0.0'
+
+        if fn == 'security_socket_bind':
+            # arg[0]=sock (socket struct), arg[1]=sockaddr_arg (address being bound)
+            for arg in kprobe.args:
+                if arg.HasField('sockaddr_arg') and arg.sockaddr_arg.port:
+                    port = arg.sockaddr_arg.port
+                    bind_addr = arg.sockaddr_arg.addr or '0.0.0.0'
+                    break
+
+        elif fn == 'sys_bind':
+            # arg[0]=int (fd), arg[1]=char_buf (raw sockaddr struct)
+            if len(kprobe.args) >= 2 and kprobe.args[1].HasField('bytes_arg'):
+                data = bytes(kprobe.args[1].bytes_arg)
+                if len(data) >= 8:
+                    family = struct.unpack_from('<H', data, 0)[0]
+                    port = struct.unpack_from('>H', data, 2)[0]
+                    if family == 2:  # AF_INET
+                        bind_addr = '.'.join(str(b) for b in data[4:8])
+
+        if not port:
+            logger.debug(f"TLS bind event: could not extract port from {fn} event")
+            return
+
+        host = self._resolve_pid_ip(pid, bind_addr)
+        delay = self._port_probe_connect_delay
+
+        endpoint_key = f'{host}:{port}'
+        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+            logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
+            return
+        self._probe_in_flight.add(endpoint_key)
+
+        def _probe():
+            if delay:
+                time.sleep(delay)
+            try:
+                self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod)
+            except Exception as e:
+                logger.debug(f"TLS probe thread error {host}:{port}: {e}")
+            finally:
+                self._probe_in_flight.discard(endpoint_key)
+
+        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
+        t.start()
+        logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
+
+    def _handle_tls_connect_event(self, event) -> None:
+        """Extract destination address/port from a tcp_connect kprobe event and schedule a TLS probe.
+
+        tcp_connect fires when a process initiates an outbound TCP connection.
+        The sock_arg carries the destination address and port. We probe that
+        remote endpoint immediately — no startup delay is needed because the
+        remote server is already running when our process connects to it.
+        """
+        kprobe = event.process_kprobe
+        pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(kprobe.process.binary, pid)
+        tetragon_pod = kprobe.process.pod if kprobe.process.HasField('pod') else None
+        node_name = event.node_name
+
+        daddr = ''
+        dport = 0
+        for arg in kprobe.args:
+            if arg.HasField('sock_arg'):
+                daddr = arg.sock_arg.daddr
+                dport = arg.sock_arg.dport
+                break
+
+        if not dport or not daddr:
+            logger.debug("tcp_connect event: could not extract destination address/port")
+            return
+
+        if dport not in self._tls_outbound_ports:
+            logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
+            return
+
+        endpoint_key = f'{daddr}:{dport}'
+        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+            logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
+            return
+        self._probe_in_flight.add(endpoint_key)
+
+        def _probe():
+            try:
+                self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod)
+            except Exception as e:
+                logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
+            finally:
+                self._probe_in_flight.discard(endpoint_key)
+
+        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
+        t.start()
+        logger.debug(
+            f"Scheduled TLS outbound probe {daddr}:{dport} pid={pid} process={process_name}"
+        )
+
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
-        cert_path, process_name, pid, namespace, tetragon_pod = \
+
+        # Bind and outbound-connect events carry no cert paths — route them to
+        # port-probe handlers and return. Other kprobe/uprobe events fall through
+        # to the normal cert extraction path below.
+        if event.HasField('process_kprobe'):
+            fn = getattr(event.process_kprobe, 'function_name', '')
+            if fn in ('security_socket_bind', 'sys_bind'):
+                if self._bind_probe_enabled:
+                    self._handle_tls_bind_event(event)
+                return
+            if fn == 'tcp_connect':
+                if self._connect_probe_enabled:
+                    self._handle_tls_connect_event(event)
+                return
+
+        cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)
         pod_name = tetragon_pod.name if tetragon_pod is not None else ""
         logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
@@ -2169,7 +2691,7 @@ class CertificateAnalyzer:
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
         # even when all active keystores are password-protected and being skipped.
-        self.metrics.last_event_timestamp.set(time.time())
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
 
         # Check if we've already analyzed this file
         if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
@@ -2197,7 +2719,9 @@ class CertificateAnalyzer:
         for cert_info in cert_infos:
             # Apply pod context: Tetragon event first, k8s API for extras
             self._apply_pod_context(cert_info, tetragon_pod)
-            cert_info.node_name = event.node_name
+            cert_info.node_name     = event.node_name
+            cert_info.parent_process = parent_process
+            cert_info.parent_pid     = parent_pid
 
             self.metrics.update_certificate_metrics(cert_info)
             self.log_certificate_status(cert_info)
@@ -2255,7 +2779,7 @@ class CertificateAnalyzer:
             and runtime_version != 'unknown'
             and build_version   == runtime_version
         )
-        self.metrics.tetragon_version_match.set(1 if versions_match else 0)
+        self.metrics.tetragon_version_match.labels(node_name=self.metrics._node_name).set(1 if versions_match else 0)
 
         if build_version == 'unknown' or runtime_version == 'unknown':
             logger.warning(
@@ -2300,6 +2824,84 @@ class CertificateAnalyzer:
         thread.start()
         logger.info(f"Started Tetragon version monitor (interval: {interval}s)")
 
+    def check_tetragon_policies(self, stub) -> None:
+        """
+        Query Tetragon for all tracing policies and update Prometheus metrics.
+
+        Exposes two metrics:
+          - tetragon_policy_info{name, namespace, state}=1  (presence per policy)
+          - tetragon_policies_total{state}=N                (count per state)
+
+        Stale series are removed when a policy is deleted or changes state,
+        so the metrics always reflect the live policy table. Failures are
+        logged as warnings and never propagate.
+        """
+        if not hasattr(sensors_pb2, 'ListTracingPoliciesRequest'):
+            logger.warning(
+                "ListTracingPoliciesRequest not available in Tetragon protobuf "
+                "bindings; skipping policy check"
+            )
+            return
+        try:
+            response = stub.ListTracingPolicies(
+                sensors_pb2.ListTracingPoliciesRequest(),
+                timeout=5.0,
+            )
+        except Exception as e:
+            logger.warning(f"Could not list Tetragon tracing policies: {e}")
+            return
+
+        new_labels: Set[Tuple[str, str, str, str]] = set()
+        state_counts: Dict[str, int] = {}
+
+        for policy in response.policies:
+            state_str = _POLICY_STATE_NAMES.get(policy.state, 'unknown')
+            ns = policy.namespace or ''
+            key = (policy.name, ns, state_str, self.metrics._node_name)
+            new_labels.add(key)
+            state_counts[state_str] = state_counts.get(state_str, 0) + 1
+
+        # Remove series for policies that were deleted or changed state
+        for name, ns, state_str, node_name in self._known_policy_labels - new_labels:
+            self.metrics.tetragon_policy_info.remove(name, ns, state_str, node_name)
+
+        for name, ns, state_str, node_name in new_labels:
+            self.metrics.tetragon_policy_info.labels(
+                name=name, namespace=ns, state=state_str, node_name=node_name
+            ).set(1)
+
+        # Always emit a count for every known state so queries don't return no-data
+        for state_str in _POLICY_STATE_NAMES.values():
+            self.metrics.tetragon_policies_total.labels(state=state_str, node_name=self.metrics._node_name).set(
+                state_counts.get(state_str, 0)
+            )
+
+        self._known_policy_labels = new_labels
+        logger.debug(f"Tetragon policy states: {state_counts}")
+
+    def _start_policy_monitor(self, stub) -> None:
+        """
+        Start a background daemon thread that periodically re-queries tracing
+        policy state and updates Prometheus metrics.
+
+        Interval is configurable via TETRAGON_POLICY_CHECK_INTERVAL env var
+        (default: 60 seconds).
+        """
+        interval = int(os.getenv('TETRAGON_POLICY_CHECK_INTERVAL', '60'))
+
+        def _monitor():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.check_tetragon_policies(stub)
+                except Exception as e:
+                    logger.warning(f"Policy monitor error: {e}")
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.name = 'tetragon-policy-monitor'
+        thread.start()
+        logger.info(f"Started Tetragon policy monitor (interval: {interval}s)")
+
     def start(self):
         """
         Start listening to Tetragon events with automatic reconnection.
@@ -2327,9 +2929,11 @@ class CertificateAnalyzer:
         if self.health_server:
             self.health_server.set_channel(channel)
 
-        # Version check on startup, then periodically in background
+        # Version and policy checks on startup, then periodically in background
         self.check_tetragon_version(stub)
         self._start_version_monitor(stub)
+        self.check_tetragon_policies(stub)
+        self._start_policy_monitor(stub)
 
         request = events_pb2.GetEventsRequest(
             allow_list=[
@@ -2349,7 +2953,8 @@ class CertificateAnalyzer:
             while True:
                 try:
                     logger.info("Listening for Tetragon certificate events...")
-                    self.metrics.analyzer_healthy.set(1)
+                    self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(1)
+                    self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(1)
 
                     for response in stub.GetEvents(request):
                         try:
@@ -2365,7 +2970,8 @@ class CertificateAnalyzer:
                     retry_delay = 5
 
                 except grpc.RpcError as e:
-                    self.metrics.analyzer_healthy.set(0)
+                    self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
+                    self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
                     logger.warning(
                         f"Tetragon connection lost ({e.code().name}), "
                         f"retrying in {retry_delay}s..."
@@ -2374,7 +2980,8 @@ class CertificateAnalyzer:
                     retry_delay = min(retry_delay * 2, max_delay)
 
                 except Exception as e:
-                    self.metrics.analyzer_healthy.set(0)
+                    self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
+                    self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
                     logger.error(
                         f"Unexpected error in event stream: {e} — "
                         f"retrying in {retry_delay}s",
@@ -2385,7 +2992,8 @@ class CertificateAnalyzer:
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")
-            self.metrics.analyzer_healthy.set(0)
+            self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
+            self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
         finally:
             channel.close()
 
@@ -2507,6 +3115,23 @@ def main():
     handshake_fips_enabled = cfg(cp, 'handshake', 'enabled',     'HANDSHAKE_FIPS_ENABLED', 'false').lower() == 'true'
     handshake_kafka_topic  = cfg(cp, 'handshake', 'kafka_topic', 'HANDSHAKE_KAFKA_TOPIC',  'tls-handshake-config')
 
+    # ── Port probe (optional) ─────────────────────────────────────────────────
+    bind_probe_enabled    = cfg(cp, 'port_probe', 'bind_probe_enabled',    'BIND_PROBE_ENABLED',    'false').lower() == 'true'
+    connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
+    port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
+    port_probe_connect_delay = float(cfg(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2'))
+    _tls_ports_raw = cfg(cp, 'port_probe', 'tls_outbound_ports', 'TLS_OUTBOUND_PORTS', '')
+    if _tls_ports_raw.strip():
+        try:
+            tls_outbound_ports: Optional[frozenset] = frozenset(
+                int(p.strip()) for p in _tls_ports_raw.split(',') if p.strip()
+            )
+        except ValueError as e:
+            logger.error(f"Invalid tls_outbound_ports value '{_tls_ports_raw}': {e} — using built-in defaults")
+            tls_outbound_ports = None
+    else:
+        tls_outbound_ports = None
+
     # ── Kafka (optional) ──────────────────────────────────────────────────────
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
     kafka_bootstrap        = cfg(cp, 'kafka', 'bootstrap_servers', 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
@@ -2543,6 +3168,15 @@ def main():
         logger.info(f"Kafka security:    {kafka_security}")
         if handshake_fips_enabled:
             logger.info(f"Handshake topic:   {handshake_kafka_topic}")
+    logger.info(f"Bind probe:        {'enabled' if bind_probe_enabled else 'disabled'}")
+    logger.info(f"Connect probe:     {'enabled' if connect_probe_enabled else 'disabled'}")
+    if bind_probe_enabled or connect_probe_enabled:
+        logger.info(f"Port probe timeout:        {port_probe_timeout}s")
+    if bind_probe_enabled:
+        logger.info(f"Port probe connect delay:  {port_probe_connect_delay}s")
+    if connect_probe_enabled:
+        _effective_ports = tls_outbound_ports if tls_outbound_ports is not None else CertificateAnalyzer.TLS_OUTBOUND_PORTS
+        logger.info(f"TLS outbound ports:        {sorted(_effective_ports)}")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -2592,7 +3226,12 @@ def main():
                                    demo_mode=demo_mode,
                                    fips_compliance_enabled=fips_compliance_enabled,
                                    handshake_fips_enabled=handshake_fips_enabled,
-                                   handshake_kafka_publisher=handshake_kafka_publisher)
+                                   handshake_kafka_publisher=handshake_kafka_publisher,
+                                   bind_probe_enabled=bind_probe_enabled,
+                                   connect_probe_enabled=connect_probe_enabled,
+                                   port_probe_timeout=port_probe_timeout,
+                                   port_probe_connect_delay=port_probe_connect_delay,
+                                   tls_outbound_ports=tls_outbound_ports)
 
     health = HealthServer(
         analyzer=analyzer,

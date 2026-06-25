@@ -63,13 +63,16 @@ def _get_key_info(pub_key) -> Tuple[str, int, str]:
     return 'unknown', 0, ''
 
 
-def check_certificate(cert: x509.Certificate) -> FipsComplianceResult:
+def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsComplianceResult:
     """
     Check an X.509 certificate against FIPS 140-2/140-3 algorithm requirements.
 
     Checks:
     - Signature hash algorithm (SHA-256 or stronger required; SHA-1 and MD5 are violations)
     - Public key algorithm, minimum key size, and approved EC curve
+
+    pub_key may be supplied by the caller to avoid a second cert.public_key() extraction
+    when the key object was already obtained during certificate info extraction.
 
     Returns a FipsComplianceResult with compliant=True only when no violations are found.
     """
@@ -96,7 +99,7 @@ def check_certificate(cert: x509.Certificate) -> FipsComplianceResult:
     key_size = 0
     curve_name = ''
     try:
-        pub = cert.public_key()
+        pub = pub_key if pub_key is not None else cert.public_key()
         algorithm, key_size, curve_name = _get_key_info(pub)
     except Exception:
         violations.append("Could not read public key")

@@ -75,7 +75,7 @@ except ImportError:
     JKS_AVAILABLE = False
 
 # ── cert_analyzer import ──────────────────────────────────────────────────────
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from prometheus_client import REGISTRY
     from cert_analyzer import CertificateAnalyzer

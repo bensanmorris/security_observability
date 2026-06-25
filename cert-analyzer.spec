@@ -213,6 +213,44 @@ chown -R %{ana_user}:%{ana_group} %{ana_log}
 chown    root:%{ana_group}         %{ana_conf}/cert-analyzer.conf
 chmod    0640                      %{ana_conf}/cert-analyzer.conf
 
+# Append config sections that may be absent in configs from earlier releases.
+# %config(noreplace) preserves operator edits but means new default sections are
+# never written to existing files — this block bridges that gap on upgrade.
+_CONF=%{ana_conf}/cert-analyzer.conf
+if [ -f "$_CONF" ] && ! grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null; then
+    printf '\n[port_probe]\n' >> "$_CONF" \
+    && printf '# Inbound probe: trigger a TLS handshake when a process binds a port.\n' >> "$_CONF" \
+    && printf '# Requires experimental-tls-service-tracking.yaml to be loaded.\n' >> "$_CONF" \
+    && printf '# Low event volume — safe to enable broadly.\n' >> "$_CONF" \
+    && printf 'bind_probe_enabled = false\n' >> "$_CONF" \
+    && printf '\n# Outbound probe: trigger a TLS handshake when a process connects to a common\n' >> "$_CONF" \
+    && printf '# TLS port (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094).\n' >> "$_CONF" \
+    && printf '# Requires tcp-connect-tls.yaml to be loaded.\n' >> "$_CONF" \
+    && printf '# Each unique host:port is probed at most once (O(1) dedup);\n' >> "$_CONF" \
+    && printf '# enable with care on hosts with high outbound connection rates.\n' >> "$_CONF" \
+    && printf 'connect_probe_enabled = false\n' >> "$_CONF" \
+    && printf '\n# Comma-separated list of destination ports treated as TLS for outbound\n' >> "$_CONF" \
+    && printf '# probing. Leave commented to use the built-in defaults. If you change\n' >> "$_CONF" \
+    && printf '# this list, update the DPort filter in tcp-connect-tls.yaml to match.\n' >> "$_CONF" \
+    && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
+    && printf '\n# Seconds to wait after a bind event before probing (bind_probe_enabled only).\n' >> "$_CONF" \
+    && printf 'connect_delay_seconds = 2\n' >> "$_CONF" \
+    && printf '\n# Seconds before a TLS probe connection attempt times out.\n' >> "$_CONF" \
+    && printf 'timeout_seconds = 5\n' >> "$_CONF" \
+    || echo "WARNING: failed to append [port_probe] section to $_CONF" >&2
+fi
+# Hosts upgraded from a release that had [port_probe] but not tls_outbound_ports:
+# append just the new key block so operators see it and can opt in.
+if [ -f "$_CONF" ] && grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null \
+        && ! grep -q '^#\?tls_outbound_ports' "$_CONF" 2>/dev/null; then
+    printf '\n# Comma-separated list of destination ports treated as TLS for outbound\n' >> "$_CONF" \
+    && printf '# probing. Leave commented to use the built-in defaults. If you change\n' >> "$_CONF" \
+    && printf '# this list, update the DPort filter in tcp-connect-tls.yaml to match.\n' >> "$_CONF" \
+    && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
+    || echo "WARNING: failed to append tls_outbound_ports to $_CONF" >&2
+fi
+unset _CONF
+
 # Reload systemd to pick up the Tetragon drop-in
 systemctl daemon-reload >/dev/null 2>&1 || true
 
