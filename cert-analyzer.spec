@@ -122,9 +122,10 @@ install -d %{buildroot}%{ana_venv}
 install -d %{buildroot}%{ana_conf}
 install -d %{buildroot}%{ana_log}
 
-# Main analyzer script and FIPS compliance checker
+# Main analyzer script, agent package, and FIPS compliance checker
 install -m 0755 cert_analyzer.py          %{buildroot}%{ana_home}/cert_analyzer.py
 install -m 0644 fips_compliance_checker.py %{buildroot}%{ana_home}/fips_compliance_checker.py
+cp -r agent %{buildroot}%{ana_home}/agent
 
 # Generated Tetragon protos — pre-built and included in the source tarball
 cp -r tetragon %{buildroot}%{ana_home}/tetragon
@@ -281,6 +282,7 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 %dir %{ana_home}
 %attr(0755, %{ana_user}, %{ana_group}) %{ana_home}/cert_analyzer.py
 %attr(0644, %{ana_user}, %{ana_group}) %{ana_home}/fips_compliance_checker.py
+%{ana_home}/agent/
 %{ana_home}/tetragon/
 %{ana_venv}/
 

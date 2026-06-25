@@ -1,0 +1,89 @@
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Optional, List
+
+
+@dataclass
+class CertificateInfo:
+    """Information extracted from an X.509 certificate"""
+    path: str
+    subject: str
+    issuer: str
+    serial_number: str
+    not_before: datetime
+    not_after: datetime
+    process: str
+    pid: int
+    namespace: str = ""
+    common_name: str = ""
+    san_dns_names: list = field(default_factory=list)
+    san_ip_addresses: list = field(default_factory=list)
+    cert_index: int = 0
+    # Kubernetes context sourced directly from the Tetragon event Pod proto
+    pod_name: str = ""
+    pod_uid: str = ""
+    pod_labels: dict = None
+    pod_annotations: dict = None
+    workload_kind: str = ""
+    workload_name: str = ""
+    node_name: str = ""
+    app_label: str = ""                      # derived from pod_labels
+    container_id: str = ""
+    container_name: str = ""
+    container_image: str = ""
+    container_image_id: str = ""
+    container_privileged: bool = False
+    container_pid: Optional[int] = None
+    container_start_time: Optional[datetime] = None
+    container_maybe_exec_probe: bool = False
+    # Spawning process — binary path and PID of the process that launched
+    # the cert loader. Empty when Tetragon's process cache didn't have the
+    # parent at event time (common at startup).
+    parent_process: str = ""
+    parent_pid: int = 0
+    # SHA-256 of the DER-encoded certificate bytes. Empty string when
+    # CERT_CHECKSUM_ENABLED=false (the default).
+    checksum: str = ""
+    # FIPS 140-2/140-3 compliance fields — populated by extract_certificate_info()
+    key_algorithm: str = ""    # RSA, EC, DSA, Ed25519, Ed448, unknown
+    key_size: int = 0          # bits; 0 for EdDSA
+    signature_hash: str = ""   # sha256, sha1, md5, etc.
+    curve_name: str = ""       # secp256r1 etc. (EC only)
+    fips_compliant: bool = False
+    fips_violations: list = field(default_factory=list)
+    # RFC 5280 extension fields — None means the extension is absent from the certificate
+    key_usage: Optional[list] = None
+    extended_key_usage: Optional[list] = None
+    is_ca: Optional[bool] = None
+    basic_constraints_path_length: Optional[int] = None
+    # True when the certificate is self-signed (subject == issuer and signature
+    # verifies against its own public key). Root CA certificates are legitimately
+    # self-signed; self-signed leaf certificates are typically a configuration risk.
+    is_self_signed: bool = False
+
+    @property
+    def days_until_expiry(self) -> float:
+        """Calculate days until certificate expires"""
+        delta = self.not_after - datetime.utcnow()
+        return delta.total_seconds() / 86400
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if certificate has expired"""
+        return datetime.utcnow() > self.not_after
+
+    def expires_soon(self, days: int = 30) -> bool:
+        """Check if certificate expires within specified days"""
+        return 0 < self.days_until_expiry < days
+
+    @property
+    def unique_key(self) -> str:
+        """Unique identifier for this certificate"""
+        return f"{self.path}:{self.cert_index}:{self.serial_number}"
+
+    @property
+    def workload(self) -> str:
+        """Human-readable workload reference e.g. DaemonSet/cert-analyzer"""
+        if self.workload_kind and self.workload_name:
+            return f"{self.workload_kind}/{self.workload_name}"
+        return ""
