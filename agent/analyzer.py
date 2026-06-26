@@ -18,14 +18,15 @@ if TYPE_CHECKING:
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
-from fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
+from .fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
 
 # Import generated Tetragon protos
 try:
     from tetragon import tetragon_pb2, events_pb2, sensors_pb2, sensors_pb2_grpc
-except ImportError:
-    print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
-    sys.exit(1)
+except ImportError as _tetragon_err:
+    raise ImportError(
+        "Tetragon protobuf files not found. Run extras/generate_tetragon_protos.sh first."
+    ) from _tetragon_err
 
 # Import JKS parser - optional, degrades gracefully if unavailable
 # Install with: pip install pyjks
@@ -120,9 +121,10 @@ class CertificateAnalyzer:
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
-        self.metrics.cache_known_certs_size.set(len(self.known_certs))
-        self.metrics.cache_processed_paths_size.set(len(self.processed_paths))
-        self.metrics.cache_password_failed_size.set(len(self.password_failed_paths))
+        self.metrics.cache_known_certs_size.labels(node_name=self.metrics._node_name).set(len(self.known_certs))
+        self.metrics.cache_processed_paths_size.labels(node_name=self.metrics._node_name).set(len(self.processed_paths))
+        self.metrics.cache_password_failed_size.labels(node_name=self.metrics._node_name).set(len(self.password_failed_paths))
+        self.metrics.update_process_metrics()
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -1454,7 +1456,7 @@ class CertificateAnalyzer:
         as warnings and never propagate — a version mismatch should alert but
         must never prevent the analyzer from starting.
         """
-        if not hasattr(tetragon_pb2, 'GetVersionRequest'):
+        if not hasattr(sensors_pb2, 'GetVersionRequest'):
             logger.warning(
                 "GetVersionRequest is not available in this version of the "
                 "Tetragon protobuf bindings (requires > v1.1.0); skipping version check"
@@ -1462,7 +1464,7 @@ class CertificateAnalyzer:
             return 'unknown'
         try:
             response = stub.GetVersion(
-                tetragon_pb2.GetVersionRequest(),
+                sensors_pb2.GetVersionRequest(),
                 timeout=5.0,
             )
             version = getattr(response, 'version', '').strip()
@@ -1481,7 +1483,7 @@ class CertificateAnalyzer:
         runtime_version = self.get_runtime_tetragon_version(stub)
         build_version   = TETRAGON_BUILD_VERSION
 
-        self.metrics.tetragon_version_info.info({
+        self.metrics.tetragon_version_info.labels(node_name=self.metrics._node_name).info({
             'build_version':   build_version,
             'runtime_version': runtime_version,
         })

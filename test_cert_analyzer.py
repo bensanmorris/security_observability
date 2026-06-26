@@ -1616,7 +1616,8 @@ class TestCacheIntegration:
     def test_cache_max_size_metric_set_on_init(self, analyzer):
         """cert_analyzer_cache_max_size gauge is set at startup."""
         import cert_analyzer as _ca
-        val = analyzer.metrics.cache_max_size._value.get()
+        node = analyzer.metrics._node_name
+        val = analyzer.metrics.cache_max_size.labels(node_name=node)._value.get()
         assert val == _ca.CACHE_MAX_SIZE
 
     def test_cache_size_metrics_updated_after_analyze(self, analyzer, temp_dir):
@@ -1627,7 +1628,8 @@ class TestCacheIntegration:
 
         analyzer.analyze_certificate(path, "test", 1)
 
-        assert analyzer.metrics.cache_processed_paths_size._value.get() == 1
+        node = analyzer.metrics._node_name
+        assert analyzer.metrics.cache_processed_paths_size.labels(node_name=node)._value.get() == 1
 
     def test_cache_size_metrics_updated_after_password_failure(
         self, analyzer, temp_dir, monkeypatch
@@ -1642,7 +1644,8 @@ class TestCacheIntegration:
 
         analyzer.parse_pkcs12_certificates(path)
 
-        assert analyzer.metrics.cache_password_failed_size._value.get() == 1
+        node = analyzer.metrics._node_name
+        assert analyzer.metrics.cache_password_failed_size.labels(node_name=node)._value.get() == 1
 
     def test_known_certs_evicts_lru_when_full(self, analyzer, temp_dir):
         """
@@ -1919,7 +1922,7 @@ class TestFipsComplianceEnabled:
         calls = []
 
         import agent.analyzer as _ca
-        from fips_compliance_checker import check_certificate as _real
+        from agent.fips_compliance_checker import check_certificate as _real
 
         def _spy(cert, **kwargs):
             calls.append(cert)
@@ -1941,7 +1944,7 @@ class TestFipsComplianceEnabled:
         calls = []
 
         import agent.analyzer as _ca
-        from fips_compliance_checker import check_certificate as _real
+        from agent.fips_compliance_checker import check_certificate as _real
 
         def _spy(cert, **kwargs):
             calls.append(cert)
@@ -2619,7 +2622,7 @@ class TestTetragonPolicyCheck:
     ):
         """Tetragon <= v1.1.0 lacks GetVersionRequest — must return 'unknown' and warn."""
         import agent.analyzer as _ca
-        monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
+        monkeypatch.delattr(_ca.sensors_pb2, 'GetVersionRequest')
         stub = _MockVersionStub(version='v1.0.0')
 
         with caplog.at_level(logging.WARNING, logger='agent.analyzer'):
@@ -2633,7 +2636,7 @@ class TestTetragonPolicyCheck:
     ):
         """No RPC call is made when GetVersionRequest is missing from the bindings."""
         import agent.analyzer as _ca
-        monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
+        monkeypatch.delattr(_ca.sensors_pb2, 'GetVersionRequest')
 
         calls = []
         stub = _MockVersionStub(version='v1.0.0')

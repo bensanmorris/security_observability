@@ -92,7 +92,7 @@ python3.11 -m venv %{_builddir}/venv
 %{_builddir}/venv/bin/pip install --quiet --upgrade pip
 
 # Install all runtime dependencies
-%{_builddir}/venv/bin/pip install --quiet \
+%{_builddir}/venv/bin/pip install \
     grpcio==1.60.1 \
     grpcio-tools==1.60.1 \
     protobuf==4.25.3 \
@@ -101,6 +101,7 @@ python3.11 -m venv %{_builddir}/venv
     pyyaml==6.0.1 \
     kubernetes>=28.1.0 \
     pyjks==20.0.0 \
+    psutil>=5.9.0 \
     kafka-python==2.0.2
 
 # Make the venv relocatable by rewriting the shebang paths.
@@ -122,9 +123,8 @@ install -d %{buildroot}%{ana_venv}
 install -d %{buildroot}%{ana_conf}
 install -d %{buildroot}%{ana_log}
 
-# Main analyzer script, agent package, and FIPS compliance checker
+# Main analyzer script and agent package
 install -m 0755 cert_analyzer.py          %{buildroot}%{ana_home}/cert_analyzer.py
-install -m 0644 fips_compliance_checker.py %{buildroot}%{ana_home}/fips_compliance_checker.py
 cp -r agent %{buildroot}%{ana_home}/agent
 
 # Generated Tetragon protos — pre-built and included in the source tarball
@@ -281,7 +281,6 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 # Application
 %dir %{ana_home}
 %attr(0755, %{ana_user}, %{ana_group}) %{ana_home}/cert_analyzer.py
-%attr(0644, %{ana_user}, %{ana_group}) %{ana_home}/fips_compliance_checker.py
 %{ana_home}/agent/
 %{ana_home}/tetragon/
 %{ana_venv}/

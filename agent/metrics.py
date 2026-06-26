@@ -1,4 +1,5 @@
 import logging
+import psutil
 from datetime import datetime
 from prometheus_client import Gauge, Counter, Info
 
@@ -117,6 +118,7 @@ class PrometheusMetrics:
         self.tetragon_version_info = Info(
             'cert_analyzer_tetragon_version',
             'Tetragon version information for build and runtime',
+            ['node_name'],
         )
 
         self.tetragon_version_match = Gauge(
@@ -139,20 +141,36 @@ class PrometheusMetrics:
         self.cache_known_certs_size = Gauge(
             'cert_analyzer_cache_known_certs_size',
             'Number of entries in the known_certs LRU cache',
+            ['node_name'],
         )
         self.cache_processed_paths_size = Gauge(
             'cert_analyzer_cache_processed_paths_size',
             'Number of entries in the processed_paths LRU cache',
+            ['node_name'],
         )
         self.cache_password_failed_size = Gauge(
             'cert_analyzer_cache_password_failed_size',
             'Number of entries in the password_failed_paths LRU cache',
+            ['node_name'],
         )
         self.cache_max_size = Gauge(
             'cert_analyzer_cache_max_size',
             'Configured maximum size for all LRU caches',
+            ['node_name'],
         )
-        self.cache_max_size.set(CACHE_MAX_SIZE)
+        self.cache_max_size.labels(node_name=self._node_name).set(CACHE_MAX_SIZE)
+
+        self._process = psutil.Process()
+        self.process_rss_bytes = Gauge(
+            'cert_analyzer_process_rss_bytes',
+            'Resident set size of the cert-analyzer process in bytes',
+            ['node_name'],
+        )
+        self.process_cpu_seconds = Gauge(
+            'cert_analyzer_process_cpu_seconds_total',
+            'Cumulative user+system CPU seconds consumed by the cert-analyzer process',
+            ['node_name'],
+        )
 
         self.tls_port_probes_total = Counter(
             'tls_port_probes_total',
@@ -254,3 +272,9 @@ class PrometheusMetrics:
             node_name=info.node_name,
             is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
         ).set(1 if info.is_self_signed else 0)
+
+    def update_process_metrics(self) -> None:
+        mem = self._process.memory_info()
+        cpu = self._process.cpu_times()
+        self.process_rss_bytes.labels(node_name=self._node_name).set(mem.rss)
+        self.process_cpu_seconds.labels(node_name=self._node_name).set(cpu.user + cpu.system)

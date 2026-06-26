@@ -254,6 +254,16 @@
           "instant": true,
           "format": "table",
           "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_tetragon_version_info{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "G"
         }
       ],
       "transformations": [
@@ -275,27 +285,33 @@
               "Time 4": true,
               "Time 5": true,
               "Time 6": true,
+              "Time 7": true,
               "__name__": true,
               "instance": true,
               "job": true,
               "state": true,
               "state 1": true,
-              "state 2": true
+              "state 2": true,
+              "Value #G": true
             },
             "indexByName": {
               "node_name": 0,
               "Value #A": 1,
               "Value #B": 2,
               "Value #C": 3,
-              "Value #D": 4,
-              "Value #E": 5,
-              "Value #F": 6
+              "build_version": 4,
+              "runtime_version": 5,
+              "Value #D": 6,
+              "Value #E": 7,
+              "Value #F": 8
             },
             "renameByName": {
               "node_name": "Node",
               "Value #A": "Analyzer Health",
               "Value #B": "Tetragon Connected",
               "Value #C": "Version Match",
+              "build_version": "Build Version",
+              "runtime_version": "Runtime Version",
               "Value #D": "Active Policies",
               "Value #E": "Policy Errors",
               "Value #F": "Kafka Err/s"
@@ -1242,7 +1258,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "tls_certificate_last_accessed_timestamp{namespace=~\"$namespace\",node_name=~\"$node\"}",
+          "expr": "tls_certificate_last_accessed_timestamp{namespace=~\"$namespace\",node_name=~\"$node\"} * 1000",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -2490,8 +2506,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_known_certs_size",
-          "legendFormat": "known_certs",
+          "expr": "cert_analyzer_cache_known_certs_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} known_certs",
           "refId": "A"
         },
         {
@@ -2499,8 +2515,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_processed_paths_size",
-          "legendFormat": "processed_paths",
+          "expr": "cert_analyzer_cache_processed_paths_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} processed_paths",
           "refId": "B"
         },
         {
@@ -2508,8 +2524,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_password_failed_size",
-          "legendFormat": "password_failed",
+          "expr": "cert_analyzer_cache_password_failed_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} password_failed",
           "refId": "C"
         },
         {
@@ -2517,8 +2533,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_max_size",
-          "legendFormat": "max (cap)",
+          "expr": "cert_analyzer_cache_max_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} max (cap)",
           "refId": "D"
         }
       ],
@@ -2597,9 +2613,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_known_certs_size / cert_analyzer_cache_max_size * 100",
+          "expr": "cert_analyzer_cache_known_certs_size{node_name=~\"$node\"} / cert_analyzer_cache_max_size{node_name=~\"$node\"} * 100",
           "instant": true,
-          "legendFormat": "known_certs",
+          "legendFormat": "{{node_name}} known_certs",
           "refId": "A"
         },
         {
@@ -2607,9 +2623,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_processed_paths_size / cert_analyzer_cache_max_size * 100",
+          "expr": "cert_analyzer_cache_processed_paths_size{node_name=~\"$node\"} / cert_analyzer_cache_max_size{node_name=~\"$node\"} * 100",
           "instant": true,
-          "legendFormat": "processed_paths",
+          "legendFormat": "{{node_name}} processed_paths",
           "refId": "B"
         },
         {
@@ -2617,9 +2633,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_password_failed_size / cert_analyzer_cache_max_size * 100",
+          "expr": "cert_analyzer_cache_password_failed_size{node_name=~\"$node\"} / cert_analyzer_cache_max_size{node_name=~\"$node\"} * 100",
           "instant": true,
-          "legendFormat": "password_failed",
+          "legendFormat": "{{node_name}} password_failed",
           "refId": "C"
         }
       ],
@@ -2673,6 +2689,111 @@
       }
     },
     {
+      "id": 29,
+      "title": "Process Memory",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 94
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_process_rss_bytes{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} RSS",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": ["lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "title": "Process CPU",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "deriv(cert_analyzer_process_cpu_seconds_total{node_name=~\"$node\"}[2m]) * 100",
+          "legendFormat": "{{node_name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": ["lastNotNull", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 28,
       "title": "Tetragon",
       "type": "row",
@@ -2681,7 +2802,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 100
       },
       "panels": []
     },
@@ -2697,7 +2818,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 95
+        "y": 101
       },
       "targets": [
         {
