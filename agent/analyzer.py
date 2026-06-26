@@ -118,6 +118,7 @@ class CertificateAnalyzer:
         # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
         self._probed_endpoints: Set[str] = set()
         self._probe_in_flight: Set[str] = set()
+        self.last_event_time: float = 0.0
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -965,7 +966,8 @@ class CertificateAnalyzer:
         serial = str(cert.serial_number)
         synthetic_path = f"uprobe://NSC_CreateObject/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
         logger.info(
             f"🔍 Detected Java FIPS in-memory certificate: {synthetic_path} "
             f"by {process_name} (PID: {pid})"
@@ -1096,7 +1098,8 @@ class CertificateAnalyzer:
         symbol = uprobe.symbol if uprobe.symbol else "undetermined_symbol_name"
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
         logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
@@ -1407,7 +1410,8 @@ class CertificateAnalyzer:
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
         # even when all active keystores are password-protected and being skipped.
-        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         # Check if we've already analyzed this file
         if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):

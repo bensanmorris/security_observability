@@ -1447,12 +1447,12 @@ class TestProcessEventTimestamp:
         # prefixed path so the file is recognised as previously failed
         host_path = '/host' + disk_path
         analyzer.password_failed_paths.add(host_path)
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
 
         # Event carries the bare (non-/host) path; analyzer adds /host
         analyzer.process_event(self._make_mock_event(disk_path))
 
-        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0, \
+        assert analyzer.last_event_time > 0, \
             "last_event_timestamp was not updated for a skipped password-failed file"
 
     def test_timestamp_updated_when_cert_file_successfully_parsed(
@@ -1480,11 +1480,11 @@ class TestProcessEventTimestamp:
             process='test', pid=1,
         )
         analyzer.known_certs[dummy.unique_key] = dummy
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
 
         analyzer.process_event(self._make_mock_event(disk_path))
 
-        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0
+        assert analyzer.last_event_time > 0
 
 
 class TestLRUCache:
@@ -3334,7 +3334,7 @@ class TestHealthServerReadiness:
         """
         hs = _make_health_server(analyzer, grace=0)
         # Ensure last_event_timestamp is 0 (never set)
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -3344,7 +3344,7 @@ class TestHealthServerReadiness:
     def test_readiness_returns_200_when_recent_event(self, analyzer):
         """Readiness is 200 when the last event was recent."""
         hs = _make_health_server(analyzer, grace=0, staleness=300)
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(_time.time())
+        analyzer.last_event_time = _time.time()
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -3354,7 +3354,7 @@ class TestHealthServerReadiness:
         """Readiness is 503 when the last event is older than the staleness window."""
         hs = _make_health_server(analyzer, grace=0, staleness=10)
         # Set last event to 60 seconds ago — well past the 10s staleness window
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(_time.time() - 60)
+        analyzer.last_event_time = _time.time() - 60
         hs.start()
         status, body = _get(hs.port, '/readyz')
         hs.stop()
@@ -3372,7 +3372,7 @@ class TestHealthServerReadiness:
     def test_is_ready_true_with_no_events_after_grace(self, analyzer):
         """is_ready() returns True with no events seen after grace period."""
         hs = _make_health_server(analyzer, grace=0)
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
         ok, reason = hs.is_ready()
         assert ok is True
         assert reason == 'no_events_seen'
@@ -3380,7 +3380,7 @@ class TestHealthServerReadiness:
     def test_is_ready_false_when_stale(self, analyzer):
         """is_ready() returns False when last_event_timestamp is too old."""
         hs = _make_health_server(analyzer, grace=0, staleness=10)
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(_time.time() - 60)
+        analyzer.last_event_time = _time.time() - 60
         ok, reason = hs.is_ready()
         assert ok is False
         assert 'stale' in reason
@@ -4366,18 +4366,18 @@ class TestOpensslUprobeHooking:
 
     def test_handle_bytes_updates_last_event_timestamp(self, analyzer):
         """last_event_timestamp is updated when a bytes_arg cert is successfully parsed."""
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
         _, der = self._cert_der()
         event = self._make_uprobe_event([self._make_bytes_arg(der)])
         analyzer._handle_uprobe_in_memory_cert(event)
-        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0
+        assert analyzer.last_event_time > 0
 
     def test_handle_bytes_timestamp_not_updated_on_invalid_der(self, analyzer):
         """last_event_timestamp is NOT updated when DER parsing fails."""
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
         event = self._make_uprobe_event([self._make_bytes_arg(b'not-a-cert')])
         analyzer._handle_uprobe_in_memory_cert(event)
-        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() == 0
+        assert analyzer.last_event_time == 0.0
 
     def test_handle_bytes_self_filter_by_process_name(self, analyzer):
         """cert-analyzer process is silently dropped when filter_self_events is True."""
@@ -4741,14 +4741,14 @@ class TestJavaNSSFIPSHooking:
     def test_create_object_updates_event_timestamp(self, analyzer):
         """last_event_timestamp is updated after a successful cert extraction."""
         import unittest.mock as mock
-        analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.set(0)
+        analyzer.last_event_time = 0.0
         _, der = self._cert_der()
         tmpl, ck_cert, _ = self._cert_template(der)
         event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
         with mock.patch.object(analyzer, '_read_process_memory',
                                side_effect=[tmpl, ck_cert, der]):
             analyzer._handle_nsc_create_object(event)
-        assert analyzer.metrics.last_event_timestamp.labels(node_name=analyzer.metrics._node_name)._value.get() > 0
+        assert analyzer.last_event_time > 0
 
     def test_create_object_applies_pod_context(self, analyzer):
         """Pod namespace from the uprobe event is stored on the resulting CertificateInfo."""
