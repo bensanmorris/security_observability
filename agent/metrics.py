@@ -1,4 +1,5 @@
 import logging
+import psutil
 from datetime import datetime
 from prometheus_client import Gauge, Counter, Info
 
@@ -158,6 +159,18 @@ class PrometheusMetrics:
         )
         self.cache_max_size.labels(node_name=self._node_name).set(CACHE_MAX_SIZE)
 
+        self._process = psutil.Process()
+        self.process_rss_bytes = Gauge(
+            'cert_analyzer_process_rss_bytes',
+            'Resident set size of the cert-analyzer process in bytes',
+            ['node_name'],
+        )
+        self.process_cpu_seconds = Gauge(
+            'cert_analyzer_process_cpu_seconds_total',
+            'Cumulative user+system CPU seconds consumed by the cert-analyzer process',
+            ['node_name'],
+        )
+
         self.tls_port_probes_total = Counter(
             'tls_port_probes_total',
             'Total number of TLS port probe attempts triggered by bind events',
@@ -258,3 +271,9 @@ class PrometheusMetrics:
             node_name=info.node_name,
             is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
         ).set(1 if info.is_self_signed else 0)
+
+    def update_process_metrics(self) -> None:
+        mem = self._process.memory_info()
+        cpu = self._process.cpu_times()
+        self.process_rss_bytes.labels(node_name=self._node_name).set(mem.rss)
+        self.process_cpu_seconds.labels(node_name=self._node_name).set(cpu.user + cpu.system)

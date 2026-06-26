@@ -15,8 +15,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
 
-sys.path.insert(0, os.path.dirname(__file__))
-from fips_compliance_checker import check_certificate, system_fips_enabled, FipsComplianceResult
+from agent.fips_compliance_checker import check_certificate, system_fips_enabled, FipsComplianceResult
 
 
 def _build_cert(private_key, hash_algorithm=None) -> x509.Certificate:

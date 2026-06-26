@@ -88,7 +88,7 @@ RUN pip install --upgrade pip --no-cache-dir \
         -r requirements.txt
 
 # Copy application code
-COPY cert_analyzer.py fips_compliance_checker.py ./
+COPY cert_analyzer.py ./
 COPY agent/ ./agent/
 
 # Copy compiled proto bindings from builder stage (not the compiler)
@@ -98,7 +98,7 @@ COPY --from=proto-builder /build/generated/tetragon ./tetragon
 RUN ls -la /app/tetragon/ && \
     test -f /app/tetragon/__init__.py && \
     python -c "from tetragon import tetragon_pb2, events_pb2, sensors_pb2_grpc; print('Runtime import OK')" && \
-    python -c "from fips_compliance_checker import check_certificate, system_fips_enabled; print('FIPS checker import OK')"
+    python -c "from agent.fips_compliance_checker import check_certificate, system_fips_enabled; print('FIPS checker import OK')"
 
 # Permissions for OpenShift/arbitrary UID compatibility
 RUN chown -R 1001:0 /app && \

@@ -1919,7 +1919,7 @@ class TestFipsComplianceEnabled:
         calls = []
 
         import agent.analyzer as _ca
-        from fips_compliance_checker import check_certificate as _real
+        from agent.fips_compliance_checker import check_certificate as _real
 
         def _spy(cert, **kwargs):
             calls.append(cert)
@@ -1941,7 +1941,7 @@ class TestFipsComplianceEnabled:
         calls = []
 
         import agent.analyzer as _ca
-        from fips_compliance_checker import check_certificate as _real
+        from agent.fips_compliance_checker import check_certificate as _real
 
         def _spy(cert, **kwargs):
             calls.append(cert)

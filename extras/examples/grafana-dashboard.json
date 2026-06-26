@@ -2673,6 +2673,111 @@
       }
     },
     {
+      "id": 29,
+      "title": "Process Memory",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 94
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_process_rss_bytes{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} RSS",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": ["lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "title": "Process CPU",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "deriv(cert_analyzer_process_cpu_seconds_total{node_name=~\"$node\"}[2m])",
+          "legendFormat": "{{node_name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "calcs": ["lastNotNull", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 28,
       "title": "Tetragon",
       "type": "row",
@@ -2681,7 +2786,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 100
       },
       "panels": []
     },
@@ -2697,7 +2802,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 95
+        "y": 101
       },
       "targets": [
         {

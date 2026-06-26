@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
-from fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
+from .fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
 
 # Import generated Tetragon protos
 try:
@@ -123,6 +123,7 @@ class CertificateAnalyzer:
         self.metrics.cache_known_certs_size.labels(node_name=self.metrics._node_name).set(len(self.known_certs))
         self.metrics.cache_processed_paths_size.labels(node_name=self.metrics._node_name).set(len(self.processed_paths))
         self.metrics.cache_password_failed_size.labels(node_name=self.metrics._node_name).set(len(self.password_failed_paths))
+        self.metrics.update_process_metrics()
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
