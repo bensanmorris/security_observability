@@ -116,7 +116,7 @@ class CertificateAnalyzer:
         #   duplicate concurrent probes when several events for a new endpoint
         #   arrive before the first probe completes (e.g. connection pooling).
         # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
-        self._probed_endpoints: Set[str] = set()
+        self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
         self.last_event_time: float = 0.0
 
@@ -1196,14 +1196,19 @@ class CertificateAnalyzer:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
+        raw_sock = None
         try:
             raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
             with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
+                raw_sock = None  # SSL socket owns it now; closed by the with-block
                 der_bytes = ssock.getpeercert(binary_form=True)
         except Exception as e:
             logger.debug(f"TLS probe failed {host}:{port}: {e}")
             self.metrics.tls_port_probes_total.labels(status='failed').inc()
             return
+        finally:
+            if raw_sock is not None:
+                raw_sock.close()
 
         if not der_bytes:
             self.metrics.tls_port_probes_total.labels(status='failed').inc()
@@ -1284,6 +1289,9 @@ class CertificateAnalyzer:
         host = self._resolve_pid_ip(pid, bind_addr)
         delay = self._port_probe_connect_delay
 
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
+
         endpoint_key = f'{host}:{port}'
         if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
             logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
@@ -1334,6 +1342,9 @@ class CertificateAnalyzer:
         if dport not in self._tls_outbound_ports:
             logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
             return
+
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         endpoint_key = f'{daddr}:{dport}'
         if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
