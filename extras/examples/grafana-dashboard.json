@@ -1242,7 +1242,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "tls_certificate_last_accessed_timestamp{namespace=~\"$namespace\",node_name=~\"$node\"}",
+          "expr": "tls_certificate_last_accessed_timestamp{namespace=~\"$namespace\",node_name=~\"$node\"} * 1000",
           "instant": true,
           "format": "table",
           "refId": "A"
