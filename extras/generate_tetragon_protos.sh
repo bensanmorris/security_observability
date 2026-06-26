@@ -6,13 +6,17 @@ echo "Generating Tetragon Protocol Buffer files..."
 TETRAGON_VERSION="v1.7.0"
 BASE_URL="https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/api/v1"
 
+# Use python3 -m pip throughout to guarantee installs land in the same
+# interpreter that runs the commands below (bare `pip` may resolve to a
+# different Python on some CI runners).
+#
 # setuptools provides pkg_resources, which grpcio-tools imports but does not
 # declare as a dependency.  Python 3.12+ no longer ships it by default, so we
 # always ensure it is present before the grpc_tools check.
-pip install --quiet setuptools
+python3 -m pip install --quiet setuptools
 
 if ! python3 -c "import grpc_tools" 2>/dev/null; then
-    pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
+    python3 -m pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
 fi
 
 # Create directory for proto files
