@@ -1738,6 +1738,8 @@ class CertificateAnalyzer:
                             self.metrics.update_certificate_metrics(cert_info)
                             self.log_certificate_status(cert_info)
                             self.known_certs[cert_info.unique_key] = cert_info
+                            if self.kafka_publisher is not None:
+                                self.kafka_publisher.publish(cert_info)
                             cert_count += 1
 
                 logger.info(f"Scanned {cert_count} certificates in {base_path}")
