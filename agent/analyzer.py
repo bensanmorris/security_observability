@@ -1296,6 +1296,7 @@ class CertificateAnalyzer:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
             finally:
                 self._probe_in_flight.discard(endpoint_key)
+                self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
         t.start()
@@ -1344,6 +1345,7 @@ class CertificateAnalyzer:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
             finally:
                 self._probe_in_flight.discard(endpoint_key)
+                self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
         t.start()
