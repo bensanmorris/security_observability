@@ -2744,7 +2744,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "deriv(cert_analyzer_process_cpu_seconds_total{node_name=~\"$node\"}[2m])",
+          "expr": "deriv(cert_analyzer_process_cpu_seconds_total{node_name=~\"$node\"}[2m]) * 100",
           "legendFormat": "{{node_name}}",
           "refId": "A"
         }
@@ -2763,8 +2763,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 3,
+          "unit": "percent",
+          "decimals": 1,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
