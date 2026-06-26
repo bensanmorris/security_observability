@@ -39,7 +39,7 @@ jobs:
           relevant:
             - 'Containerfile'
             - 'cert_analyzer.py'
-            - 'fips_compliance_checker.py'
+            - 'agent/**'
             - 'requirements.txt'
             - 'cert-analyzer.spec'
             - 'cert-analyzer.conf'
@@ -262,7 +262,6 @@ jobs:
         TMPDIR=$(mktemp -d)
         mkdir -p "${TMPDIR}/${TARNAME}"
         cp cert_analyzer.py           "${TMPDIR}/${TARNAME}/"
-        cp fips_compliance_checker.py "${TMPDIR}/${TARNAME}/"
         cp -r agent                   "${TMPDIR}/${TARNAME}/agent"
         cp LICENSE                    "${TMPDIR}/${TARNAME}/"
         cp cert-analyzer.service     "${TMPDIR}/${TARNAME}/"
