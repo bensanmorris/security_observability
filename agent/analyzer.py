@@ -1365,11 +1365,11 @@ class CertificateAnalyzer:
             if fn in ('security_socket_bind', 'sys_bind'):
                 if self._bind_probe_enabled:
                     self._handle_tls_bind_event(event)
-                return
-            if fn == 'tcp_connect':
+                    return
+            elif fn == 'tcp_connect':
                 if self._connect_probe_enabled:
                     self._handle_tls_connect_event(event)
-                return
+                    return
 
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)
