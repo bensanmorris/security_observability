@@ -23,9 +23,10 @@ from .fips_compliance_checker import check_certificate as _fips_check, FipsCompl
 # Import generated Tetragon protos
 try:
     from tetragon import tetragon_pb2, events_pb2, sensors_pb2, sensors_pb2_grpc
-except ImportError:
-    print("ERROR: Tetragon protobuf files not found. Run generate_tetragon_protos.sh first")
-    sys.exit(1)
+except ImportError as _tetragon_err:
+    raise ImportError(
+        "Tetragon protobuf files not found. Run extras/generate_tetragon_protos.sh first."
+    ) from _tetragon_err
 
 # Import JKS parser - optional, degrades gracefully if unavailable
 # Install with: pip install pyjks
