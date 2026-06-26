@@ -1455,7 +1455,7 @@ class CertificateAnalyzer:
         as warnings and never propagate — a version mismatch should alert but
         must never prevent the analyzer from starting.
         """
-        if not hasattr(tetragon_pb2, 'GetVersionRequest'):
+        if not hasattr(sensors_pb2, 'GetVersionRequest'):
             logger.warning(
                 "GetVersionRequest is not available in this version of the "
                 "Tetragon protobuf bindings (requires > v1.1.0); skipping version check"
@@ -1463,7 +1463,7 @@ class CertificateAnalyzer:
             return 'unknown'
         try:
             response = stub.GetVersion(
-                tetragon_pb2.GetVersionRequest(),
+                sensors_pb2.GetVersionRequest(),
                 timeout=5.0,
             )
             version = getattr(response, 'version', '').strip()
