@@ -45,7 +45,7 @@ jobs:
       run: |
         pytest test_cert_analyzer.py test_fips_compliance_checker.py \
           --cov=cert_analyzer \
-          --cov=fips_compliance_checker \
+          --cov=agent.fips_compliance_checker \
           --cov-report=xml \
           --cov-report=html \
           --cov-report=term-missing
