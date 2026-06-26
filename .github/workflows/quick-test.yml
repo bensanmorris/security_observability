@@ -27,7 +27,10 @@ jobs:
     - name: Install dependencies
       run: |
         pip install -r test-requirements.txt
-    
+
+    - name: Generate Tetragon protobuf bindings
+      run: bash extras/generate_tetragon_protos.sh
+
     - name: Run tests
       run: |
         pytest test_cert_analyzer.py test_fips_compliance_checker.py -v
