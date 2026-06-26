@@ -24,12 +24,12 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
     
+    - name: Generate Tetragon protobuf bindings
+      run: bash extras/generate_tetragon_protos.sh
+
     - name: Install dependencies
       run: |
         pip install -r test-requirements.txt
-
-    - name: Generate Tetragon protobuf bindings
-      run: bash extras/generate_tetragon_protos.sh
 
     - name: Run tests
       run: |
