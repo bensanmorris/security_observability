@@ -19,6 +19,14 @@ from .kafka import KafkaPublisher
 logger = logging.getLogger(__name__)
 
 
+def setup_logging(level: str = 'INFO') -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+
 def load_config(path: str = CONFIG_FILE_PATH) -> configparser.ConfigParser:
     """
     Load the INI configuration file if it exists.
@@ -117,7 +125,7 @@ def main():
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
     kafka_sasl_password    = cfg(cp, 'kafka', 'sasl_password',     'KAFKA_SASL_PASSWORD',     '')
 
-    logging.getLogger().setLevel(getattr(logging, log_level.upper()))
+    setup_logging(log_level)
 
     logger.info("="*60)
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
