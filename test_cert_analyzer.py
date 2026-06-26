@@ -2622,7 +2622,7 @@ class TestTetragonPolicyCheck:
     ):
         """Tetragon <= v1.1.0 lacks GetVersionRequest — must return 'unknown' and warn."""
         import agent.analyzer as _ca
-        monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
+        monkeypatch.delattr(_ca.sensors_pb2, 'GetVersionRequest')
         stub = _MockVersionStub(version='v1.0.0')
 
         with caplog.at_level(logging.WARNING, logger='agent.analyzer'):
@@ -2636,7 +2636,7 @@ class TestTetragonPolicyCheck:
     ):
         """No RPC call is made when GetVersionRequest is missing from the bindings."""
         import agent.analyzer as _ca
-        monkeypatch.delattr(_ca.tetragon_pb2, 'GetVersionRequest')
+        monkeypatch.delattr(_ca.sensors_pb2, 'GetVersionRequest')
 
         calls = []
         stub = _MockVersionStub(version='v1.0.0')
