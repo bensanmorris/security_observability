@@ -1,7 +1,6 @@
 # Test requirements for cert_analyzer test suite
 pytest>=7.4.0
 pytest-cov>=4.1.0
-cryptography>=41.0.7
 
 # Production dependencies (for the analyzer itself)
 grpcio==1.60.1
