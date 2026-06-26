@@ -17,7 +17,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_REPO: ${{ github.repository_owner }}/cert-analyzer
-  TETRAGON_VERSION: ${{ inputs.tetragon_version || 'v1.1.0' }}
+  TETRAGON_VERSION: ${{ inputs.tetragon_version || 'v1.7.0' }}
 
 jobs:
   # Skip branch builds that don't touch relevant files.
