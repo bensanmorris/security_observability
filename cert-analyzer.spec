@@ -92,7 +92,7 @@ python3.11 -m venv %{_builddir}/venv
 %{_builddir}/venv/bin/pip install --quiet --upgrade pip
 
 # Install all runtime dependencies
-%{_builddir}/venv/bin/pip install --quiet \
+%{_builddir}/venv/bin/pip install \
     grpcio==1.60.1 \
     grpcio-tools==1.60.1 \
     protobuf==4.25.3 \
