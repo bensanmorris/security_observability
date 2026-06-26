@@ -1413,7 +1413,9 @@ class CertificateAnalyzer:
             matching_keys = [k for k in self.known_certs.keys()
                              if k.startswith(cert_path + ":")]
             for key in matching_keys:
-                cert_info = self.known_certs[key]  # touches entry — moves to MRU end
+                cert_info = self.known_certs.get(key)
+                if cert_info is None:  # evicted between snapshot and access
+                    continue
                 if tetragon_pod is not None and not cert_info.pod_name:
                     logger.debug(f"Applying pod context to cached entry for {cert_path}")
                     self._apply_pod_context(cert_info, tetragon_pod)
