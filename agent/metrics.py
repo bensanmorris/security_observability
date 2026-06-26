@@ -139,20 +139,24 @@ class PrometheusMetrics:
         self.cache_known_certs_size = Gauge(
             'cert_analyzer_cache_known_certs_size',
             'Number of entries in the known_certs LRU cache',
+            ['node_name'],
         )
         self.cache_processed_paths_size = Gauge(
             'cert_analyzer_cache_processed_paths_size',
             'Number of entries in the processed_paths LRU cache',
+            ['node_name'],
         )
         self.cache_password_failed_size = Gauge(
             'cert_analyzer_cache_password_failed_size',
             'Number of entries in the password_failed_paths LRU cache',
+            ['node_name'],
         )
         self.cache_max_size = Gauge(
             'cert_analyzer_cache_max_size',
             'Configured maximum size for all LRU caches',
+            ['node_name'],
         )
-        self.cache_max_size.set(CACHE_MAX_SIZE)
+        self.cache_max_size.labels(node_name=self._node_name).set(CACHE_MAX_SIZE)
 
         self.tls_port_probes_total = Counter(
             'tls_port_probes_total',

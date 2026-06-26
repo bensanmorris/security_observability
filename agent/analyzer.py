@@ -120,9 +120,9 @@ class CertificateAnalyzer:
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
-        self.metrics.cache_known_certs_size.set(len(self.known_certs))
-        self.metrics.cache_processed_paths_size.set(len(self.processed_paths))
-        self.metrics.cache_password_failed_size.set(len(self.password_failed_paths))
+        self.metrics.cache_known_certs_size.labels(node_name=self.metrics._node_name).set(len(self.known_certs))
+        self.metrics.cache_processed_paths_size.labels(node_name=self.metrics._node_name).set(len(self.processed_paths))
+        self.metrics.cache_password_failed_size.labels(node_name=self.metrics._node_name).set(len(self.password_failed_paths))
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""

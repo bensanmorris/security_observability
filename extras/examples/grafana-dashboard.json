@@ -2490,8 +2490,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_known_certs_size",
-          "legendFormat": "known_certs",
+          "expr": "cert_analyzer_cache_known_certs_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} known_certs",
           "refId": "A"
         },
         {
@@ -2499,8 +2499,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_processed_paths_size",
-          "legendFormat": "processed_paths",
+          "expr": "cert_analyzer_cache_processed_paths_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} processed_paths",
           "refId": "B"
         },
         {
@@ -2508,8 +2508,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_password_failed_size",
-          "legendFormat": "password_failed",
+          "expr": "cert_analyzer_cache_password_failed_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} password_failed",
           "refId": "C"
         },
         {
@@ -2517,8 +2517,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_max_size",
-          "legendFormat": "max (cap)",
+          "expr": "cert_analyzer_cache_max_size{node_name=~\"$node\"}",
+          "legendFormat": "{{node_name}} max (cap)",
           "refId": "D"
         }
       ],
@@ -2597,9 +2597,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_known_certs_size / cert_analyzer_cache_max_size * 100",
+          "expr": "cert_analyzer_cache_known_certs_size{node_name=~\"$node\"} / cert_analyzer_cache_max_size{node_name=~\"$node\"} * 100",
           "instant": true,
-          "legendFormat": "known_certs",
+          "legendFormat": "{{node_name}} known_certs",
           "refId": "A"
         },
         {
@@ -2607,9 +2607,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_processed_paths_size / cert_analyzer_cache_max_size * 100",
+          "expr": "cert_analyzer_cache_processed_paths_size{node_name=~\"$node\"} / cert_analyzer_cache_max_size{node_name=~\"$node\"} * 100",
           "instant": true,
-          "legendFormat": "processed_paths",
+          "legendFormat": "{{node_name}} processed_paths",
           "refId": "B"
         },
         {
@@ -2617,9 +2617,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_cache_password_failed_size / cert_analyzer_cache_max_size * 100",
+          "expr": "cert_analyzer_cache_password_failed_size{node_name=~\"$node\"} / cert_analyzer_cache_max_size{node_name=~\"$node\"} * 100",
           "instant": true,
-          "legendFormat": "password_failed",
+          "legendFormat": "{{node_name}} password_failed",
           "refId": "C"
         }
       ],
