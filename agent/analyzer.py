@@ -1482,7 +1482,7 @@ class CertificateAnalyzer:
         runtime_version = self.get_runtime_tetragon_version(stub)
         build_version   = TETRAGON_BUILD_VERSION
 
-        self.metrics.tetragon_version_info.info({
+        self.metrics.tetragon_version_info.labels(node_name=self.metrics._node_name).info({
             'build_version':   build_version,
             'runtime_version': runtime_version,
         })

@@ -254,6 +254,16 @@
           "instant": true,
           "format": "table",
           "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_tetragon_version_info{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "G"
         }
       ],
       "transformations": [
@@ -275,27 +285,33 @@
               "Time 4": true,
               "Time 5": true,
               "Time 6": true,
+              "Time 7": true,
               "__name__": true,
               "instance": true,
               "job": true,
               "state": true,
               "state 1": true,
-              "state 2": true
+              "state 2": true,
+              "Value #G": true
             },
             "indexByName": {
               "node_name": 0,
               "Value #A": 1,
               "Value #B": 2,
               "Value #C": 3,
-              "Value #D": 4,
-              "Value #E": 5,
-              "Value #F": 6
+              "build_version": 4,
+              "runtime_version": 5,
+              "Value #D": 6,
+              "Value #E": 7,
+              "Value #F": 8
             },
             "renameByName": {
               "node_name": "Node",
               "Value #A": "Analyzer Health",
               "Value #B": "Tetragon Connected",
               "Value #C": "Version Match",
+              "build_version": "Build Version",
+              "runtime_version": "Runtime Version",
               "Value #D": "Active Policies",
               "Value #E": "Policy Errors",
               "Value #F": "Kafka Err/s"

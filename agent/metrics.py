@@ -118,6 +118,7 @@ class PrometheusMetrics:
         self.tetragon_version_info = Info(
             'cert_analyzer_tetragon_version',
             'Tetragon version information for build and runtime',
+            ['node_name'],
         )
 
         self.tetragon_version_match = Gauge(
