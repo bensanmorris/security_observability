@@ -12,6 +12,7 @@ pyyaml==6.0.1
 kubernetes>=28.1.0
 pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
 psutil>=5.9.0
+setuptools>=65.5.1
 
 # Optional: Kafka event publishing — included here so Kafka tests run in CI
 # without needing to install it separately. The analyzer itself degrades
