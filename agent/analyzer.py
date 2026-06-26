@@ -116,8 +116,9 @@ class CertificateAnalyzer:
         #   duplicate concurrent probes when several events for a new endpoint
         #   arrive before the first probe completes (e.g. connection pooling).
         # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
-        self._probed_endpoints: Set[str] = set()
+        self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
+        self.last_event_time: float = 0.0
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -965,7 +966,8 @@ class CertificateAnalyzer:
         serial = str(cert.serial_number)
         synthetic_path = f"uprobe://NSC_CreateObject/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
         logger.info(
             f"🔍 Detected Java FIPS in-memory certificate: {synthetic_path} "
             f"by {process_name} (PID: {pid})"
@@ -1096,7 +1098,8 @@ class CertificateAnalyzer:
         symbol = uprobe.symbol if uprobe.symbol else "undetermined_symbol_name"
         synthetic_path = f"uprobe://{symbol}/{pid}/{serial}"
 
-        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
         logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
 
         if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
@@ -1193,14 +1196,19 @@ class CertificateAnalyzer:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
+        raw_sock = None
         try:
             raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
             with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
+                raw_sock = None  # SSL socket owns it now; closed by the with-block
                 der_bytes = ssock.getpeercert(binary_form=True)
         except Exception as e:
             logger.debug(f"TLS probe failed {host}:{port}: {e}")
             self.metrics.tls_port_probes_total.labels(status='failed').inc()
             return
+        finally:
+            if raw_sock is not None:
+                raw_sock.close()
 
         if not der_bytes:
             self.metrics.tls_port_probes_total.labels(status='failed').inc()
@@ -1281,6 +1289,9 @@ class CertificateAnalyzer:
         host = self._resolve_pid_ip(pid, bind_addr)
         delay = self._port_probe_connect_delay
 
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
+
         endpoint_key = f'{host}:{port}'
         if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
             logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
@@ -1296,6 +1307,7 @@ class CertificateAnalyzer:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
             finally:
                 self._probe_in_flight.discard(endpoint_key)
+                self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
         t.start()
@@ -1331,6 +1343,9 @@ class CertificateAnalyzer:
             logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
             return
 
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
+
         endpoint_key = f'{daddr}:{dport}'
         if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
             logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
@@ -1344,6 +1359,7 @@ class CertificateAnalyzer:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
             finally:
                 self._probe_in_flight.discard(endpoint_key)
+                self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
         t.start()
@@ -1363,11 +1379,11 @@ class CertificateAnalyzer:
             if fn in ('security_socket_bind', 'sys_bind'):
                 if self._bind_probe_enabled:
                     self._handle_tls_bind_event(event)
-                return
-            if fn == 'tcp_connect':
+                    return
+            elif fn == 'tcp_connect':
                 if self._connect_probe_enabled:
                     self._handle_tls_connect_event(event)
-                return
+                    return
 
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)
@@ -1405,7 +1421,8 @@ class CertificateAnalyzer:
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
         # even when all active keystores are password-protected and being skipped.
-        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(time.time())
+        self.last_event_time = time.time()
+        self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         # Check if we've already analyzed this file
         if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
@@ -1413,7 +1430,9 @@ class CertificateAnalyzer:
             matching_keys = [k for k in self.known_certs.keys()
                              if k.startswith(cert_path + ":")]
             for key in matching_keys:
-                cert_info = self.known_certs[key]  # touches entry — moves to MRU end
+                cert_info = self.known_certs.get(key)
+                if cert_info is None:  # evicted between snapshot and access
+                    continue
                 if tetragon_pod is not None and not cert_info.pod_name:
                     logger.debug(f"Applying pod context to cached entry for {cert_path}")
                     self._apply_pod_context(cert_info, tetragon_pod)
@@ -1734,6 +1753,8 @@ class CertificateAnalyzer:
                             self.metrics.update_certificate_metrics(cert_info)
                             self.log_certificate_status(cert_info)
                             self.known_certs[cert_info.unique_key] = cert_info
+                            if self.kafka_publisher is not None:
+                                self.kafka_publisher.publish(cert_info)
                             cert_count += 1
 
                 logger.info(f"Scanned {cert_count} certificates in {base_path}")

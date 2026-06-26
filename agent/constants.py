@@ -1,7 +1,5 @@
 import os
-import sys
 import socket
-import logging
 from typing import Dict
 
 TETRAGON_BUILD_VERSION: str = os.getenv('TETRAGON_BUILD_VERSION', 'unknown')
@@ -22,12 +20,6 @@ _POLICY_STATE_NAMES: Dict[int, str] = {
     5: 'loading',
     6: 'unloading',
 }
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
 
 # Friendly names for the most common Extended Key Usage OIDs (RFC 5280 §4.2.1.12).
 _EKU_NAMES = {

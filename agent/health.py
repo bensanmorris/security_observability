@@ -99,9 +99,7 @@ class HealthServer:
         if uptime < self.grace_period:
             return True, f"grace_period ({int(self.grace_period - uptime)}s remaining)"
 
-        last_event = self.analyzer.metrics.last_event_timestamp.labels(
-            node_name=self.analyzer.metrics._node_name
-        )._value.get()
+        last_event = self.analyzer.last_event_time
 
         if last_event == 0:
             # No events ever seen — if we're past the grace period but the node
