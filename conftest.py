@@ -3,13 +3,6 @@ pytest configuration and fixtures
 Mocks Tetragon protobuf modules for testing
 """
 
-# Force cryptography's PyO3/Rust runtime to initialize before any other
-# PyO3-backed extension claims the process-wide interpreter slot.  Without
-# this, grpcio or a newer coverage/pytest-cov plugin can initialize a
-# different PyO3 instance first, causing "may only be initialized once" errors
-# when the test files later do `from cryptography import x509`.
-from cryptography import x509 as _cryptography_x509  # noqa: F401
-
 import sys
 from unittest.mock import MagicMock
 
