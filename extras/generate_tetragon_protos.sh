@@ -12,8 +12,8 @@ VENV_DIR="$(mktemp -d)"
 trap 'rm -rf "$VENV_DIR"' EXIT
 
 python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip setuptools
-"$VENV_DIR/bin/pip" install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
+"$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip setuptools
+"$VENV_DIR/bin/python" -m pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
 
 # Create directory for proto files
 mkdir -p tetragon
