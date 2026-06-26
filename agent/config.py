@@ -42,6 +42,13 @@ def load_config(path: str = CONFIG_FILE_PATH) -> configparser.ConfigParser:
     cp = configparser.ConfigParser()
 
     if os.path.exists(config_path):
+        if not os.access(config_path, os.R_OK):
+            logger.error(
+                f"Config file {config_path} exists but is not readable — "
+                f"check ownership and permissions (expected: root:cert-analyzer 640). "
+                f"Falling back to environment variables and defaults."
+            )
+            return cp
         try:
             cp.read(config_path)
             logger.info(f"Loaded configuration from {config_path}")
