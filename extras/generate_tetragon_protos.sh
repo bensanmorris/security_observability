@@ -4,7 +4,7 @@ set -e
 echo "Generating Tetragon Protocol Buffer files..."
 
 # Install grpcio-tools if not present
-pip install --quiet grpcio-tools==1.60.1 protobuf==4.25.3
+pip install --quiet setuptools grpcio-tools==1.60.1 protobuf==4.25.3
 
 # Create directory for proto files
 mkdir -p tetragon
