@@ -70,7 +70,7 @@
       }
     ]
   },
-  "description": "CertSight — Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
+  "description": "CertSight \u2014 Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -770,8 +770,8 @@
               "node_name": "Node",
               "Value #A": "Total",
               "Value #B": "Expired",
-              "Value #C": "Expiring ≤7d",
-              "Value #D": "Expiring ≤30d",
+              "Value #C": "Expiring \u22647d",
+              "Value #D": "Expiring \u226430d",
               "Value #E": "FIPS Non-Compliant",
               "Value #F": "Self-Signed",
               "Value #G": "Last Event",
@@ -848,7 +848,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Expiring ≤7d"
+              "options": "Expiring \u22647d"
             },
             "properties": [
               {
@@ -882,7 +882,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Expiring ≤30d"
+              "options": "Expiring \u226430d"
             },
             "properties": [
               {
@@ -1405,7 +1405,7 @@
           },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 30) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 7) or vector(0))",
           "instant": true,
-          "legendFormat": "Warning (7–30d)",
+          "legendFormat": "Warning (7\u201330d)",
           "refId": "C"
         },
         {
@@ -1415,7 +1415,7 @@
           },
           "expr": "(count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 90) or vector(0)) - (count(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 30) or vector(0))",
           "instant": true,
-          "legendFormat": "Soon (30–90d)",
+          "legendFormat": "Soon (30\u201390d)",
           "refId": "D"
         },
         {
@@ -1490,7 +1490,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Warning (7–30d)"
+              "options": "Warning (7\u201330d)"
             },
             "properties": [
               {
@@ -1505,7 +1505,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Soon (30–90d)"
+              "options": "Soon (30\u201390d)"
             },
             "properties": [
               {
@@ -1557,7 +1557,7 @@
           },
           "expr": "sort(tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"} < 90)",
           "instant": true,
-          "legendFormat": "{{common_name}} · {{cert_path}} ({{namespace}}) [{{node_name}}]",
+          "legendFormat": "{{common_name}} \u00b7 {{cert_path}} ({{namespace}}) [{{node_name}}]",
           "refId": "A"
         }
       ],
@@ -2719,7 +2719,9 @@
           "sort": "none"
         },
         "legend": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -2771,7 +2773,10 @@
           "sort": "none"
         },
         "legend": {
-          "calcs": ["lastNotNull", "max"],
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -2960,6 +2965,212 @@
           }
         ]
       }
+    },
+    {
+      "id": 42,
+      "title": "Network Event Rates (optional \u2014 enable event_rate_metrics_enabled)",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 109
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
+          },
+          "id": 43,
+          "title": "Socket Bind Event Rate by Process",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 110
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{process}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
+          },
+          "id": 44,
+          "title": "TCP Connect Event Rate by Process",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 110
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{process}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 45,
+          "title": "Top Processes by TLS Event Rate",
+          "type": "table",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 118
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sort_desc(sum by (process, node_name) (rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])))",
+              "instant": true,
+              "format": "table",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sort_desc(sum by (process, node_name) (rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])))",
+              "instant": true,
+              "format": "table",
+              "refId": "B"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "process",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "node_name 1": true
+                },
+                "indexByName": {
+                  "node_name": 0,
+                  "process": 1,
+                  "Value #A": 2,
+                  "Value #B": 3
+                },
+                "renameByName": {
+                  "node_name": "Node",
+                  "node_name 2": "Node",
+                  "process": "Process",
+                  "Value #A": "Bind/s",
+                  "Value #B": "Connect/s"
+                }
+              }
+            }
+          ],
+          "options": {
+            "showHeader": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "align": "auto",
+                "displayMode": "auto",
+                "filterable": true
+              }
+            },
+            "overrides": []
+          }
+        }
+      ]
     }
   ]
 }
