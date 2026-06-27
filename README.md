@@ -165,6 +165,7 @@ sudo systemctl enable --now cert-analyzer
 | Setting | Default | Description |
 |---|---|---|
 | `port` | `9090` | Prometheus metrics port |
+| `event_rate_metrics_enabled` | `false` | Track `tcp_connect` and socket-bind event counts per process as Prometheus counters (`tls_tcp_connect_events_total`, `tls_socket_bind_events_total`). Useful for identifying which application is driving probe load spikes. Disabled by default to avoid high label cardinality in environments with many distinct process names |
 
 **[health]**
 

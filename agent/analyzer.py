@@ -81,6 +81,7 @@ class CertificateAnalyzer:
                  checksum_enabled: bool = False,
                  demo_mode: bool = False,
                  fips_compliance_enabled: bool = True,
+                 event_rate_metrics_enabled: bool = False,
                  bind_probe_enabled: bool = False,
                  connect_probe_enabled: bool = False,
                  port_probe_timeout: float = 5.0,
@@ -94,6 +95,7 @@ class CertificateAnalyzer:
         self.checksum_enabled = checksum_enabled
         self.demo_mode = demo_mode
         self.fips_compliance_enabled = fips_compliance_enabled
+        self._event_rate_metrics_enabled = event_rate_metrics_enabled
         self._bind_probe_enabled = bind_probe_enabled
         self._connect_probe_enabled = connect_probe_enabled
         self._port_probe_timeout = port_probe_timeout
@@ -1377,13 +1379,21 @@ class CertificateAnalyzer:
         if event.HasField('process_kprobe'):
             fn = getattr(event.process_kprobe, 'function_name', '')
             if fn in ('security_socket_bind', 'sys_bind'):
+                if self._event_rate_metrics_enabled:
+                    process = event.process_kprobe.process.binary or 'unknown'
+                    self.metrics.tls_socket_bind_events_total.labels(
+                        process=process, node_name=self.metrics._node_name).inc()
                 if self._bind_probe_enabled:
                     self._handle_tls_bind_event(event)
-                    return
+                return
             elif fn == 'tcp_connect':
+                if self._event_rate_metrics_enabled:
+                    process = event.process_kprobe.process.binary or 'unknown'
+                    self.metrics.tls_tcp_connect_events_total.labels(
+                        process=process, node_name=self.metrics._node_name).inc()
                 if self._connect_probe_enabled:
                     self._handle_tls_connect_event(event)
-                    return
+                return
 
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)

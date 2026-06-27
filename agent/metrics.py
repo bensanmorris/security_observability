@@ -178,6 +178,19 @@ class PrometheusMetrics:
             ['status'],  # success, failed, skipped
         )
 
+        self.tls_tcp_connect_events_total = Counter(
+            'tls_tcp_connect_events_total',
+            'Total tcp_connect kprobe events seen per process (TLS-port only); '
+            'useful for diagnosing which application is driving probe load',
+            ['process', 'node_name'],
+        )
+        self.tls_socket_bind_events_total = Counter(
+            'tls_socket_bind_events_total',
+            'Total socket-bind kprobe events seen per process; '
+            'useful for diagnosing which application is driving probe load',
+            ['process', 'node_name'],
+        )
+
         # Tetragon policy tracking
         self.tetragon_policy_info = Gauge(
             'tetragon_policy_info',

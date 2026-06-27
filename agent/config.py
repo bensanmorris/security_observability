@@ -108,6 +108,8 @@ def main():
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
 
+    event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
+
     bind_probe_enabled    = cfg(cp, 'port_probe', 'bind_probe_enabled',    'BIND_PROBE_ENABLED',    'false').lower() == 'true'
     connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
     port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
@@ -156,6 +158,7 @@ def main():
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
         logger.info(f"Kafka topic:       {kafka_topic}")
         logger.info(f"Kafka security:    {kafka_security}")
+    logger.info(f"Event rate metrics: {'enabled' if event_rate_metrics_enabled else 'disabled'}")
     logger.info(f"Bind probe:        {'enabled' if bind_probe_enabled else 'disabled'}")
     logger.info(f"Connect probe:     {'enabled' if connect_probe_enabled else 'disabled'}")
     if bind_probe_enabled or connect_probe_enabled:
@@ -195,6 +198,7 @@ def main():
                                    checksum_enabled=checksum_enabled,
                                    demo_mode=demo_mode,
                                    fips_compliance_enabled=fips_compliance_enabled,
+                                   event_rate_metrics_enabled=event_rate_metrics_enabled,
                                    bind_probe_enabled=bind_probe_enabled,
                                    connect_probe_enabled=connect_probe_enabled,
                                    port_probe_timeout=port_probe_timeout,

@@ -6138,3 +6138,206 @@ class TestPortProbe:
 
         synthetic_path = f'tls-probe://127.0.0.1:{port}'
         assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
+
+
+class TestEventRateMetrics:
+    """Tests for per-process event-rate counters (event_rate_metrics_enabled).
+
+    Covers:
+      process_event counter increment for socket_bind / tcp_connect events
+      disabled by default (no-op when flag is off)
+      independent of bind_probe_enabled / connect_probe_enabled
+    """
+
+    @pytest.fixture
+    def rate_analyzer(self):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            event_rate_metrics_enabled=True,
+        )
+        yield a
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _make_bind_event(fn, binary='/usr/sbin/nginx'):
+        from unittest.mock import MagicMock
+        kprobe = MagicMock()
+        kprobe.function_name = fn
+        kprobe.process.binary = binary
+        kprobe.process.pid.value = 1234
+        kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        kprobe.args = []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        event.process_kprobe = kprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _make_connect_event(binary='/usr/bin/curl'):
+        from unittest.mock import MagicMock
+        kprobe = MagicMock()
+        kprobe.function_name = 'tcp_connect'
+        kprobe.process.binary = binary
+        kprobe.process.pid.value = 2222
+        kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        kprobe.args = []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        event.process_kprobe = kprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _get_counter(counter, **labels):
+        return counter.labels(**labels)._value.get()
+
+    def test_socket_bind_counter_incremented(self, rate_analyzer):
+        """security_socket_bind event increments tls_socket_bind_events_total for the process."""
+        event = self._make_bind_event('security_socket_bind', '/usr/sbin/nginx')
+        rate_analyzer.process_event(event)
+        val = self._get_counter(
+            rate_analyzer.metrics.tls_socket_bind_events_total,
+            process='/usr/sbin/nginx',
+            node_name=rate_analyzer.metrics._node_name,
+        )
+        assert val == 1.0
+
+    def test_sys_bind_counter_incremented(self, rate_analyzer):
+        """sys_bind event increments tls_socket_bind_events_total for the process."""
+        event = self._make_bind_event('sys_bind', '/usr/sbin/httpd')
+        rate_analyzer.process_event(event)
+        val = self._get_counter(
+            rate_analyzer.metrics.tls_socket_bind_events_total,
+            process='/usr/sbin/httpd',
+            node_name=rate_analyzer.metrics._node_name,
+        )
+        assert val == 1.0
+
+    def test_tcp_connect_counter_incremented(self, rate_analyzer):
+        """tcp_connect event increments tls_tcp_connect_events_total for the process."""
+        event = self._make_connect_event('/usr/bin/curl')
+        rate_analyzer.process_event(event)
+        val = self._get_counter(
+            rate_analyzer.metrics.tls_tcp_connect_events_total,
+            process='/usr/bin/curl',
+            node_name=rate_analyzer.metrics._node_name,
+        )
+        assert val == 1.0
+
+    def test_counter_accumulates_across_events(self, rate_analyzer):
+        """Multiple events from the same process sum correctly."""
+        for _ in range(3):
+            rate_analyzer.process_event(self._make_bind_event('security_socket_bind', '/usr/sbin/nginx'))
+        val = self._get_counter(
+            rate_analyzer.metrics.tls_socket_bind_events_total,
+            process='/usr/sbin/nginx',
+            node_name=rate_analyzer.metrics._node_name,
+        )
+        assert val == 3.0
+
+    def test_counters_per_process_are_independent(self, rate_analyzer):
+        """Events from different processes are tracked under separate label values."""
+        rate_analyzer.process_event(self._make_bind_event('security_socket_bind', '/usr/sbin/nginx'))
+        rate_analyzer.process_event(self._make_bind_event('security_socket_bind', '/usr/sbin/httpd'))
+        nginx_val = self._get_counter(
+            rate_analyzer.metrics.tls_socket_bind_events_total,
+            process='/usr/sbin/nginx',
+            node_name=rate_analyzer.metrics._node_name,
+        )
+        httpd_val = self._get_counter(
+            rate_analyzer.metrics.tls_socket_bind_events_total,
+            process='/usr/sbin/httpd',
+            node_name=rate_analyzer.metrics._node_name,
+        )
+        assert nginx_val == 1.0
+        assert httpd_val == 1.0
+
+    def test_counters_disabled_by_default(self, analyzer):
+        """No counter increment when event_rate_metrics_enabled=False (the default)."""
+        assert not analyzer._event_rate_metrics_enabled
+        event = self._make_bind_event('security_socket_bind', '/usr/sbin/nginx')
+        analyzer.process_event(event)
+        samples = list(analyzer.metrics.tls_socket_bind_events_total.collect()[0].samples)
+        assert not any(s.labels.get('process') == '/usr/sbin/nginx' for s in samples)
+
+    def test_counting_independent_of_bind_probe(self):
+        """Event rate is counted even when bind_probe_enabled=False."""
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            event_rate_metrics_enabled=True,
+            bind_probe_enabled=False,
+        )
+        a.process_event(self._make_bind_event('security_socket_bind', '/usr/sbin/nginx'))
+        val = self._get_counter(
+            a.metrics.tls_socket_bind_events_total,
+            process='/usr/sbin/nginx',
+            node_name=a.metrics._node_name,
+        )
+        assert val == 1.0
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    def test_counting_independent_of_connect_probe(self):
+        """Event rate is counted even when connect_probe_enabled=False."""
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            event_rate_metrics_enabled=True,
+            connect_probe_enabled=False,
+        )
+        a.process_event(self._make_connect_event('/usr/bin/curl'))
+        val = self._get_counter(
+            a.metrics.tls_tcp_connect_events_total,
+            process='/usr/bin/curl',
+            node_name=a.metrics._node_name,
+        )
+        assert val == 1.0
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    def test_bind_event_does_not_fall_through_to_cert_extraction(self, rate_analyzer):
+        """Bind events return immediately even when event_rate_metrics_enabled=True."""
+        from unittest.mock import patch
+        event = self._make_bind_event('security_socket_bind')
+        with patch.object(rate_analyzer, 'extract_cert_path_from_event') as mock_extract:
+            rate_analyzer.process_event(event)
+        mock_extract.assert_not_called()
+
+    def test_connect_event_does_not_fall_through_to_cert_extraction(self, rate_analyzer):
+        """tcp_connect events return immediately even when event_rate_metrics_enabled=True."""
+        from unittest.mock import patch
+        event = self._make_connect_event()
+        with patch.object(rate_analyzer, 'extract_cert_path_from_event') as mock_extract:
+            rate_analyzer.process_event(event)
+        mock_extract.assert_not_called()
