@@ -94,6 +94,27 @@ sudo systemctl daemon-reload && sudo systemctl restart prometheus
 
 Update the SELinux label for the new port (`sudo semanage port -a -t http_port_t -p tcp 9092`) and change the datasource URL in Grafana to match.
 
+**Adding a scrape target:** To scrape an additional metrics endpoint, append a new job to `/etc/prometheus/prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: cert-analyzer
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: my-service
+    static_configs:
+      - targets: ['localhost:8080']   # or 'hostname:port' for a remote host
+```
+
+Then reload Prometheus to pick it up without a scrape gap:
+
+```bash
+sudo systemctl reload prometheus
+```
+
+You can verify the target is registered at `http://localhost:9091/targets`.
+
 ### 4. Add the Prometheus datasource in Grafana
 
 Connections → Data Sources → Add → Prometheus → set URL to `http://localhost:9091` → Save & Test.
