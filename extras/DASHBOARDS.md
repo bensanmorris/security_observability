@@ -73,23 +73,26 @@ sudo bash extras/install-prometheus.sh
 
 Or install manually — see the script source for the full binary download and systemd unit.
 
-> **Changing the Prometheus port:** If 9091 is already in use, edit the `--web.listen-address` flag in the systemd unit after installation:
-> ```bash
-> sudo systemctl edit --force prometheus
-> ```
-> Add an override with your chosen port (e.g. 9092):
-> ```ini
-> [Service]
-> ExecStart=
-> ExecStart=/usr/local/bin/prometheus \
->   --config.file=/etc/prometheus/prometheus.yml \
->   --web.listen-address=:9092
-> ```
-> Then reload and restart:
-> ```bash
-> sudo systemctl daemon-reload && sudo systemctl restart prometheus
-> ```
-> Update the SELinux label for the new port (`sudo semanage port -a -t http_port_t -p tcp 9092`) and change the datasource URL in Grafana to match.
+**Changing the Prometheus port:** If 9091 is already in use, write a systemd drop-in override with your chosen port (e.g. 9092):
+
+```bash
+sudo mkdir -p /etc/systemd/system/prometheus.service.d
+sudo tee /etc/systemd/system/prometheus.service.d/port.conf > /dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --web.listen-address=:9092
+EOF
+```
+
+Then reload and restart:
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart prometheus
+```
+
+Update the SELinux label for the new port (`sudo semanage port -a -t http_port_t -p tcp 9092`) and change the datasource URL in Grafana to match.
 
 ### 4. Add the Prometheus datasource in Grafana
 
