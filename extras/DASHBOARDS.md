@@ -48,6 +48,21 @@ sudo systemctl enable --now grafana-server
 
 Open `http://localhost:3000` — default login is `admin` / `admin`.
 
+**Making the dashboard publicly visible (no auth):** Add the following to `/etc/grafana/grafana.ini` then restart Grafana:
+
+```ini
+[auth.anonymous]
+enabled = true
+org_name = Main Org.
+org_role = Viewer
+```
+
+```bash
+sudo systemctl restart grafana-server
+```
+
+Anyone with the URL can view the dashboard without logging in. The Viewer role prevents any edits.
+
 ### 2. Allow Grafana to reach Prometheus (SELinux)
 
 On RHEL 9, SELinux blocks Grafana from making outbound network connections by default. Two steps are required — one for the general network boolean and one to label the Prometheus port:
@@ -72,6 +87,48 @@ sudo bash extras/install-prometheus.sh
 ```
 
 Or install manually — see the script source for the full binary download and systemd unit.
+
+**Changing the Prometheus port:** If 9091 is already in use, write a systemd drop-in override with your chosen port (e.g. 9092):
+
+```bash
+sudo mkdir -p /etc/systemd/system/prometheus.service.d
+sudo tee /etc/systemd/system/prometheus.service.d/port.conf > /dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --web.listen-address=:9092
+EOF
+```
+
+Then reload and restart:
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart prometheus
+```
+
+Update the SELinux label for the new port (`sudo semanage port -a -t http_port_t -p tcp 9092`) and change the datasource URL in Grafana to match.
+
+**Adding a scrape target:** To scrape an additional metrics endpoint, append a new job to `/etc/prometheus/prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: cert-analyzer
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: my-service
+    static_configs:
+      - targets: ['localhost:8080']   # or 'hostname:port' for a remote host
+```
+
+Then reload Prometheus to pick it up without a scrape gap:
+
+```bash
+sudo systemctl reload prometheus
+```
+
+You can verify the target is registered at `http://localhost:9091/targets`.
 
 ### 4. Add the Prometheus datasource in Grafana
 
