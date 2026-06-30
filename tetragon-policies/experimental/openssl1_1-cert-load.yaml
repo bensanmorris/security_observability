@@ -1,7 +1,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: openssl1.1-cert-load
+  name: openssl11-cert-load
 spec:
   uprobes:
   # SSL_CTX_use_certificate_file(SSL_CTX*, const char* file, int type)
