@@ -11,28 +11,21 @@ fi
 
 TETRAGON_POLICY_DIR=/etc/tetragon/tetragon.tp.d
 
-# Detect RHEL major version to select the correct OpenSSL policy variant.
-# RHEL 8 ships OpenSSL 1.1 (libssl.so.1.1); RHEL 9 ships OpenSSL 3 (libssl.so.3).
+# Detect which libssl versions are installed and the RHEL major version.
+# RHEL version is only needed to pick the right openssl3 policy variant —
+# RHEL 8's kernel (4.18) cannot handle string uprobe args so it has its own.
 RHEL_MAJOR=0
 if [[ -f /etc/os-release ]]; then
     VERSION_ID=$(. /etc/os-release && echo "$VERSION_ID")
     RHEL_MAJOR="${VERSION_ID%%.*}"
 fi
 
-case "$RHEL_MAJOR" in
-    8)
-        echo "Detected: RHEL 8 — using OpenSSL 1.1 policy"
-        OPENSSL_SKIP="openssl3-cert-load.yaml"
-        ;;
-    9)
-        echo "Detected: RHEL 9 — using OpenSSL 3 policy"
-        OPENSSL_SKIP="openssl1_1-cert-load.yaml"
-        ;;
-    *)
-        echo "Warning: could not detect RHEL major version (got '${RHEL_MAJOR}'). Applying all OpenSSL policies." >&2
-        OPENSSL_SKIP=""
-        ;;
-esac
+HAS_SSL11=false
+HAS_SSL3=false
+[[ -e /usr/lib64/libssl.so.1.1 ]] && HAS_SSL11=true
+[[ -e /usr/lib64/libssl.so.3   ]] && HAS_SSL3=true
+
+echo "Detected: RHEL ${RHEL_MAJOR}, libssl.so.1.1=${HAS_SSL11}, libssl.so.3=${HAS_SSL3}"
 
 declare -a SUCCEEDED=()
 declare -a FAILED=()
@@ -93,13 +86,24 @@ if [[ ${#EXPERIMENTAL_POLICIES[@]} -gt 0 ]]; then
     echo "Experimental policies:"
     for policy in "${EXPERIMENTAL_POLICIES[@]}"; do
         local_name="$(basename "$policy")"
-        if [[ -n "$OPENSSL_SKIP" && "$local_name" == "$OPENSSL_SKIP" ]]; then
-            printf "  %-55s SKIPPED (wrong RHEL version)\n" "experimental/$local_name"
-            SKIPPED+=("experimental/$local_name")
-            continue
-        fi
+        # OpenSSL policies are handled explicitly below — skip them in the glob pass
+        case "$local_name" in openssl*-cert-load*.yaml) continue ;; esac
         apply_policy "$policy" "experimental/$local_name"
     done
+
+    # Apply whichever OpenSSL policies match the installed libraries.
+    # For OpenSSL 3, the policy variant is chosen by RHEL version: RHEL 8's kernel
+    # cannot handle string uprobe args so it uses a separate compat policy.
+    if $HAS_SSL11; then
+        apply_policy "$SCRIPT_DIR/experimental/openssl1_1-cert-load.yaml" "experimental/openssl1_1-cert-load.yaml"
+    fi
+    if $HAS_SSL3; then
+        if [[ "$RHEL_MAJOR" == "8" ]]; then
+            apply_policy "$SCRIPT_DIR/experimental/openssl3-cert-load-rhel8.yaml" "experimental/openssl3-cert-load-rhel8.yaml"
+        else
+            apply_policy "$SCRIPT_DIR/experimental/openssl3-cert-load.yaml" "experimental/openssl3-cert-load.yaml"
+        fi
+    fi
 fi
 
 TOTAL=$(( ${#SUCCEEDED[@]} + ${#FAILED[@]} ))
