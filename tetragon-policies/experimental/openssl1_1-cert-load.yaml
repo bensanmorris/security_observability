@@ -1,7 +1,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: openssl1_1-cert-load
+  name: openssl1.1-cert-load
 spec:
   uprobes:
   # SSL_CTX_use_certificate_file(SSL_CTX*, const char* file, int type)
@@ -17,8 +17,7 @@ spec:
     args:
     - index: 0
       type: "uint64"
-    - index: 1
-      type: "string"
+    # string preloading via bpf_probe_read_user_str is unavailable on RHEL 8 kernel (4.18.x)
   # SSL_CTX_use_certificate_ASN1(SSL_CTX *ctx, int len, const unsigned char *d)
   # Hooks explicit in-memory DER certificate loading via libssl. arg2 is a plain
   # single pointer to the DER bytes — Tetragon reads them atomically in eBPF at
