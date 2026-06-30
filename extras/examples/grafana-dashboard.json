@@ -1123,7 +1123,6 @@
               "pod_name": 8,
               "container_name": 9,
               "node_name": 10,
-              "process": 11,
               "app_label": 12,
               "cert_index": 13,
               "serial": 14,
@@ -1142,7 +1141,6 @@
               "workload_name": "Workload",
               "pod_name": "Pod",
               "node_name": "Node",
-              "process": "Process",
               "app_label": "App",
               "container_name": "Container",
               "cert_index": "Cert #",
@@ -1282,14 +1280,12 @@
               "san_ip_addresses": true,
               "workload_kind": true,
               "app_label": true,
-              "container_name": true,
-              "parent_process": true
+              "container_name": true
             },
             "indexByName": {
               "Value": 0,
               "common_name": 1,
               "cert_path": 2,
-              "process": 3,
               "namespace": 4,
               "workload_name": 5,
               "pod_name": 6,
@@ -1299,7 +1295,6 @@
               "Value": "Last Accessed",
               "common_name": "Common Name",
               "cert_path": "Path",
-              "process": "Process",
               "namespace": "Namespace",
               "workload_name": "Workload",
               "pod_name": "Pod",
@@ -1364,6 +1359,189 @@
       }
     },
     {
+      "id": 46,
+      "title": "Certificate \u2192 Process Map",
+      "type": "table",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "tls_certificate_process_info{node_name=~\"$node\"}\n  * on(cert_path, cert_index, serial, node_name) group_left(common_name, issuer)\n  tls_certificate_expiry_days{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "cert_index": true,
+              "serial": true
+            },
+            "indexByName": {
+              "common_name": 0,
+              "cert_path": 1,
+              "process": 2,
+              "parent_process": 3,
+              "issuer": 4,
+              "node_name": 5,
+              "Value": 6
+            },
+            "renameByName": {
+              "common_name": "Common Name",
+              "cert_path": "Path",
+              "process": "Process",
+              "parent_process": "Parent Process",
+              "issuer": "Issuer",
+              "node_name": "Node",
+              "Value": "Days Until Expiry"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Days Until Expiry",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Days Until Expiry",
+            "desc": false
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Days Until Expiry"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "dark-red",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 7
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 30
+                    },
+                    {
+                      "color": "green",
+                      "value": 90
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Process"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "semi-dark-blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Parent Process"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "id": 11,
       "title": "Expiry Distribution",
       "type": "piechart",
@@ -1371,7 +1549,7 @@
         "h": 8,
         "w": 7,
         "x": 0,
-        "y": 33
+        "y": 43
       },
       "datasource": {
         "type": "prometheus",
@@ -1543,7 +1721,7 @@
         "h": 8,
         "w": 17,
         "x": 7,
-        "y": 33
+        "y": 43
       },
       "datasource": {
         "type": "prometheus",
@@ -1624,7 +1802,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 51
       },
       "panels": []
     },
@@ -1636,7 +1814,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 42
+        "y": 52
       },
       "datasource": {
         "type": "prometheus",
@@ -1733,7 +1911,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 42
+        "y": 52
       },
       "datasource": {
         "type": "prometheus",
@@ -1790,7 +1968,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 52
       },
       "datasource": {
         "type": "prometheus",
@@ -1830,8 +2008,7 @@
               "workload_kind": "Workload Kind",
               "workload_name": "Workload",
               "pod_name": "Pod",
-              "node_name": "Node",
-              "process": "Process"
+              "node_name": "Node"
             }
           }
         }
@@ -1898,7 +2075,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 60
       },
       "panels": []
     },
@@ -1910,7 +2087,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 61
       },
       "datasource": {
         "type": "prometheus",
@@ -1947,8 +2124,7 @@
               "workload_kind": "Workload Kind",
               "workload_name": "Workload",
               "pod_name": "Pod",
-              "node_name": "Node",
-              "process": "Process"
+              "node_name": "Node"
             }
           }
         }
@@ -1995,7 +2171,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 59
+        "y": 69
       },
       "datasource": {
         "type": "prometheus",
@@ -2048,7 +2224,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 73
       },
       "datasource": {
         "type": "prometheus",
@@ -2093,7 +2269,6 @@
               "workload_name": 5,
               "pod_name": 6,
               "node_name": 7,
-              "process": 8,
               "Value": 9
             },
             "renameByName": {
@@ -2105,8 +2280,7 @@
               "namespace": "Namespace",
               "workload_name": "Workload",
               "pod_name": "Pod",
-              "node_name": "Node",
-              "process": "Process"
+              "node_name": "Node"
             }
           }
         },
@@ -2224,7 +2398,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 81
       },
       "datasource": {
         "type": "prometheus",
@@ -2236,7 +2410,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\",parent_process!=\"\"}",
+          "expr": "tls_certificate_process_info{node_name=~\"$node\",parent_process!=\"\"}\n  * on(cert_path, cert_index, serial, node_name) group_left(common_name)\n  tls_certificate_expiry_days{node_name=~\"$node\"}",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -2252,35 +2426,22 @@
               "instance": true,
               "job": true,
               "Value": true,
-              "checksum": true,
               "cert_index": true,
               "serial": true,
-              "subject": true,
-              "issuer": true,
-              "app_label": true,
-              "san_dns_names": true,
-              "san_ip_addresses": true,
-              "container_name": true,
-              "workload_kind": true
+              "issuer": true
             },
             "indexByName": {
               "parent_process": 0,
               "process": 1,
-              "cert_path": 2,
-              "common_name": 3,
-              "namespace": 4,
-              "workload_name": 5,
-              "pod_name": 6,
-              "node_name": 7
+              "common_name": 2,
+              "cert_path": 3,
+              "node_name": 4
             },
             "renameByName": {
               "parent_process": "Parent Process",
               "process": "Process",
-              "cert_path": "Path",
               "common_name": "Common Name",
-              "namespace": "Namespace",
-              "workload_name": "Workload",
-              "pod_name": "Pod",
+              "cert_path": "Path",
               "node_name": "Node"
             }
           }
@@ -2365,7 +2526,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 79
+        "y": 89
       },
       "panels": []
     },
@@ -2377,7 +2538,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -2429,7 +2590,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 80
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -2494,7 +2655,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 88
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -2601,7 +2762,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 88
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -2696,7 +2857,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 94
+        "y": 104
       },
       "datasource": {
         "type": "prometheus",
@@ -2750,7 +2911,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 94
+        "y": 104
       },
       "datasource": {
         "type": "prometheus",
@@ -2807,7 +2968,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 100
+        "y": 110
       },
       "panels": []
     },
@@ -2823,7 +2984,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 101
+        "y": 111
       },
       "targets": [
         {
@@ -2975,7 +3136,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 109
+        "y": 119
       },
       "panels": [
         {
@@ -3018,7 +3179,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 110
+            "y": 120
           },
           "targets": [
             {
@@ -3072,7 +3233,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 110
+            "y": 120
           },
           "targets": [
             {
@@ -3094,7 +3255,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 118
+            "y": 128
           },
           "datasource": {
             "type": "prometheus",

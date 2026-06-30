@@ -5019,7 +5019,6 @@ class TestSelfSignedDetection:
 
         val = analyzer.metrics.cert_self_signed.labels(
             cert_path=path,
-            process="test",
             cert_index="0",
             pod_name="",
             namespace="",
@@ -5043,7 +5042,6 @@ class TestSelfSignedDetection:
 
         val = analyzer.metrics.cert_self_signed.labels(
             cert_path=path,
-            process="test",
             cert_index="0",
             pod_name="",
             namespace="",
