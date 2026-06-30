@@ -14,41 +14,50 @@ class PrometheusMetrics:
 
     def __init__(self, node_name: str = ""):
         self._node_name = node_name
-        # Certificate expiry metrics - includes k8s workload labels
+        # Certificate expiry metrics - includes k8s workload labels.
+        # process/parent_process are intentionally absent: these are cert properties,
+        # not per-accessor properties.  Use tls_certificate_process_info to map certs
+        # to the processes that have loaded them.
         self.cert_expiry_days = Gauge(
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+            ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_expiry_timestamp = Gauge(
             'tls_certificate_expiry_timestamp',
             'Unix timestamp of certificate expiry',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+            ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_valid_from = Gauge(
             'tls_certificate_valid_from_timestamp',
             'Unix timestamp of certificate valid from date',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+            ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
+             'node_name', 'app_label', 'container_name', 'checksum']
         )
 
         self.cert_last_accessed = Gauge(
             'tls_certificate_last_accessed_timestamp',
             'Unix timestamp of the most recent certificate access event',
-            ['cert_path', 'subject', 'issuer', 'serial', 'process', 'common_name',
+            ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum', 'parent_process']
+             'node_name', 'app_label', 'container_name', 'checksum']
+        )
+
+        self.cert_process_info = Gauge(
+            'tls_certificate_process_info',
+            'Processes observed loading this certificate (1=observed)',
+            ['cert_path', 'cert_index', 'serial', 'process', 'parent_process', 'node_name'],
         )
 
         # Event counters
@@ -68,28 +77,28 @@ class PrometheusMetrics:
         self.cert_expired = Gauge(
             'tls_certificate_expired',
             'Whether certificate is expired (1=expired, 0=valid)',
-            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+            ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name']
         )
 
         self.cert_expiring_soon = Gauge(
             'tls_certificate_expiring_soon',
             'Whether certificate expires within threshold (1=yes, 0=no)',
-            ['cert_path', 'process', 'threshold_days', 'cert_index', 'pod_name',
+            ['cert_path', 'threshold_days', 'cert_index', 'pod_name',
              'namespace', 'workload_kind', 'workload_name', 'node_name']
         )
 
         self.cert_fips_compliant = Gauge(
             'tls_certificate_fips_compliant',
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
-            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+            ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash']
         )
 
         self.cert_self_signed = Gauge(
             'tls_certificate_self_signed',
             'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
-            ['cert_path', 'process', 'cert_index', 'pod_name', 'namespace',
+            ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'is_ca']
         )
 
@@ -210,7 +219,6 @@ class PrometheusMetrics:
             'subject':          info.subject[:100],
             'issuer':           info.issuer[:100],
             'serial':           info.serial_number,
-            'process':          info.process,
             'common_name':      info.common_name,
             'san_dns_names':    ','.join(info.san_dns_names),
             'san_ip_addresses': ','.join(info.san_ip_addresses),
@@ -222,14 +230,17 @@ class PrometheusMetrics:
             'node_name':        info.node_name,
             'app_label':        info.app_label,
             'container_name':   info.container_name,
-            # Empty string when CERT_CHECKSUM_ENABLED=false — Prometheus
-            # handles empty label values cleanly and the label is simply
-            # omitted from query results when filtering
             'checksum':         info.checksum,
-            # Empty string when Tetragon's process cache didn't have the
-            # parent at event time
-            'parent_process':   info.parent_process,
         }
+
+        self.cert_process_info.labels(
+            cert_path=info.path,
+            cert_index=str(info.cert_index),
+            serial=info.serial_number,
+            process=info.process,
+            parent_process=info.parent_process,
+            node_name=info.node_name,
+        ).set(1)
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
@@ -238,7 +249,6 @@ class PrometheusMetrics:
 
         self.cert_expired.labels(
             cert_path=info.path,
-            process=info.process,
             cert_index=str(info.cert_index),
             pod_name=info.pod_name,
             namespace=info.namespace,
@@ -250,7 +260,6 @@ class PrometheusMetrics:
         for threshold in [7, 30, 90]:
             self.cert_expiring_soon.labels(
                 cert_path=info.path,
-                process=info.process,
                 threshold_days=str(threshold),
                 cert_index=str(info.cert_index),
                 pod_name=info.pod_name,
@@ -263,7 +272,6 @@ class PrometheusMetrics:
         if info.key_algorithm:
             self.cert_fips_compliant.labels(
                 cert_path=info.path,
-                process=info.process,
                 cert_index=str(info.cert_index),
                 pod_name=info.pod_name,
                 namespace=info.namespace,
@@ -276,7 +284,6 @@ class PrometheusMetrics:
 
         self.cert_self_signed.labels(
             cert_path=info.path,
-            process=info.process,
             cert_index=str(info.cert_index),
             pod_name=info.pod_name,
             namespace=info.namespace,
