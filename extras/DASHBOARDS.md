@@ -48,6 +48,21 @@ sudo systemctl enable --now grafana-server
 
 Open `http://localhost:3000` — default login is `admin` / `admin`.
 
+**Making the dashboard publicly visible (no auth):** Add the following to `/etc/grafana/grafana.ini` then restart Grafana:
+
+```ini
+[auth.anonymous]
+enabled = true
+org_name = Main Org.
+org_role = Viewer
+```
+
+```bash
+sudo systemctl restart grafana-server
+```
+
+Anyone with the URL can view the dashboard without logging in. The Viewer role prevents any edits.
+
 ### 2. Allow Grafana to reach Prometheus (SELinux)
 
 On RHEL 9, SELinux blocks Grafana from making outbound network connections by default. Two steps are required — one for the general network boolean and one to label the Prometheus port:
