@@ -259,3 +259,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Surfaced fields reference](extras/FIELDS-README.md) - All Prometheus metrics and Kafka event fields
 - [Grafana dashboard](extras/DASHBOARDS.md) - Setup guide and dashboard section reference
 - [Roadmap](extras/ROADMAP.md) - Planned and proposed improvements
+- [Presentation Q&A](extras/PRESENTATION-QA.md) - Questions and answers covering architecture, deployment, Java JCA/JNI hooking, and roadmap
