@@ -1109,7 +1109,7 @@
               "instance": true,
               "job": true,
               "cert_index": false,
-              "checksum": true
+              "checksum": false
             },
             "indexByName": {
               "common_name": 0,
@@ -1127,7 +1127,8 @@
               "cert_index": 13,
               "serial": 14,
               "subject": 15,
-              "Value": 16
+              "Value": 16,
+              "checksum": 17
             },
             "renameByName": {
               "Value": "Days Until Expiry",
@@ -1145,7 +1146,8 @@
               "container_name": "Container",
               "cert_index": "Cert #",
               "serial": "Serial",
-              "subject": "Subject"
+              "subject": "Subject",
+              "checksum": "Checksum"
             }
           }
         },
@@ -3249,7 +3251,7 @@
                 "uid": "${datasource}"
               },
               "expr": "rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])",
-              "legendFormat": "{{process}}",
+              "legendFormat": "{{process}} @ {{node_name}}",
               "refId": "A"
             }
           ]
@@ -3303,7 +3305,7 @@
                 "uid": "${datasource}"
               },
               "expr": "rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])",
-              "legendFormat": "{{process}}",
+              "legendFormat": "{{process}} @ {{node_name}}",
               "refId": "A"
             }
           ]
