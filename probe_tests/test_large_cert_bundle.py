@@ -115,8 +115,13 @@ def main() -> None:
         print('Increase --count or lower large_file_cert_threshold in cert-analyzer.conf.\n',
               file=sys.stderr)
 
-    bundle_path = os.path.join(args.out_dir, 'cert-analyzer-large-bundle-test.pem')
-    canary_path = os.path.join(args.out_dir, 'cert-analyzer-canary-test.pem')
+    # A unique suffix per run is required: cert_analyzer's known_certs cache is
+    # keyed by path only (agent/analyzer.py process_event's "already known" check
+    # is `key.startswith(cert_path + ":")`), so re-using the same path across runs
+    # would hit that fast path and skip re-analysis of the new file content.
+    run_id = f'{os.getpid()}-{int(time.time())}'
+    bundle_path = os.path.join(args.out_dir, f'cert-analyzer-large-bundle-test-{run_id}.pem')
+    canary_path = os.path.join(args.out_dir, f'cert-analyzer-canary-test-{run_id}.pem')
 
     print(f'=== large-cert-bundle background-parsing test ({args.count} certs) ===')
     print()
