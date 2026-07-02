@@ -86,7 +86,8 @@ class CertificateAnalyzer:
                  connect_probe_enabled: bool = False,
                  port_probe_timeout: float = 5.0,
                  port_probe_connect_delay: float = 2.0,
-                 tls_outbound_ports: Optional[frozenset] = None):
+                 tls_outbound_ports: Optional[frozenset] = None,
+                 large_file_cert_threshold: int = 20):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -101,6 +102,7 @@ class CertificateAnalyzer:
         self._port_probe_timeout = port_probe_timeout
         self._port_probe_connect_delay = port_probe_connect_delay
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
+        self._large_file_cert_threshold = large_file_cert_threshold
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.known_certs: LRUCache = LRUCache()
         self.processed_paths: LRUCache = LRUCache()
@@ -120,6 +122,11 @@ class CertificateAnalyzer:
         # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
         self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
+        # Paths whose large multi-cert file (see _count_pem_certs) is currently
+        # being parsed on a background thread — de-dupes repeat Tetragon events
+        # for the same path that arrive before the worker populates known_certs.
+        # GIL-atomic set ops, same reasoning as _probe_in_flight above.
+        self._large_file_in_flight: Set[str] = set()
         self.last_event_time: float = 0.0
 
     def _update_cache_metrics(self) -> None:
@@ -562,6 +569,27 @@ class CertificateAnalyzer:
             is_self_signed=is_self_signed,
         )
 
+    def _count_pem_certs(self, cert_path: str) -> int:
+        """
+        Cheap upper-bound estimate of how many certificates a file contains —
+        used only to decide whether parsing should be deferred to a background
+        thread. Counts PEM 'BEGIN CERTIFICATE' markers without doing any ASN.1
+        parsing, which is orders of magnitude cheaper than parse_certificates()
+        for files with hundreds of certs (e.g. a system CA trust bundle).
+
+        JKS/PKCS12 keystores go through a dedicated decoder either way and
+        aren't pre-counted here — always treated as small enough to process
+        inline, since large multi-cert files in practice are PEM bundles.
+        """
+        suffix = Path(cert_path).suffix.lower()
+        if suffix in self.JKS_EXTENSIONS or suffix in self.PKCS12_EXTENSIONS:
+            return 0
+        try:
+            with open(cert_path, 'rb') as f:
+                return f.read().count(b'-----BEGIN CERTIFICATE-----')
+        except OSError:
+            return 0
+
     def analyze_certificate(
         self,
         cert_path: str,
@@ -602,6 +630,98 @@ class CertificateAnalyzer:
         self.processed_paths.add(cert_path)
         self._update_cache_metrics()
         return cert_infos
+
+    def _finish_new_certificate_file(
+        self,
+        cert_infos: List[CertificateInfo],
+        tetragon_pod,
+        parent_process: str,
+        parent_pid: int,
+        node_name: str,
+    ) -> None:
+        """Apply pod/event context, update metrics, log, cache, and publish for a freshly-parsed file."""
+        for cert_info in cert_infos:
+            try:
+                self._apply_pod_context(cert_info, tetragon_pod)
+                cert_info.node_name      = node_name
+                cert_info.parent_process = parent_process
+                cert_info.parent_pid     = parent_pid
+
+                self.metrics.update_certificate_metrics(cert_info)
+                self.log_certificate_status(cert_info)
+                self.known_certs[cert_info.unique_key] = cert_info
+
+                if self.kafka_publisher is not None:
+                    self.kafka_publisher.publish(cert_info)
+            except Exception as e:
+                # One bad cert (e.g. an unexpected label value) must not abort
+                # the rest of the file — each cert is otherwise independent.
+                logger.error(
+                    f"Error finishing certificate {cert_info.cert_index} in "
+                    f"{cert_info.path}: {e}", exc_info=True
+                )
+                self.metrics.cert_events_total.labels(
+                    event_type='processing', status='error'
+                ).inc()
+                self.metrics.cert_analysis_errors.labels(error_type='finish_error').inc()
+
+        self._update_cache_metrics()
+
+    def _process_certificate_file_async(
+        self,
+        cert_path: str,
+        process_name: str,
+        pid: int,
+        namespace: str,
+        tetragon_pod,
+        parent_process: str,
+        parent_pid: int,
+        node_name: str,
+    ) -> None:
+        """
+        Parse and extract a large multi-cert file on a background thread.
+
+        Keeps the Tetragon event-consumer thread free to keep draining the
+        gRPC stream while hundreds of certs (e.g. a system CA bundle) get
+        parsed, instead of blocking it for the whole burst. _large_file_in_flight
+        de-dupes repeat Tetragon events for the same path that arrive before the
+        worker finishes and populates known_certs.
+        """
+        if cert_path in self._large_file_in_flight:
+            logger.debug(
+                f"Large certificate file {cert_path} already being processed "
+                f"in the background — skipping duplicate event"
+            )
+            return
+        self._large_file_in_flight.add(cert_path)
+
+        def _worker():
+            try:
+                try:
+                    cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
+                    if cert_infos:
+                        logger.info(
+                            f"Found {len(cert_infos)} certificate(s) in {cert_path} "
+                            f"(parsed in background — large file)"
+                        )
+                        self._finish_new_certificate_file(
+                            cert_infos, tetragon_pod, parent_process, parent_pid, node_name
+                        )
+                except Exception as e:
+                    # Mirror the error handling start()'s event loop gives every
+                    # synchronous event — this runs on its own thread, so nothing
+                    # else will catch, log, or count an exception raised here.
+                    logger.error(f"Error processing large certificate file {cert_path}: {e}",
+                                 exc_info=True)
+                    self.metrics.cert_events_total.labels(
+                        event_type='processing', status='error'
+                    ).inc()
+            finally:
+                self._large_file_in_flight.discard(cert_path)
+
+        threading.Thread(
+            target=_worker, daemon=True, name=f'cert-parse-{Path(cert_path).name}'
+        ).start()
 
     def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
         """Populate all Tetragon Pod proto fields onto cert_info."""
@@ -1452,29 +1572,25 @@ class CertificateAnalyzer:
                 self.metrics.update_certificate_metrics(cert_info)
             return
 
+        # Large multi-cert files (e.g. system CA bundles with hundreds of certs)
+        # are parsed on a background thread so one file doesn't block this
+        # thread from consuming the rest of the Tetragon event stream.
+        if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
+            self._process_certificate_file_async(
+                cert_path, process_name, pid, namespace,
+                tetragon_pod, parent_process, parent_pid, event.node_name,
+            )
+            return
+
         # Analyze new certificate file (may contain multiple certs)
         cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
         if not cert_infos:
             return
 
         logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
-
-        for cert_info in cert_infos:
-            # Apply pod context: Tetragon event first, k8s API for extras
-            self._apply_pod_context(cert_info, tetragon_pod)
-            cert_info.node_name     = event.node_name
-            cert_info.parent_process = parent_process
-            cert_info.parent_pid     = parent_pid
-
-            self.metrics.update_certificate_metrics(cert_info)
-            self.log_certificate_status(cert_info)
-            self.known_certs[cert_info.unique_key] = cert_info
-
-            # Publish new certificate discovery to Kafka if enabled
-            if self.kafka_publisher is not None:
-                self.kafka_publisher.publish(cert_info)
-
-        self._update_cache_metrics()
+        self._finish_new_certificate_file(
+            cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
+        )
 
     def get_runtime_tetragon_version(self, stub) -> str:
         """

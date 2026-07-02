@@ -387,3 +387,62 @@ reactively when it sees the bind event.  The outbound probe test must also make
 the client-side connect itself, because the kprobe trigger is the connect, not
 the bind.  Both tests use the same `_probe_tls_endpoint` path inside cert_analyzer;
 the difference is which Tetragon event starts the chain.
+
+---
+
+### test_large_cert_bundle (Python)
+
+Exercises the large-file background-parsing path added to `cert_analyzer`
+(`_count_pem_certs` / `_process_certificate_file_async` in `agent/analyzer.py`):
+files with more PEM certs than `large_file_cert_threshold` (default 20, e.g. a
+system CA trust bundle) are parsed on a background thread instead of the
+Tetragon event-consumer thread, so one large file can't delay processing of
+other events.
+
+**Step 1 — Load the policy:**
+
+```bash
+sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+```
+
+**Step 2 — Run the probe test:**
+
+```bash
+# Writes to /etc/pki/tls/certs by default — same ReadOnlyPaths location used
+# by the other file-based probe tests; typically requires sudo to write.
+sudo python3 probe_tests/test_large_cert_bundle.py
+
+# Custom cert count / output directory:
+sudo python3 probe_tests/test_large_cert_bundle.py --count 50
+python3 probe_tests/test_large_cert_bundle.py --out-dir /some/writable/readonly/path
+
+# Keep the generated files instead of printing an rm command:
+sudo python3 probe_tests/test_large_cert_bundle.py --keep
+```
+
+The script generates an N-cert PEM bundle plus a single-cert "canary" file,
+opens the bundle first (firing `fd_install` for a large file), then
+immediately opens the canary (firing `fd_install` for a one-cert file).
+
+**Step 3 — Verify cert_analyzer output:**
+
+```bash
+journalctl -u cert-analyzer --since "-1 min" | grep -E "bundle-test|canary"
+```
+
+The canary's `🔍 Detected certificate access` / `✅ OK` lines should appear
+within a second or two of being triggered, even though they were opened
+*after* the bundle — proof the bundle's parsing (which logs `Found N
+certificate(s) in ... (parsed in background — large file)`) didn't block the
+event-consumer thread from handling the canary's event first.
+
+**Step 4 — Remove the policy:**
+
+```bash
+sudo tetra tracingpolicy delete certificate-file-access
+```
+
+**What this doesn't cover:** the script only checks canary event *latency*,
+not `cert_fips_compliant`/`tls_certificate_expiry_days` correctness for the
+bundle's certs — that's already covered by
+`TestLargeFileBackgroundProcessing` in `test_cert_analyzer.py`.

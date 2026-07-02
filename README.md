@@ -209,6 +209,7 @@ sudo systemctl enable --now cert-analyzer
 | `filter_self_events` | `true` | Ignore certificate accesses made by the analyzer itself |
 | `host_prefix` | _(empty)_ | Path prefix prepended to certificate paths from Tetragon events — leave empty for bare metal, set to `/host` for Kubernetes |
 | `demo_mode` | `false` | Log certificate details (subject, issuer, serial, validity, SANs) at INFO level instead of DEBUG — for demos only, leave false in production |
+| `large_file_cert_threshold` | `20` | Files with more PEM certs than this (e.g. a system CA bundle) are parsed on a background thread instead of the Tetragon event-consumer thread |
 
 **[passwords]**
 
