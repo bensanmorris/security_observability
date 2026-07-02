@@ -298,6 +298,51 @@ class PrometheusMetrics:
             is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
         ).set(1 if info.is_self_signed else 0)
 
+    def update_last_accessed(self, info: CertificateInfo) -> None:
+        """
+        Refresh only the last-accessed timestamp for an already-known certificate.
+
+        Used on cache-hit re-detections, where the cert's own properties (expiry,
+        FIPS status, etc.) haven't changed since the last full update_certificate_metrics()
+        call and don't need re-setting for every cached cert on every re-detection.
+        """
+        self.cert_last_accessed.labels(
+            cert_path=info.path,
+            subject=info.subject[:100],
+            issuer=info.issuer[:100],
+            serial=info.serial_number,
+            common_name=info.common_name,
+            san_dns_names=','.join(info.san_dns_names),
+            san_ip_addresses=','.join(info.san_ip_addresses),
+            cert_index=str(info.cert_index),
+            pod_name=info.pod_name,
+            namespace=info.namespace,
+            workload_kind=info.workload_kind,
+            workload_name=info.workload_name,
+            node_name=info.node_name,
+            app_label=info.app_label,
+            container_name=info.container_name,
+            checksum=info.checksum,
+        ).set(datetime.utcnow().timestamp())
+
+    def record_cert_process_access(self, info: CertificateInfo, process: str, parent_process: str) -> None:
+        """
+        Record that `process` has loaded an already-known certificate.
+
+        A distinct (process, parent_process) label pair is its own Prometheus series,
+        so repeated calls for different processes accumulate into a multi-process view
+        of who has loaded this cert, rather than overwriting the original discoverer.
+        """
+        self.cert_process_info.labels(
+            cert_path=info.path,
+            cert_index=str(info.cert_index),
+            serial=info.serial_number,
+            process=process,
+            parent_process=parent_process,
+            node_name=info.node_name,
+            checksum=info.checksum,
+        ).set(1)
+
     def update_process_metrics(self) -> None:
         mem = self._process.memory_info()
         cpu = self._process.cpu_times()
