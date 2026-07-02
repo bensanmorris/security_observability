@@ -1187,6 +1187,39 @@ class TestLogCertificateStatusOutput:
         log_messages = " ".join(r.message for r in caplog.records)
         assert "cert #3" in log_messages
 
+    def test_summary_only_omits_detail_dump(self, analyzer, caplog):
+        """
+        summary_only=True logs just the headline status line, not the
+        Subject/Issuer/Serial/SAN/etc. detail dump below it.
+        """
+        cert_info = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            subject="CN=summary-only-test",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="agent.analyzer"):
+            analyzer.log_certificate_status(cert_info, summary_only=True)
+
+        assert any("OK" in r.message for r in caplog.records)
+        log_messages = " ".join(r.message for r in caplog.records)
+        assert "Subject:" not in log_messages
+        assert "Issuer:"  not in log_messages
+        assert "Valid:"   not in log_messages
+
+    def test_default_still_includes_detail_dump(self, analyzer, caplog):
+        """Without summary_only, the detail dump is still emitted (default unchanged)."""
+        cert_info = _make_cert_info(
+            not_after=datetime.utcnow() + timedelta(days=365),
+            subject="CN=full-detail-test",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="agent.analyzer"):
+            analyzer.log_certificate_status(cert_info)
+
+        log_messages = " ".join(r.message for r in caplog.records)
+        assert "Subject:" in log_messages
+        assert "Issuer:"  in log_messages
+
 # ── JKS helpers ───────────────────────────────────────────────────────────────
 
 import hashlib
@@ -1812,6 +1845,152 @@ class TestCacheIntegration:
 
         assert len(analyzer.known_certs) == _ca.CACHE_MAX_SIZE
         assert "path:0:serial" not in analyzer.known_certs
+
+
+class TestCacheHitReDetection:
+    """
+    Tests for the "already known certificate file" branch in process_event
+    (agent/analyzer.py) — when a cert is re-detected, it must:
+      - record the *new* accessing process as its own series in
+        tls_certificate_process_info rather than overwriting/ignoring it, and
+      - refresh only tls_certificate_last_accessed_timestamp, not re-run the
+        full update_certificate_metrics() fan-out for every cached cert.
+    """
+
+    class _MockEvent:
+        """Minimal mock Tetragon kprobe event with a configurable process binary."""
+        node_name = ''
+
+        def __init__(self, path, process_binary):
+            class _Arg:
+                def __init__(self, path):
+                    self.string_arg = path
+                def HasField(self, name):
+                    return name == 'string_arg'
+
+            class _Process:
+                def __init__(self, binary):
+                    self.binary    = binary
+                    self.pid       = 4321
+                    self.arguments = ''
+                def HasField(self, name):
+                    return False
+
+            class _Kprobe:
+                def __init__(self, path, binary):
+                    self.process = _Process(binary)
+                    self.args    = [_Arg(path)]
+                def HasField(self, name):
+                    return False
+
+            self._kprobe = _Kprobe(path, process_binary)
+
+        def HasField(self, name):
+            return name == 'process_kprobe'
+
+        @property
+        def process_kprobe(self):
+            return self._kprobe
+
+    def _seed_known_cert(self, analyzer, path, process='/usr/bin/cat'):
+        cert_info = CertificateInfo(
+            path=path, subject='CN=cache-hit-test', issuer='CN=ca',
+            serial_number='42',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process=process, pid=1,
+        )
+        analyzer.known_certs[cert_info.unique_key] = cert_info
+        return cert_info
+
+    def test_redetection_records_new_process_as_separate_series(self, analyzer, temp_dir):
+        """
+        A second process re-detecting a known cert file must appear as its
+        own series in tls_certificate_process_info, alongside — not instead
+        of — the original discovering process.
+        """
+        disk_path = os.path.join(temp_dir, "shared-ca.pem")
+        cert_info = self._seed_known_cert(analyzer, disk_path, process='/usr/bin/cat')
+
+        # Original discoverer's series, as recorded at first-parse time.
+        # cert_info.node_name defaults to '' — the mock event's node_name is
+        # also '', so it's left untouched by the re-detection branch below.
+        analyzer.metrics.record_cert_process_access(cert_info, '/usr/bin/cat', '')
+
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/lib64/firefox/firefox'))
+
+        gauge = analyzer.metrics.cert_process_info
+        cat_val = gauge.labels(
+            cert_path=disk_path, cert_index='0', serial='42',
+            process='/usr/bin/cat', parent_process='', node_name='', checksum='',
+        )._value.get()
+        firefox_val = gauge.labels(
+            cert_path=disk_path, cert_index='0', serial='42',
+            process='/usr/lib64/firefox/firefox', parent_process='', node_name='', checksum='',
+        )._value.get()
+
+        assert cat_val == 1, "original discoverer's series must survive the re-detection"
+        assert firefox_val == 1, "new accessing process must get its own series"
+
+    def test_redetection_updates_last_accessed_timestamp(self, analyzer, temp_dir):
+        """tls_certificate_last_accessed_timestamp is refreshed on re-detection."""
+        disk_path = os.path.join(temp_dir, "shared-ca2.pem")
+        cert_info = self._seed_known_cert(analyzer, disk_path)
+
+        before = analyzer.metrics.cert_last_accessed.labels(
+            cert_path=disk_path, subject='CN=cache-hit-test', issuer='CN=ca',
+            serial='42', common_name='', san_dns_names='', san_ip_addresses='',
+            cert_index='0', pod_name='', namespace='', workload_kind='',
+            workload_name='', node_name='', app_label='', container_name='',
+            checksum='',
+        )._value.get()
+        assert before == 0.0
+
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/cat'))
+
+        after = analyzer.metrics.cert_last_accessed.labels(
+            cert_path=disk_path, subject='CN=cache-hit-test', issuer='CN=ca',
+            serial='42', common_name='', san_dns_names='', san_ip_addresses='',
+            cert_index='0', pod_name='', namespace='', workload_kind='',
+            workload_name='', node_name='', app_label='', container_name='',
+            checksum='',
+        )._value.get()
+        assert after > 0.0
+
+    def test_redetection_does_not_touch_expiry_gauge(self, analyzer, temp_dir):
+        """
+        Re-detection must not re-run the full metrics fan-out: a cert-property
+        gauge like cert_expiry_days, which is never set for this cert outside
+        of update_certificate_metrics(), must have no sample for it.
+        """
+        disk_path = os.path.join(temp_dir, "shared-ca3.pem")
+        self._seed_known_cert(analyzer, disk_path)
+
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/cat'))
+
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == disk_path
+        ]
+        assert samples == [], \
+            "cache-hit re-detection should not populate cert_expiry_days"
+
+    def test_redetection_logs_summary_only(self, analyzer, temp_dir, caplog):
+        """
+        Cache-hit re-detection logs just the headline status line, not the
+        full Subject/Issuer/SAN/etc. detail dump for every cached cert.
+        """
+        disk_path = os.path.join(temp_dir, "shared-ca4.pem")
+        self._seed_known_cert(analyzer, disk_path)
+
+        with caplog.at_level(logging.DEBUG, logger="agent.analyzer"):
+            analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/cat'))
+
+        log_messages = " ".join(r.message for r in caplog.records)
+        assert "OK:" in log_messages
+        assert "Subject:" not in log_messages
+        assert "Issuer:"  not in log_messages
 
 
 class TestChecksum:

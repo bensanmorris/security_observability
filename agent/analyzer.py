@@ -766,8 +766,15 @@ class CertificateAnalyzer:
             f"privileged={cert_info.container_privileged} labels={cert_info.pod_labels}"
         )
 
-    def log_certificate_status(self, info: CertificateInfo):
-        """Log certificate status with appropriate severity"""
+    def log_certificate_status(self, info: CertificateInfo, summary_only: bool = False):
+        """
+        Log certificate status with appropriate severity.
+
+        summary_only skips the verbose detail dump (Subject/Issuer/SAN/FIPS/etc.)
+        below the headline status line — used on cache-hit re-detections, where
+        those static cert properties haven't changed since they were last logged
+        in full.
+        """
         days_left = info.days_until_expiry
 
         display_path = info.path
@@ -814,6 +821,9 @@ class CertificateAnalyzer:
                 f"valid for {days_left:.1f} more days"
                 f"{k8s_ctx}"
             )
+
+        if summary_only:
+            return
 
         detail_log = logger.info if self.demo_mode else logger.debug
         detail_log(f"   Subject: {info.subject}")
@@ -1568,8 +1578,14 @@ class CertificateAnalyzer:
                     self._apply_pod_context(cert_info, tetragon_pod)
                 if event.node_name:
                     cert_info.node_name = event.node_name
-                self.log_certificate_status(cert_info)
-                self.metrics.update_certificate_metrics(cert_info)
+                # The cert's own properties (expiry, FIPS status, etc.) haven't
+                # changed since the last full update — only the access recency
+                # and the (possibly new) accessing process need refreshing here,
+                # not all 8 Gauges and the full detail log for every cached cert
+                # in this file.
+                self.log_certificate_status(cert_info, summary_only=True)
+                self.metrics.update_last_accessed(cert_info)
+                self.metrics.record_cert_process_access(cert_info, process_name, parent_process)
             return
 
         # Large multi-cert files (e.g. system CA bundles with hundreds of certs)
