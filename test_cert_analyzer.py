@@ -221,8 +221,96 @@ class TestMultiCertificateParsing:
             f.write("")
         
         certs = analyzer.parse_certificates(bundle_path)
-        
+
         assert len(certs) == 0
+
+
+class TestLargeFileBackgroundProcessing:
+    """Files with more PEM certs than large_file_cert_threshold are parsed off-thread"""
+
+    @staticmethod
+    def _make_event(path):
+        from unittest.mock import MagicMock
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = '/usr/bin/cat'
+        mock_kprobe.process.pid.value = 4242
+        mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+        mock_event.node_name = ''
+        return mock_event
+
+    def _wait_for_background_processing(self, analyzer, path, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if path not in analyzer._large_file_in_flight:
+                return
+            time.sleep(0.01)
+        pytest.fail("background certificate parsing did not finish in time")
+
+    def test_count_pem_certs(self, analyzer, temp_dir):
+        """_count_pem_certs counts BEGIN markers without parsing"""
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        assert analyzer._count_pem_certs(bundle_path) == 5
+
+    def test_small_file_processed_synchronously(self, analyzer, temp_dir):
+        """A file at or below the threshold is processed inline, no background thread"""
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(3)]
+        bundle_path = os.path.join(temp_dir, "small_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        # No wait needed — must already be populated when process_event returns
+        assert bundle_path not in analyzer._large_file_in_flight
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 3
+
+    def test_large_file_processed_in_background(self, analyzer, temp_dir):
+        """A file over the threshold is handed to a worker thread and still lands in known_certs"""
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "large_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        self._wait_for_background_processing(analyzer, bundle_path)
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
+
+    def test_duplicate_events_for_large_file_in_flight_are_deduped(self, analyzer, temp_dir):
+        """A second event for the same large file while the first is still parsing is skipped"""
+        from unittest.mock import MagicMock
+        analyzer._large_file_cert_threshold = 3
+        mock_publisher = MagicMock()
+        analyzer.kafka_publisher = mock_publisher
+
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "dup_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        # Simulate the in-flight worker already having claimed this path.
+        analyzer._large_file_in_flight.add(bundle_path)
+        analyzer.process_event(self._make_event(bundle_path))
+
+        # Nothing should have been published — the event was skipped, not processed.
+        assert mock_publisher.publish.call_count == 0
+        assert bundle_path not in analyzer.known_certs
 
 
 class TestCertificateAnalysis:

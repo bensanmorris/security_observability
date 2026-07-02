@@ -107,6 +107,7 @@ def main():
     checksum_enabled        = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',        'false').lower() == 'true'
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
+    large_file_cert_threshold = int(cfg(cp, 'certificates', 'large_file_cert_threshold', 'LARGE_FILE_CERT_THRESHOLD', '20'))
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
@@ -146,6 +147,7 @@ def main():
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
     logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
     logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
+    logger.info(f"Large file threshold: >{large_file_cert_threshold} certs parsed in background")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -203,7 +205,8 @@ def main():
                                    connect_probe_enabled=connect_probe_enabled,
                                    port_probe_timeout=port_probe_timeout,
                                    port_probe_connect_delay=port_probe_connect_delay,
-                                   tls_outbound_ports=tls_outbound_ports)
+                                   tls_outbound_ports=tls_outbound_ports,
+                                   large_file_cert_threshold=large_file_cert_threshold)
 
     health = HealthServer(
         analyzer=analyzer,
