@@ -92,7 +92,8 @@ class PrometheusMetrics:
             'tls_certificate_fips_compliant',
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash']
+             'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash',
+             'key_size', 'curve_name']
         )
 
         self.cert_self_signed = Gauge(
@@ -280,6 +281,8 @@ class PrometheusMetrics:
                 node_name=info.node_name,
                 key_algorithm=info.key_algorithm,
                 signature_hash=info.signature_hash,
+                key_size=str(info.key_size),
+                curve_name=info.curve_name,
             ).set(1 if info.fips_compliant else 0)
 
         self.cert_self_signed.labels(

@@ -2008,7 +2008,9 @@
               "workload_kind": "Workload Kind",
               "workload_name": "Workload",
               "pod_name": "Pod",
-              "node_name": "Node"
+              "node_name": "Node",
+              "key_size": "Key Size",
+              "curve_name": "EC Curve"
             }
           }
         }
@@ -2067,6 +2069,65 @@
       }
     },
     {
+      "id": 47,
+      "title": "Key Size & EC Curve Distribution",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count by (key_algorithm, key_size, curve_name) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"})",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "renameByName": {
+              "key_algorithm": "Algorithm",
+              "key_size": "Key Size (bits)",
+              "curve_name": "EC Curve",
+              "Value": "Certificate Count"
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 17,
       "title": "Security",
       "type": "row",
@@ -2075,7 +2136,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 68
       },
       "panels": []
     },
@@ -2087,7 +2148,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 69
       },
       "datasource": {
         "type": "prometheus",
@@ -2171,7 +2232,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 69
+        "y": 77
       },
       "datasource": {
         "type": "prometheus",
@@ -2224,7 +2285,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "datasource": {
         "type": "prometheus",
@@ -2398,7 +2459,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 89
       },
       "datasource": {
         "type": "prometheus",
@@ -2526,7 +2587,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 97
       },
       "panels": []
     },
@@ -2538,7 +2599,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -2590,7 +2651,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -2655,7 +2716,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 98
+        "y": 106
       },
       "datasource": {
         "type": "prometheus",
@@ -2762,7 +2823,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 98
+        "y": 106
       },
       "datasource": {
         "type": "prometheus",
@@ -2857,7 +2918,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 104
+        "y": 112
       },
       "datasource": {
         "type": "prometheus",
@@ -2911,7 +2972,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 104
+        "y": 112
       },
       "datasource": {
         "type": "prometheus",
@@ -2968,7 +3029,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 110
+        "y": 118
       },
       "panels": []
     },
@@ -2984,7 +3045,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 119
       },
       "targets": [
         {
@@ -3136,7 +3197,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 127
       },
       "panels": [
         {
@@ -3179,7 +3240,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 120
+            "y": 128
           },
           "targets": [
             {
@@ -3233,7 +3294,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 120
+            "y": 128
           },
           "targets": [
             {
@@ -3255,7 +3316,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 128
+            "y": 136
           },
           "datasource": {
             "type": "prometheus",
