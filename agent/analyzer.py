@@ -641,17 +641,29 @@ class CertificateAnalyzer:
     ) -> None:
         """Apply pod/event context, update metrics, log, cache, and publish for a freshly-parsed file."""
         for cert_info in cert_infos:
-            self._apply_pod_context(cert_info, tetragon_pod)
-            cert_info.node_name      = node_name
-            cert_info.parent_process = parent_process
-            cert_info.parent_pid     = parent_pid
+            try:
+                self._apply_pod_context(cert_info, tetragon_pod)
+                cert_info.node_name      = node_name
+                cert_info.parent_process = parent_process
+                cert_info.parent_pid     = parent_pid
 
-            self.metrics.update_certificate_metrics(cert_info)
-            self.log_certificate_status(cert_info)
-            self.known_certs[cert_info.unique_key] = cert_info
+                self.metrics.update_certificate_metrics(cert_info)
+                self.log_certificate_status(cert_info)
+                self.known_certs[cert_info.unique_key] = cert_info
 
-            if self.kafka_publisher is not None:
-                self.kafka_publisher.publish(cert_info)
+                if self.kafka_publisher is not None:
+                    self.kafka_publisher.publish(cert_info)
+            except Exception as e:
+                # One bad cert (e.g. an unexpected label value) must not abort
+                # the rest of the file — each cert is otherwise independent.
+                logger.error(
+                    f"Error finishing certificate {cert_info.cert_index} in "
+                    f"{cert_info.path}: {e}", exc_info=True
+                )
+                self.metrics.cert_events_total.labels(
+                    event_type='processing', status='error'
+                ).inc()
+                self.metrics.cert_analysis_errors.labels(error_type='finish_error').inc()
 
         self._update_cache_metrics()
 
@@ -685,15 +697,25 @@ class CertificateAnalyzer:
 
         def _worker():
             try:
-                cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
-                if cert_infos:
-                    logger.info(
-                        f"Found {len(cert_infos)} certificate(s) in {cert_path} "
-                        f"(parsed in background — large file)"
-                    )
-                    self._finish_new_certificate_file(
-                        cert_infos, tetragon_pod, parent_process, parent_pid, node_name
-                    )
+                try:
+                    cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
+                    if cert_infos:
+                        logger.info(
+                            f"Found {len(cert_infos)} certificate(s) in {cert_path} "
+                            f"(parsed in background — large file)"
+                        )
+                        self._finish_new_certificate_file(
+                            cert_infos, tetragon_pod, parent_process, parent_pid, node_name
+                        )
+                except Exception as e:
+                    # Mirror the error handling start()'s event loop gives every
+                    # synchronous event — this runs on its own thread, so nothing
+                    # else will catch, log, or count an exception raised here.
+                    logger.error(f"Error processing large certificate file {cert_path}: {e}",
+                                 exc_info=True)
+                    self.metrics.cert_events_total.labels(
+                        event_type='processing', status='error'
+                    ).inc()
             finally:
                 self._large_file_in_flight.discard(cert_path)
 

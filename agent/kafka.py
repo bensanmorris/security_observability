@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -43,6 +44,14 @@ class KafkaPublisher:
     The publisher is a no-op when Kafka is disabled or unavailable. All
     errors are logged as warnings and never propagate — a broker outage must
     never prevent the analyzer from continuing to work with Prometheus only.
+
+    Thread-safety: publish() may be called concurrently from the main Tetragon
+    event-consumer thread, the periodic_scan thread, and any number of
+    large-file background parsing threads. An RLock guards every read/write of
+    self._producer and self._last_connect_attempt (including the async
+    _on_error errback, which kafka-python invokes from its own I/O thread) so
+    reconnects can't race and a producer can't be closed out from under a
+    concurrent send().
 
     Message schema (all fields present, empty string when not applicable):
     {
@@ -98,6 +107,7 @@ class KafkaPublisher:
         self._producer_kwargs: dict = {}
         self._last_connect_attempt: float = 0.0
         self._reconnect_cooldown: float = 30.0  # seconds between reconnect attempts
+        self._lock = threading.RLock()
 
         if not KAFKA_AVAILABLE:
             logger.warning(
@@ -123,12 +133,16 @@ class KafkaPublisher:
             self._producer_kwargs['sasl_plain_username']    = sasl_username
             self._producer_kwargs['sasl_plain_password']    = sasl_password
 
-        self._connect(bootstrap_servers, topic)
+        with self._lock:
+            self._connect(bootstrap_servers, topic)
 
     def _connect(self, bootstrap_servers: str = '', topic: str = '') -> bool:
         """
         Attempt to create a KafkaProducer. Returns True on success.
         Respects a cooldown period to avoid hammering a down broker.
+
+        Caller must hold self._lock — this reads and writes self._producer
+        and self._last_connect_attempt without its own locking.
         """
         now = time.time()
         if now - self._last_connect_attempt < self._reconnect_cooldown:
@@ -170,11 +184,6 @@ class KafkaPublisher:
         """
         if not KAFKA_AVAILABLE:
             return
-
-        # Attempt reconnection if producer is absent
-        if self._producer is None:
-            if not self._connect():
-                return
 
         message = {
             'event_type':        'certificate_discovered',
@@ -228,31 +237,42 @@ class KafkaPublisher:
         # Use unique_key (path:cert_index:serial) as the partition key.
         key = cert_info.unique_key
 
-        try:
-            self._producer.send(
-                self._topic,
-                key=key,
-                value=message,
-            ).add_errback(self._on_error)
-        except Exception as e:
-            logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
-            # Nullify the producer so the next publish attempt triggers reconnect
-            self._producer = None
+        with self._lock:
+            # Attempt reconnection if producer is absent
+            if self._producer is None:
+                if not self._connect():
+                    return
+
+            try:
+                self._producer.send(
+                    self._topic,
+                    key=key,
+                    value=message,
+                ).add_errback(self._on_error)
+            except Exception as e:
+                logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
+                # Nullify the producer so the next publish attempt triggers reconnect
+                self._producer = None
 
     def _on_error(self, exc: Exception) -> None:
+        # kafka-python invokes errbacks from its own internal I/O thread, so
+        # this can run concurrently with publish()/close() on other threads.
         logger.warning(f"Kafka delivery error: {exc}")
         _kafka_delivery_errors.labels(node_name=_NODE_NAME).inc()
         # Nullify the producer so the next publish attempt triggers reconnect.
         # Without this, a broker that drops messages in-flight (broker down,
         # auth failure, topic deleted) would leave the producer in a state where
         # send() appears to succeed but nothing is ever delivered.
-        self._producer = None
+        with self._lock:
+            self._producer = None
 
     def close(self) -> None:
         """Flush pending messages and close the producer cleanly."""
-        if self._producer is not None:
-            try:
-                self._producer.flush(timeout=5)
-                self._producer.close()
-            except Exception as e:
-                logger.warning(f"Error closing Kafka producer: {e}")
+        with self._lock:
+            if self._producer is not None:
+                try:
+                    self._producer.flush(timeout=5)
+                    self._producer.close()
+                except Exception as e:
+                    logger.warning(f"Error closing Kafka producer: {e}")
+                self._producer = None

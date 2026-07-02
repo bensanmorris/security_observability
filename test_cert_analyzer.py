@@ -312,6 +312,65 @@ class TestLargeFileBackgroundProcessing:
         assert mock_publisher.publish.call_count == 0
         assert bundle_path not in analyzer.known_certs
 
+    def test_bad_cert_in_finish_loop_does_not_abort_remaining_certs(self, analyzer, temp_dir):
+        """One cert raising in _finish_new_certificate_file must not drop the rest of the file."""
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "flaky_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        real_update = analyzer.metrics.update_certificate_metrics
+
+        def flaky_update(cert_info):
+            if cert_info.cert_index == 2:
+                raise ValueError("simulated bad label value")
+            return real_update(cert_info)
+
+        analyzer.metrics.update_certificate_metrics = flaky_update
+
+        errors_before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='finish_error'
+        )._value.get()
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        # certs 0,1,3,4 must have landed in the cache; only cert 2 was lost.
+        assert len(matching) == 4
+
+        errors_after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='finish_error'
+        )._value.get()
+        assert errors_after == errors_before + 1
+
+    def test_large_file_worker_exception_is_logged_and_counted(self, analyzer, temp_dir, caplog):
+        """An exception inside the background worker must hit the same error-logging/metrics path as a synchronous event."""
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "exploding_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated parse failure")
+
+        analyzer.analyze_certificate = boom
+
+        errors_before = analyzer.metrics.cert_events_total.labels(
+            event_type='processing', status='error'
+        )._value.get()
+
+        with caplog.at_level(logging.ERROR, logger="agent.analyzer"):
+            analyzer.process_event(self._make_event(bundle_path))
+            self._wait_for_background_processing(analyzer, bundle_path)
+
+        errors_after = analyzer.metrics.cert_events_total.labels(
+            event_type='processing', status='error'
+        )._value.get()
+        assert errors_after == errors_before + 1
+        assert any("Error processing large certificate file" in r.message
+                   for r in caplog.records)
+
 
 class TestCertificateAnalysis:
     """Test certificate analysis and information extraction"""
@@ -3803,7 +3862,57 @@ class TestKafkaPublisher:
         publisher = KafkaPublisher.__new__(KafkaPublisher)
         publisher._producer = None
         publisher._topic = 't'
+        publisher._lock = threading.RLock()
         publisher.close()   # must not raise
+
+    # ── thread-safety ────────────────────────────────────────────────────────
+
+    def test_concurrent_publish_connects_producer_once(self, monkeypatch, sample_cert_info):
+        """
+        Many threads calling publish() while the producer is absent must only
+        construct one KafkaProducer — the self._lock around _connect()/publish()
+        serializes the check-then-connect so concurrent callers (main thread,
+        periodic_scan thread, and any number of large-file background workers)
+        can't race into creating/discarding multiple producers.
+        """
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        connect_count = {'n': 0}
+
+        class SlowFakeProducer:
+            def __init__(self, **kwargs):
+                # Widen the race window — releases the GIL, giving other
+                # threads a chance to interleave if the lock isn't held.
+                time.sleep(0.02)
+                connect_count['n'] += 1
+
+            def send(self, *args, **kwargs):
+                future = MagicMock()
+                future.add_errback = lambda cb: None
+                return future
+
+            def close(self, timeout=None):
+                pass
+
+        with patch('agent.kafka.KafkaProducer', SlowFakeProducer):
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            connect_count['n'] = 0  # ignore the constructor's own initial connect
+            publisher._producer = None  # force every thread to see "needs reconnect"
+            publisher._reconnect_cooldown = 0
+
+            threads = [
+                threading.Thread(target=publisher.publish, args=(sample_cert_info,))
+                for _ in range(20)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+            assert connect_count['n'] == 1
 
     # ── integration with CertificateAnalyzer ─────────────────────────────────
 
