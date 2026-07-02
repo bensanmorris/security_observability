@@ -1817,6 +1817,40 @@ class CertificateAnalyzer:
         thread.start()
         logger.info(f"Started Tetragon policy monitor (interval: {interval}s)")
 
+    def _start_process_metrics_monitor(self) -> None:
+        """
+        Start a background daemon thread that periodically refreshes the
+        process CPU/RSS gauges (cert_analyzer_process_cpu_seconds_total,
+        cert_analyzer_process_rss_bytes).
+
+        These also update as a side-effect of cert-processing events
+        (_update_cache_metrics), but relying on that alone leaves them frozen
+        during quiet periods with no matching Tetragon events. The next event
+        then dumps all the CPU/RSS change accumulated across the whole gap
+        into a single sample — which Grafana's deriv()-based panels render as
+        a large spike that never actually happened at that instant. A fixed
+        timer keeps the gauges live regardless of event traffic, independent
+        of any Tetragon connectivity (unlike the version/policy monitors,
+        this doesn't need a stub).
+
+        Interval is configurable via PROCESS_METRICS_INTERVAL env var
+        (default: 15 seconds, matching the default Prometheus scrape interval).
+        """
+        interval = int(os.getenv('PROCESS_METRICS_INTERVAL', '15'))
+
+        def _monitor():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.metrics.update_process_metrics()
+                except Exception as e:
+                    logger.warning(f"Process metrics monitor error: {e}")
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.name = 'process-metrics-monitor'
+        thread.start()
+        logger.info(f"Started process metrics monitor (interval: {interval}s)")
+
     def start(self):
         """
         Start listening to Tetragon events with automatic reconnection.
@@ -1849,6 +1883,7 @@ class CertificateAnalyzer:
         self._start_version_monitor(stub)
         self.check_tetragon_policies(stub)
         self._start_policy_monitor(stub)
+        self._start_process_metrics_monitor()
 
         request = events_pb2.GetEventsRequest(
             allow_list=[

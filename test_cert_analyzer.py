@@ -3376,6 +3376,81 @@ class TestVersionMonitor:
             "Mismatch metric was not set after simulated Tetragon upgrade"
 
 
+class TestProcessMetricsMonitor:
+    """
+    Tests for _start_process_metrics_monitor — the fixed-interval thread that
+    keeps cert_analyzer_process_cpu_seconds_total/_rss_bytes live instead of
+    only updating as a side-effect of cert-processing events (which let them
+    go stale for minutes and then jump in one lump sum, producing spikes in
+    Grafana's deriv()-based panels that didn't correspond to any real event).
+    """
+
+    def test_process_metrics_monitor_thread_is_daemon(self, analyzer, monkeypatch):
+        """The process metrics monitor thread must be a daemon so it doesn't block shutdown."""
+        threads_started = []
+
+        original_thread = _threading.Thread
+
+        def _capture_thread(*args, **kwargs):
+            t = original_thread(*args, **kwargs)
+            threads_started.append(t)
+            return t
+
+        monkeypatch.setattr(_threading, 'Thread', _capture_thread)
+        monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '9999')
+
+        analyzer._start_process_metrics_monitor()
+
+        metrics_threads = [t for t in threads_started
+                            if getattr(t, 'name', '') == 'process-metrics-monitor']
+        assert len(metrics_threads) == 1
+        assert metrics_threads[0].daemon is True
+
+    def test_process_metrics_monitor_calls_update_periodically(self, analyzer, monkeypatch):
+        """Monitor invokes update_process_metrics at least twice, independent of any event."""
+        call_count   = [0]
+        second_call  = _threading.Event()
+
+        def _mock_update():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                second_call.set()
+
+        monkeypatch.setattr(analyzer.metrics, 'update_process_metrics', _mock_update)
+        monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '0')
+
+        analyzer._start_process_metrics_monitor()
+
+        assert second_call.wait(timeout=2.0), \
+            "update_process_metrics was not called a second time within 2s"
+
+    def test_process_metrics_monitor_survives_update_exception(self, analyzer, monkeypatch):
+        """An exception in update_process_metrics must not kill the monitor thread."""
+        call_count  = [0]
+        second_call = _threading.Event()
+
+        def _failing_then_succeeding_update():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated transient failure")
+            second_call.set()
+
+        monkeypatch.setattr(analyzer.metrics, 'update_process_metrics',
+                             _failing_then_succeeding_update)
+        monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '0')
+
+        analyzer._start_process_metrics_monitor()
+
+        assert second_call.wait(timeout=2.0), \
+            "Monitor thread did not survive the exception"
+
+    def test_process_metrics_monitor_does_not_require_tetragon_stub(self, analyzer, monkeypatch):
+        """Unlike the version/policy monitors, this one takes no stub argument."""
+        monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '9999')
+        # Would raise TypeError if the method still expected a stub positional arg.
+        analyzer._start_process_metrics_monitor()
+
+
 # ── Certificate parsing exception handling tests ──────────────────────────────
 
 class _BrokenCert:
