@@ -1396,7 +1396,8 @@
               "instance": true,
               "job": true,
               "cert_index": true,
-              "serial": true
+              "serial": true,
+              "checksum": false
             },
             "indexByName": {
               "common_name": 0,
@@ -1405,7 +1406,8 @@
               "parent_process": 3,
               "issuer": 4,
               "node_name": 5,
-              "Value": 6
+              "Value": 7,
+              "checksum": 6
             },
             "renameByName": {
               "common_name": "Common Name",
@@ -1414,7 +1416,8 @@
               "parent_process": "Parent Process",
               "issuer": "Issuer",
               "node_name": "Node",
-              "Value": "Days Until Expiry"
+              "Value": "Days Until Expiry",
+              "checksum": "Checksum"
             }
           }
         },

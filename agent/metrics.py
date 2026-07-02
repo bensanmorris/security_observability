@@ -57,7 +57,8 @@ class PrometheusMetrics:
         self.cert_process_info = Gauge(
             'tls_certificate_process_info',
             'Processes observed loading this certificate (1=observed)',
-            ['cert_path', 'cert_index', 'serial', 'process', 'parent_process', 'node_name'],
+            ['cert_path', 'cert_index', 'serial', 'process', 'parent_process', 'node_name',
+             'checksum'],
         )
 
         # Event counters
@@ -241,6 +242,7 @@ class PrometheusMetrics:
             process=info.process,
             parent_process=info.parent_process,
             node_name=info.node_name,
+            checksum=info.checksum,
         ).set(1)
 
         self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
