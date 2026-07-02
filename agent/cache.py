@@ -1,6 +1,7 @@
 import logging
 import threading
 from collections import OrderedDict
+from typing import Callable, Optional
 from typing import OrderedDict as OrderedDictType
 
 from .constants import CACHE_MIN_SIZE, CACHE_MAX_SIZE
@@ -29,9 +30,19 @@ class LRUCache:
     threads cannot race on check-then-modify sequences.  keys()/items()/values()
     and __iter__ return snapshots (lists) so callers can iterate safely after
     releasing the lock.
+
+    on_set/on_evict let a caller maintain a secondary index (e.g. CertificateAnalyzer's
+    path → keys index for known_certs) without that caller having to scan keys()/values()
+    itself — see _index_known_cert/_deindex_known_cert in analyzer.py. Both are invoked
+    outside the internal lock, after the store mutation has completed.
     """
 
-    def __init__(self, maxsize: int = CACHE_MAX_SIZE):
+    def __init__(
+        self,
+        maxsize: int = CACHE_MAX_SIZE,
+        on_set: Optional[Callable] = None,
+        on_evict: Optional[Callable] = None,
+    ):
         if maxsize < CACHE_MIN_SIZE:
             logger.warning(
                 f"CACHE_MAX_SIZE {maxsize} is below minimum {CACHE_MIN_SIZE}; "
@@ -41,6 +52,8 @@ class LRUCache:
         self.maxsize = maxsize
         self._store: OrderedDict = OrderedDict()
         self._lock = threading.RLock()
+        self._on_set = on_set
+        self._on_evict = on_evict
 
     # ── dict-like interface ───────────────────────────────────────────────────
 
@@ -54,19 +67,28 @@ class LRUCache:
             return self._store[key]
 
     def __setitem__(self, key, value) -> None:
+        evicted = None
         with self._lock:
             if key in self._store:
                 self._store.move_to_end(key)
                 self._store[key] = value
             else:
                 if len(self._store) >= self.maxsize:
-                    evicted_key, _ = self._store.popitem(last=False)
+                    evicted_key, evicted_value = self._store.popitem(last=False)
                     logger.debug(f"LRU eviction: {evicted_key}")
+                    evicted = (evicted_key, evicted_value)
                 self._store[key] = value
+        if evicted is not None and self._on_evict is not None:
+            self._on_evict(*evicted)
+        if self._on_set is not None:
+            self._on_set(key, value)
 
     def __delitem__(self, key) -> None:
         with self._lock:
+            value = self._store[key]
             del self._store[key]
+        if self._on_evict is not None:
+            self._on_evict(key, value)
 
     def __len__(self) -> int:
         with self._lock:
@@ -101,9 +123,15 @@ class LRUCache:
 
     def discard(self, key) -> None:
         """Set-like discard — no error if key absent."""
+        value = None
+        found = False
         with self._lock:
             if key in self._store:
+                value = self._store[key]
                 del self._store[key]
+                found = True
+        if found and self._on_evict is not None:
+            self._on_evict(key, value)
 
     def clear(self) -> None:
         with self._lock:
