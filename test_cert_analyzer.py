@@ -1847,6 +1847,77 @@ class TestCacheIntegration:
         assert "path:0:serial" not in analyzer.known_certs
 
 
+class TestKnownCertsIndex:
+    """
+    Tests for the _known_paths index (agent/analyzer.py) that process_event's
+    "already known certificate file" check now uses instead of scanning every
+    entry in known_certs. Covers population on first parse, cleanup on LRU
+    eviction, and that entries without a usable path degrade gracefully
+    instead of raising.
+    """
+
+    def test_index_populated_after_first_parse(self, analyzer, temp_dir):
+        """_known_paths gains an entry when a cert is analyzed via the normal flow."""
+        cert, _ = TestCertificateGeneration.generate_certificate("index-test.example.com", 365)
+        path = os.path.join(temp_dir, "index-test.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+
+        assert path in analyzer._known_paths
+        assert cert_infos[0].unique_key in analyzer._known_paths[path]
+
+    def test_index_cleaned_up_on_lru_eviction(self, analyzer, temp_dir):
+        """
+        When known_certs evicts its LRU entry, that entry's path must also
+        disappear from _known_paths — otherwise process_event would believe
+        an evicted cert is still known and hand back a stale key.
+        """
+        import cert_analyzer as _ca
+
+        target = CertificateInfo(
+            path="/tmp/soon-to-be-evicted.pem", subject='CN=x', issuer='CN=ca',
+            serial_number='1',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        # Real __setitem__ so the on_set callback actually indexes it, and it
+        # lands at the LRU front (oldest) since it's inserted first.
+        analyzer.known_certs[target.unique_key] = target
+        assert target.path in analyzer._known_paths
+
+        # Fill the rest of the cache directly (cheap — bypasses callbacks,
+        # same approach as test_known_certs_evicts_lru_when_full above).
+        for i in range(_ca.CACHE_MAX_SIZE - 1):
+            analyzer.known_certs._store[f"filler:{i}:serial"] = None
+
+        # One more real insert pushes the cache over capacity, evicting
+        # `target` (the LRU front) and firing _deindex_known_cert for it.
+        filler_info = CertificateInfo(
+            path="/tmp/new-entry.pem", subject='CN=y', issuer='CN=ca',
+            serial_number='2',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        analyzer.known_certs[filler_info.unique_key] = filler_info
+
+        assert target.unique_key not in analyzer.known_certs
+        assert target.path not in analyzer._known_paths, \
+            "evicted cert's path must be removed from the index, not left stale"
+
+    def test_index_ignores_entries_without_a_path(self, analyzer):
+        """
+        Cache entries with no usable .path (e.g. tests seeding known_certs
+        with None, as test_known_certs_evicts_lru_when_full does) must not
+        crash the on_set/on_evict callbacks.
+        """
+        analyzer.known_certs["bare:0:serial"] = None
+        assert len(analyzer._known_paths) == 0
+
+
 class TestCacheHitReDetection:
     """
     Tests for the "already known certificate file" branch in process_event

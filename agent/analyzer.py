@@ -104,7 +104,17 @@ class CertificateAnalyzer:
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self._large_file_cert_threshold = large_file_cert_threshold
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
-        self.known_certs: LRUCache = LRUCache()
+        # cert_path -> set of known_certs keys for that path. Lets process_event's
+        # "already known" check do an O(1) dict lookup instead of scanning every
+        # entry in known_certs (which used to cost real, sustained CPU once the
+        # cache grew past a few hundred entries — see _index_known_cert below).
+        # Not GIL-atomic like the sets below: building it is a setdefault()+add()
+        # pair, not a single op, so it needs its own lock.
+        self._known_paths: Dict[str, Set[str]] = {}
+        self._known_paths_lock = threading.Lock()
+        self.known_certs: LRUCache = LRUCache(
+            on_set=self._index_known_cert, on_evict=self._deindex_known_cert
+        )
         self.processed_paths: LRUCache = LRUCache()
         # Paths that failed password attempts — cached to avoid repeating expensive
         # crypto operations on every subsequent Tetragon event for the same file.
@@ -128,6 +138,32 @@ class CertificateAnalyzer:
         # GIL-atomic set ops, same reasoning as _probe_in_flight above.
         self._large_file_in_flight: Set[str] = set()
         self.last_event_time: float = 0.0
+
+    def _index_known_cert(self, key: str, value) -> None:
+        """
+        known_certs on_set callback: record `key` under its cert's path in
+        _known_paths. `value` is the CertificateInfo being stored (or, in tests
+        that seed known_certs directly, sometimes None/a bare object) — anything
+        without a `.path` just isn't indexed, which only degrades that entry back
+        to "not found by process_event's known-file check", not a crash.
+        """
+        path = getattr(value, 'path', None)
+        if path is None:
+            return
+        with self._known_paths_lock:
+            self._known_paths.setdefault(path, set()).add(key)
+
+    def _deindex_known_cert(self, key: str, value) -> None:
+        """known_certs on_evict callback — the inverse of _index_known_cert."""
+        path = getattr(value, 'path', None)
+        if path is None:
+            return
+        with self._known_paths_lock:
+            keys_for_path = self._known_paths.get(path)
+            if keys_for_path is not None:
+                keys_for_path.discard(key)
+                if not keys_for_path:
+                    del self._known_paths[path]
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -1564,11 +1600,15 @@ class CertificateAnalyzer:
         self.last_event_time = time.time()
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
-        # Check if we've already analyzed this file
-        if any(key.startswith(cert_path + ":") for key in self.known_certs.keys()):
+        # Check if we've already analyzed this file. _known_paths gives an O(1)
+        # lookup keyed on the exact path rather than scanning every entry in
+        # known_certs with a startswith() prefix match — at cache sizes in the
+        # thousands (a busy node, or a large CA bundle's certs all cached) that
+        # scan was real, sustained CPU on every single qualifying event.
+        with self._known_paths_lock:
+            matching_keys = list(self._known_paths.get(cert_path, ()))
+        if matching_keys:
             logger.info(f"Re-detected known certificate file: {cert_path}")
-            matching_keys = [k for k in self.known_certs.keys()
-                             if k.startswith(cert_path + ":")]
             for key in matching_keys:
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
