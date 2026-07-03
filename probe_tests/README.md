@@ -451,7 +451,7 @@ event-consumer thread from handling the canary's event first.
 If run with `--parallel-processes`, the script also prints a `curl`/`grep`
 command comparing the observed `tls_certificate_process_info` series count
 for the bundle against the pre-fix (`N * cert-count`) and post-fix
-(`N * large_file_cert_threshold`) expectations.
+(`N * large_file_metrics_cap`) expectations.
 
 **Step 4 — Remove the policy:**
 

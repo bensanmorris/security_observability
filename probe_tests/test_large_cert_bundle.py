@@ -26,7 +26,7 @@ Usage:
   # bundle is cached, spawn N distinct processes that each independently open
   # it, simulating e.g. a shared system CA bundle being read by many unrelated
   # binaries. Prometheus's tls_certificate_process_info series for the bundle
-  # should stay bounded (~large_file_cert_threshold per process), not grow as
+  # should stay bounded (~large_file_metrics_cap per process), not grow as
   # N * cert-count.
   python3 test_large_cert_bundle.py --parallel-processes 25
 
@@ -61,18 +61,38 @@ CONFIG_FILE_PATH = '/etc/cert-analyzer/cert-analyzer.conf'
 _SETTLE_WAIT = 3  # seconds to let cert_analyzer log the canary before we exit
 
 
-def _effective_threshold() -> int:
-    """Best-effort read of the configured large_file_cert_threshold, for the reminder printed below."""
-    default = int(os.getenv('LARGE_FILE_CERT_THRESHOLD', '20'))
+def _effective_config_int(option: str, env_var: str, default: str) -> int:
+    """Best-effort read of an integer [certificates] option, for the reminders printed below."""
+    fallback = int(os.getenv(env_var, default))
     cp = configparser.ConfigParser()
     try:
         if os.access(CONFIG_FILE_PATH, os.R_OK):
             cp.read(CONFIG_FILE_PATH)
-            if cp.has_option('certificates', 'large_file_cert_threshold'):
-                return int(cp.get('certificates', 'large_file_cert_threshold'))
+            if cp.has_option('certificates', option):
+                return int(cp.get('certificates', option))
     except (OSError, configparser.Error, ValueError):
         pass
-    return default
+    return fallback
+
+
+def _effective_threshold() -> int:
+    """Effective large_file_cert_threshold -- controls background-thread parsing routing."""
+    return _effective_config_int('large_file_cert_threshold', 'LARGE_FILE_CERT_THRESHOLD', '20')
+
+
+def _effective_metrics_cap() -> int:
+    """
+    Effective large_file_metrics_cap -- caps per-bundle Prometheus fan-out.
+
+    Deliberately separate from _effective_threshold() above: that one only
+    reflects when a file is parsed on a background thread, this one reflects
+    the actual cap process_event()'s cache-hit branch and
+    _finish_new_certificate_file() enforce on Prometheus series. An earlier
+    version of this script used _effective_threshold()'s value for both,
+    which silently printed the wrong (15x too small) expected series count
+    once the two knobs were split apart in agent/analyzer.py.
+    """
+    return _effective_config_int('large_file_metrics_cap', 'LARGE_FILE_METRICS_CAP', '300')
 
 
 def _make_self_signed_cert(common_name: str) -> bytes:
@@ -181,6 +201,7 @@ def main() -> None:
     args = parser.parse_args()
 
     threshold = _effective_threshold()
+    metrics_cap = _effective_metrics_cap()
     if args.count <= threshold:
         print(f'WARNING: --count {args.count} does not exceed the configured '
               f'large_file_cert_threshold ({threshold}) — the bundle will be '
@@ -203,6 +224,7 @@ def main() -> None:
     print('    sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml')
     print()
     print(f'Configured large_file_cert_threshold: {threshold}')
+    print(f'Configured large_file_metrics_cap:    {metrics_cap}')
     print()
 
     print(f'[test] Generating {args.count} self-signed certs -> {bundle_path}')
@@ -263,11 +285,11 @@ def main() -> None:
     print()
 
     if args.parallel_processes > 0:
-        cap = threshold
+        cap = metrics_cap
         print('--- Re-access cardinality cap ---')
         print()
         print(f'{args.parallel_processes} distinct processes each re-opened the already-cached')
-        print(f'bundle. Each re-access is capped to large_file_cert_threshold '
+        print(f'bundle. Each re-access is capped to large_file_metrics_cap '
               f'({cap}) tracked certs (agent/analyzer.py process_event, cache-hit branch),')
         print(f'instead of one tls_certificate_process_info series per (cached cert, process) pair:')
         print()
@@ -276,7 +298,7 @@ def main() -> None:
         print(f'# Before the fix: up to {args.parallel_processes + 1} * {args.count} = '
               f'{(args.parallel_processes + 1) * args.count} series (N processes x every cached cert)')
         print(f'# After the fix:  at most {args.parallel_processes + 1} * {cap} = '
-              f'{(args.parallel_processes + 1) * cap} series (capped per event to large_file_cert_threshold)')
+              f'{(args.parallel_processes + 1) * cap} series (capped per event to large_file_metrics_cap)')
         print()
 
     if not args.keep:
