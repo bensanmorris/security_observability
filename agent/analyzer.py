@@ -137,8 +137,14 @@ class CertificateAnalyzer:
         # Paths whose large multi-cert file (see _count_pem_certs) is currently
         # being parsed on a background thread — de-dupes repeat Tetragon events
         # for the same path that arrive before the worker populates known_certs.
-        # GIL-atomic set ops, same reasoning as _probe_in_flight above.
+        # Individual set ops (in/add/discard) are GIL-atomic, but the check-then-add
+        # in _process_certificate_file_async is a *pair* of ops, and its discard()
+        # runs on a different thread (the background worker) than its check+add
+        # (the main event-consumer thread) — the GIL can switch between the check
+        # and the add, racing against a same-path discard() completing in between,
+        # letting two workers get spawned for one file. Needs its own lock.
         self._large_file_in_flight: Set[str] = set()
+        self._large_file_in_flight_lock = threading.Lock()
         self.last_event_time: float = 0.0
 
     def _index_known_cert(self, key: str, value) -> None:
@@ -760,13 +766,14 @@ class CertificateAnalyzer:
         de-dupes repeat Tetragon events for the same path that arrive before the
         worker finishes and populates known_certs.
         """
-        if cert_path in self._large_file_in_flight:
-            logger.debug(
-                f"Large certificate file {cert_path} already being processed "
-                f"in the background — skipping duplicate event"
-            )
-            return
-        self._large_file_in_flight.add(cert_path)
+        with self._large_file_in_flight_lock:
+            if cert_path in self._large_file_in_flight:
+                logger.debug(
+                    f"Large certificate file {cert_path} already being processed "
+                    f"in the background — skipping duplicate event"
+                )
+                return
+            self._large_file_in_flight.add(cert_path)
 
         def _worker():
             try:
@@ -790,7 +797,8 @@ class CertificateAnalyzer:
                         event_type='processing', status='error'
                     ).inc()
             finally:
-                self._large_file_in_flight.discard(cert_path)
+                with self._large_file_in_flight_lock:
+                    self._large_file_in_flight.discard(cert_path)
 
         threading.Thread(
             target=_worker, daemon=True, name=f'cert-parse-{Path(cert_path).name}'
