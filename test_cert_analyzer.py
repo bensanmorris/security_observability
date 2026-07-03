@@ -292,6 +292,40 @@ class TestLargeFileBackgroundProcessing:
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
 
+    def test_background_threading_and_metrics_cap_are_independent(self, analyzer, temp_dir):
+        """
+        _large_file_cert_threshold (background-thread routing) and
+        _large_file_metrics_cap (Prometheus fan-out cap) are separate knobs.
+        A bundle over the (low) threshold but under the (higher) metrics cap
+        must still be parsed on a background thread AND get full per-cert
+        metrics for every cert -- raising the metrics cap to cover a realistic
+        bundle must not also disable background-thread parsing for it.
+        """
+        analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 10
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "midsize_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        # Over the cert threshold (5 > 3) -> routed to the background-thread
+        # path (same routing logic covered by test_count_pem_certs and
+        # test_large_file_processed_in_background).
+        self._wait_for_background_processing(analyzer, bundle_path)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
+
+        # Under the metrics cap (5 <= 10) -> every cert gets full metrics, none skipped.
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        assert len(samples) == 5, "certs under the metrics cap must all get full per-cert series"
+
     def test_bundle_beyond_threshold_caps_metrics_fanout(self, analyzer, temp_dir):
         """
         A bundle file (e.g. a system CA trust store) with far more certs than
@@ -303,6 +337,7 @@ class TestLargeFileBackgroundProcessing:
         cache-size accounting stay correct) even though metrics are capped.
         """
         analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 3
         certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
                  for i in range(10)]
         bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
@@ -337,6 +372,7 @@ class TestLargeFileBackgroundProcessing:
         (much larger) bundle size.
         """
         analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 3
         certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
                  for i in range(10)]
         bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
@@ -358,7 +394,7 @@ class TestLargeFileBackgroundProcessing:
             for s in metric.samples
             if s.labels.get('cert_path') == bundle_path
         ]
-        metrics_cap = analyzer._large_file_cert_threshold
+        metrics_cap = analyzer._large_file_metrics_cap
         # +1 covers the initial parsing event (process=/usr/bin/cat), which
         # also contributes up to metrics_cap series of its own.
         max_expected = metrics_cap * (n_processes + 1)

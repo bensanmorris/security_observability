@@ -87,7 +87,8 @@ class CertificateAnalyzer:
                  port_probe_timeout: float = 5.0,
                  port_probe_connect_delay: float = 2.0,
                  tls_outbound_ports: Optional[frozenset] = None,
-                 large_file_cert_threshold: int = 20):
+                 large_file_cert_threshold: int = 20,
+                 large_file_metrics_cap: int = 300):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -103,6 +104,7 @@ class CertificateAnalyzer:
         self._port_probe_connect_delay = port_probe_connect_delay
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self._large_file_cert_threshold = large_file_cert_threshold
+        self._large_file_metrics_cap = large_file_metrics_cap
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
@@ -681,12 +683,15 @@ class CertificateAnalyzer:
         # certs, so tracking every one individually turns a single file event
         # into thousands of new series in one burst — this is what drove
         # cert-analyzer's cardinality/memory spike and hang on 2026-07-03.
-        # Beyond the large-file threshold (same one that routes parsing to a
-        # background thread), only the first `metrics_cap` certs get full
+        # Beyond large_file_metrics_cap (deliberately separate from
+        # _large_file_cert_threshold, which only controls background-thread
+        # parsing — conflating the two would mean raising the metrics cap to
+        # cover a realistic bundle also disables the background-thread path
+        # for that same bundle), only the first `metrics_cap` certs get full
         # per-cert metrics/logging; the rest are still cached — so known-file
         # lookups and cache size stay accurate — but summarized in one log
         # line instead of fanning out more series.
-        metrics_cap = self._large_file_cert_threshold
+        metrics_cap = self._large_file_metrics_cap
         is_bundle = len(cert_infos) > metrics_cap
         skipped_self_signed = 0
         skipped_fips_noncompliant = 0
@@ -1648,8 +1653,8 @@ class CertificateAnalyzer:
             # an M-cert bundle is O(N*M) series, which is what actually drove
             # the 2026-07-03 incident (more so than the initial-parse fan-out
             # capped in _finish_new_certificate_file). Cap per-event tracking
-            # to metrics_cap certs, same threshold as the initial-parse cap.
-            metrics_cap = self._large_file_cert_threshold
+            # to large_file_metrics_cap certs, same cap as the initial-parse cap.
+            metrics_cap = self._large_file_metrics_cap
             is_bundle = len(matching_keys) > metrics_cap
             for i, key in enumerate(matching_keys):
                 cert_info = self.known_certs.get(key)

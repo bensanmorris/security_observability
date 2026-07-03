@@ -108,6 +108,12 @@ def main():
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
     large_file_cert_threshold = int(cfg(cp, 'certificates', 'large_file_cert_threshold', 'LARGE_FILE_CERT_THRESHOLD', '20'))
+    # Deliberately separate from large_file_cert_threshold above: that one only
+    # decides whether a file's parsing is deferred to a background thread, this
+    # one caps how many certs in a bundle get full Prometheus metrics/logging.
+    # Conflating them meant raising the metrics cap to cover a realistic CA
+    # bundle (~130-150 certs) also disabled background-thread parsing for it.
+    large_file_metrics_cap = int(cfg(cp, 'certificates', 'large_file_metrics_cap', 'LARGE_FILE_METRICS_CAP', '300'))
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
@@ -148,6 +154,7 @@ def main():
     logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
     logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
     logger.info(f"Large file threshold: >{large_file_cert_threshold} certs parsed in background")
+    logger.info(f"Large file metrics cap: {large_file_metrics_cap} certs get full Prometheus tracking per bundle")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -206,7 +213,8 @@ def main():
                                    port_probe_timeout=port_probe_timeout,
                                    port_probe_connect_delay=port_probe_connect_delay,
                                    tls_outbound_ports=tls_outbound_ports,
-                                   large_file_cert_threshold=large_file_cert_threshold)
+                                   large_file_cert_threshold=large_file_cert_threshold,
+                                   large_file_metrics_cap=large_file_metrics_cap)
 
     health = HealthServer(
         analyzer=analyzer,
