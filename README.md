@@ -210,6 +210,7 @@ sudo systemctl enable --now cert-analyzer
 | `host_prefix` | _(empty)_ | Path prefix prepended to certificate paths from Tetragon events — leave empty for bare metal, set to `/host` for Kubernetes |
 | `demo_mode` | `false` | Log certificate details (subject, issuer, serial, validity, SANs) at INFO level instead of DEBUG — for demos only, leave false in production |
 | `large_file_cert_threshold` | `20` | Files with more PEM certs than this (e.g. a system CA bundle) are parsed on a background thread instead of the Tetragon event-consumer thread |
+| `large_file_metrics_cap` | `300` | Caps how many certs in a single bundle file get full Prometheus metrics/logging, independent of `large_file_cert_threshold` above. Certs beyond the cap are still cached internally and still published to Kafka if enabled, just not tracked as individual Prometheus series. Default comfortably covers a real system CA trust bundle (~130-150 certs) |
 
 **[passwords]**
 
