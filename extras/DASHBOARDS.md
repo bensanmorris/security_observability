@@ -145,9 +145,11 @@ Dashboards → Import → Upload `extras/examples/grafana-dashboard.json` → se
 | Section | Panels |
 |---|---|
 | **Overview** | Analyzer health, total certificates, expired, expiring ≤7/30 days, FIPS non-compliant, self-signed, last event age |
-| **Certificate Inventory** | Filterable/sortable table of all certificates with colour-coded expiry; expiry distribution donut; soonest-expiring bar gauge |
+| **Certificate Inventory** | Filterable/sortable table of all *tracked* certificates with colour-coded expiry; expiry distribution donut; soonest-expiring bar gauge |
 | **FIPS Compliance** | Compliant vs non-compliant donut; key algorithm distribution; table of non-compliant certificates with algorithm and hash details |
 | **Security** | Self-signed certificate table; Tetragon build/runtime version match; Kafka delivery error rate; self-signed breakdown by namespace |
 | **Operational Health** | Event processing rate; analysis error rate by type; cache occupancy time series (vs configured cap); per-cache utilisation % bar gauge |
 
 Template variables at the top of the dashboard filter all panels by **Namespace** and **Node** simultaneously. Both default to "All", which also covers bare-metal deployments where namespace is empty.
+
+**"Tracked" vs "all":** a bundle file with more certs than `large_file_metrics_cap` (default 300 — see the main [README](../README.md#configuration)) only gets Prometheus series for the first `large_file_metrics_cap` certs; the rest are cached internally and still published to Kafka if enabled, but won't appear as rows in this dashboard. This is a separate cap from the cache occupancy panel above, which tracks LRU eviction of the whole `known_certs` cache (`CACHE_MAX_SIZE`, default 10,000) — the two can both cause "why isn't cert X showing up," but for different reasons, so check both if a cert is missing.
