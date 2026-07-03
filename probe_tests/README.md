@@ -418,11 +418,23 @@ python3 probe_tests/test_large_cert_bundle.py --out-dir /some/writable/readonly/
 
 # Keep the generated files instead of printing an rm command:
 sudo python3 probe_tests/test_large_cert_bundle.py --keep
+
+# Also verify the re-access cardinality cap: once the bundle is cached, N
+# distinct processes each independently re-open it (simulating a shared
+# system CA bundle read by many unrelated binaries). Confirms
+# tls_certificate_process_info stays bounded per re-access event instead of
+# growing as N * cert-count — see agent/analyzer.py process_event's
+# cache-hit branch.
+sudo python3 probe_tests/test_large_cert_bundle.py --parallel-processes 25
 ```
 
 The script generates an N-cert PEM bundle plus a single-cert "canary" file,
 opens the bundle first (firing `fd_install` for a large file), then
-immediately opens the canary (firing `fd_install` for a one-cert file).
+immediately opens the canary (firing `fd_install` for a one-cert file). With
+`--parallel-processes M`, after the bundle finishes its background parse the
+script additionally spawns `M` concurrently-running processes — each a
+uniquely-named copy of `/bin/cat`, so Tetragon reports a distinct
+`process.binary` per copy — that each re-open the already-cached bundle.
 
 **Step 3 — Verify cert_analyzer output:**
 
@@ -435,6 +447,11 @@ within a second or two of being triggered, even though they were opened
 *after* the bundle — proof the bundle's parsing (which logs `Found N
 certificate(s) in ... (parsed in background — large file)`) didn't block the
 event-consumer thread from handling the canary's event first.
+
+If run with `--parallel-processes`, the script also prints a `curl`/`grep`
+command comparing the observed `tls_certificate_process_info` series count
+for the bundle against the pre-fix (`N * cert-count`) and post-fix
+(`N * large_file_cert_threshold`) expectations.
 
 **Step 4 — Remove the policy:**
 

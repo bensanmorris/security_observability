@@ -229,13 +229,13 @@ class TestLargeFileBackgroundProcessing:
     """Files with more PEM certs than large_file_cert_threshold are parsed off-thread"""
 
     @staticmethod
-    def _make_event(path):
+    def _make_event(path, process='/usr/bin/cat', pid=4242):
         from unittest.mock import MagicMock
         mock_event = MagicMock()
         mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
         mock_kprobe = MagicMock()
-        mock_kprobe.process.binary = '/usr/bin/cat'
-        mock_kprobe.process.pid.value = 4242
+        mock_kprobe.process.binary = process
+        mock_kprobe.process.pid.value = pid
         mock_kprobe.process.HasField.return_value = False
         mock_kprobe.HasField.return_value = False
         mock_arg = MagicMock()
@@ -291,6 +291,87 @@ class TestLargeFileBackgroundProcessing:
         self._wait_for_background_processing(analyzer, bundle_path)
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
+
+    def test_bundle_beyond_threshold_caps_metrics_fanout(self, analyzer, temp_dir):
+        """
+        A bundle file (e.g. a system CA trust store) with far more certs than
+        the large-file threshold must only get full per-cert Prometheus series
+        for the first `metrics_cap` certs -- otherwise one bundle file turns
+        into thousands of new series in a single burst, which is what drove
+        cert-analyzer's cardinality/memory spike and hang on 2026-07-03.
+        All certs must still land in known_certs (so known-file lookups and
+        cache-size accounting stay correct) even though metrics are capped.
+        """
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(10)]
+        bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.process_event(self._make_event(bundle_path))
+        self._wait_for_background_processing(analyzer, bundle_path)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 10, "every cert must still be cached, even beyond the metrics cap"
+
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        assert len(samples) == 3, "only the first metrics_cap certs should get full per-cert series"
+
+    @pytest.mark.parametrize("n_processes", [5, 25, 100])
+    def test_many_processes_reaccessing_cached_bundle(self, analyzer, temp_dir, n_processes):
+        """
+        Reproduces the dominant cardinality driver behind the 2026-07-03
+        incident: once a bundle is cached, every *subsequent* access from a
+        distinct process (e.g. the system CA bundle being opened by dozens of
+        unrelated binaries) re-walks every cached cert for that path and
+        records a process-access sample per (cert, process) pair via
+        record_cert_process_access(). Uncapped, N processes re-accessing an
+        M-cert bundle mints N*M series. process_event() now caps how many of
+        the cached certs get a process-access sample per re-access event to
+        metrics_cap, so growth is O(N*metrics_cap) instead of O(N*M) -- still
+        linear in N, but with a small constant slope instead of the full
+        (much larger) bundle size.
+        """
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(10)]
+        bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        # First access parses and caches the bundle (metrics fan-out already
+        # capped by the fix above).
+        analyzer.process_event(self._make_event(bundle_path))
+        self._wait_for_background_processing(analyzer, bundle_path)
+
+        # N independent processes each re-access the now-cached bundle.
+        for i in range(n_processes):
+            analyzer.process_event(
+                self._make_event(bundle_path, process=f"/usr/bin/proc{i}", pid=5000 + i)
+            )
+
+        samples = [
+            s for metric in analyzer.metrics.cert_process_info.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        metrics_cap = analyzer._large_file_cert_threshold
+        # +1 covers the initial parsing event (process=/usr/bin/cat), which
+        # also contributes up to metrics_cap series of its own.
+        max_expected = metrics_cap * (n_processes + 1)
+        assert len(samples) <= max_expected, (
+            f"process-access fan-out should be capped at ~metrics_cap per event, "
+            f"got {len(samples)} cert_process_info series for {n_processes} "
+            f"processes re-accessing a {len(certs)}-cert bundle (expected <= {max_expected})"
+        )
+        # Confirm the cap is actually doing something, not just a loose bound:
+        # uncapped behavior would be up to n_processes * len(certs) series.
+        assert len(samples) < n_processes * len(certs), (
+            "fan-out should be well below the old uncapped N*M behavior"
+        )
 
     def test_duplicate_events_for_large_file_in_flight_are_deduped(self, analyzer, temp_dir):
         """A second event for the same large file while the first is still parsing is skipped"""

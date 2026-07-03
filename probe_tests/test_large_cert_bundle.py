@@ -21,6 +21,15 @@ Usage:
   python3 test_large_cert_bundle.py --out-dir /etc/pki/tls/certs
   python3 test_large_cert_bundle.py --keep            # don't delete generated files
 
+  # Also verify the re-access cardinality cap (agent/analyzer.py process_event's
+  # cache-hit branch, agent/metrics.py record_cert_process_access): once the
+  # bundle is cached, spawn N distinct processes that each independently open
+  # it, simulating e.g. a shared system CA bundle being read by many unrelated
+  # binaries. Prometheus's tls_certificate_process_info series for the bundle
+  # should stay bounded (~large_file_cert_threshold per process), not grow as
+  # N * cert-count.
+  python3 test_large_cert_bundle.py --parallel-processes 25
+
 Requires:
   - Tetragon running with tetragon-policies/certificate-file-access.yaml loaded
   - cert_analyzer running
@@ -33,7 +42,10 @@ Requires:
 import argparse
 import configparser
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 
@@ -93,6 +105,63 @@ def _write_file(path: str, data: bytes) -> None:
         sys.exit(1)
 
 
+_REACCESS_STAGGER_SECONDS = 0.05
+
+
+def _reaccess_from_parallel_processes(target_path: str, count: int, run_id: str) -> None:
+    """
+    Open `target_path` from `count` distinct processes, launched a few
+    milliseconds apart rather than all at once.
+
+    Each accessor is its own copy of /bin/cat under a unique name, so Tetragon
+    (which identifies the accessing process by its resolved binary path)
+    reports a distinct process.binary per copy — same as N unrelated real
+    binaries (pingsender, curl, some init script, ...) independently opening a
+    shared file like a system CA bundle. A single re-used binary would collapse
+    back to one process identity and defeat the point of the test.
+
+    The opener temp dir must NOT have "cert-analyzer" or "cert_analyzer"
+    anywhere in its path: process_event()'s filter_self_events check skips any
+    event whose process path contains those substrings (meant to stop
+    cert-analyzer from tracing its own file accesses). An earlier version of
+    this helper used prefix='cert-analyzer-probe-openers-', which silently
+    self-filtered every single re-access event — Tetragon captured and
+    delivered them correctly, cert-analyzer just discarded them all by design.
+    Confirmed via DEBUG-level logging: "Skipping self-generated event from
+    /tmp/cert-analyzer-probe-openers-.../bundle-opener-...".
+
+    The small stagger between launches is a smaller, separate precaution —
+    launching all N via back-to-back subprocess.Popen() with no delay at all
+    means many execs/opens/exits within a handful of milliseconds, which is
+    unrepresentative of the real-world scenario (many distinct binaries
+    reading a shared bundle over seconds, not milliseconds) even if Tetragon
+    handles the burst fine.
+    """
+    opener_dir = tempfile.mkdtemp(prefix='cert-bundle-reaccess-probe-')
+    opener_paths = []
+    try:
+        for i in range(count):
+            opener_path = os.path.join(opener_dir, f'bundle-opener-{run_id}-{i}')
+            shutil.copy('/bin/cat', opener_path)
+            os.chmod(opener_path, 0o755)
+            opener_paths.append(opener_path)
+
+        print(f'[test] Launching {count} processes to re-access the bundle '
+              f'({_REACCESS_STAGGER_SECONDS * 1000:.0f}ms apart)...')
+        t0 = time.time()
+        procs = []
+        for opener_path in opener_paths:
+            procs.append(
+                subprocess.Popen([opener_path, target_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            )
+            time.sleep(_REACCESS_STAGGER_SECONDS)
+        for p in procs:
+            p.wait()
+        print(f'[test]   {count} processes finished at t=+{time.time() - t0:.3f}s')
+    finally:
+        shutil.rmtree(opener_dir, ignore_errors=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Large multi-cert bundle background-parsing test for cert_analyzer',
@@ -105,6 +174,10 @@ def main() -> None:
                         help=f'directory to write test files to (default: {DEFAULT_OUT_DIR})')
     parser.add_argument('--keep', action='store_true',
                         help='keep the generated bundle/canary files instead of printing an rm command')
+    parser.add_argument('--parallel-processes', type=int, default=0,
+                        help='after the bundle is cached, re-access it from this many distinct, '
+                             'concurrently-running processes to verify the cert_process_info '
+                             're-access cardinality cap (default: 0 = skip this check)')
     args = parser.parse_args()
 
     threshold = _effective_threshold()
@@ -160,6 +233,16 @@ def main() -> None:
     time.sleep(_SETTLE_WAIT)
     print()
 
+    if args.parallel_processes > 0:
+        # Only meaningful once the bundle is actually cached — re-accessing it
+        # while the background parse is still in flight would just pile onto
+        # the initial-parse path (already capped in _finish_new_certificate_file)
+        # instead of exercising process_event's cache-hit re-access cap.
+        _reaccess_from_parallel_processes(bundle_path, args.parallel_processes, run_id)
+        print(f'[test] Waiting {_SETTLE_WAIT}s for cert_analyzer to process the re-accesses...')
+        time.sleep(_SETTLE_WAIT)
+        print()
+
     print('=== Verify ===')
     print()
     print('journalctl -u cert-analyzer --since "-1 min" | grep -E "bundle-test|canary"')
@@ -178,6 +261,23 @@ def main() -> None:
     print(f'curl -s http://localhost:9090/metrics | grep -c \'CN="bundle-test\'')
     print(f'# Expect {args.count} once the background parse finishes')
     print()
+
+    if args.parallel_processes > 0:
+        cap = threshold
+        print('--- Re-access cardinality cap ---')
+        print()
+        print(f'{args.parallel_processes} distinct processes each re-opened the already-cached')
+        print(f'bundle. Each re-access is capped to large_file_cert_threshold '
+              f'({cap}) tracked certs (agent/analyzer.py process_event, cache-hit branch),')
+        print(f'instead of one tls_certificate_process_info series per (cached cert, process) pair:')
+        print()
+        print(f'curl -s http://localhost:9090/metrics | grep \'^tls_certificate_process_info\' '
+              f'| grep -cF \'cert_path="{bundle_path}"\'')
+        print(f'# Before the fix: up to {args.parallel_processes + 1} * {args.count} = '
+              f'{(args.parallel_processes + 1) * args.count} series (N processes x every cached cert)')
+        print(f'# After the fix:  at most {args.parallel_processes + 1} * {cap} = '
+              f'{(args.parallel_processes + 1) * cap} series (capped per event to large_file_cert_threshold)')
+        print()
 
     if not args.keep:
         rm_prefix = 'sudo ' if not os.access(args.out_dir, os.W_OK) else ''

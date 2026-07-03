@@ -676,15 +676,37 @@ class CertificateAnalyzer:
         node_name: str,
     ) -> None:
         """Apply pod/event context, update metrics, log, cache, and publish for a freshly-parsed file."""
-        for cert_info in cert_infos:
+        # update_certificate_metrics() writes ~10 Prometheus series per cert.
+        # A bundle file (e.g. a system CA trust store) can hold hundreds of
+        # certs, so tracking every one individually turns a single file event
+        # into thousands of new series in one burst — this is what drove
+        # cert-analyzer's cardinality/memory spike and hang on 2026-07-03.
+        # Beyond the large-file threshold (same one that routes parsing to a
+        # background thread), only the first `metrics_cap` certs get full
+        # per-cert metrics/logging; the rest are still cached — so known-file
+        # lookups and cache size stay accurate — but summarized in one log
+        # line instead of fanning out more series.
+        metrics_cap = self._large_file_cert_threshold
+        is_bundle = len(cert_infos) > metrics_cap
+        skipped_self_signed = 0
+        skipped_fips_noncompliant = 0
+
+        for i, cert_info in enumerate(cert_infos):
             try:
                 self._apply_pod_context(cert_info, tetragon_pod)
                 cert_info.node_name      = node_name
                 cert_info.parent_process = parent_process
                 cert_info.parent_pid     = parent_pid
 
-                self.metrics.update_certificate_metrics(cert_info)
-                self.log_certificate_status(cert_info)
+                if not is_bundle or i < metrics_cap:
+                    self.metrics.update_certificate_metrics(cert_info)
+                    self.log_certificate_status(cert_info)
+                else:
+                    if cert_info.is_self_signed:
+                        skipped_self_signed += 1
+                    if cert_info.fips_violations:
+                        skipped_fips_noncompliant += 1
+
                 self.known_certs[cert_info.unique_key] = cert_info
 
                 if self.kafka_publisher is not None:
@@ -700,6 +722,16 @@ class CertificateAnalyzer:
                     event_type='processing', status='error'
                 ).inc()
                 self.metrics.cert_analysis_errors.labels(error_type='finish_error').inc()
+
+        if is_bundle:
+            remaining = len(cert_infos) - metrics_cap
+            logger.info(
+                f"{cert_infos[0].path}: bundle of {len(cert_infos)} certs — "
+                f"tracked metrics/logging for the first {metrics_cap}; "
+                f"{remaining} more cached but not individually tracked "
+                f"({skipped_self_signed} self-signed, {skipped_fips_noncompliant} "
+                f"FIPS non-compliant among them, not individually alertable)"
+            )
 
         self._update_cache_metrics()
 
@@ -1609,7 +1641,17 @@ class CertificateAnalyzer:
             matching_keys = list(self._known_paths.get(cert_path, ()))
         if matching_keys:
             logger.info(f"Re-detected known certificate file: {cert_path}")
-            for key in matching_keys:
+            # A bundle file re-accessed by many distinct processes (e.g. the
+            # system CA bundle opened by dozens of unrelated binaries) would
+            # otherwise mint a cert_process_info series per (cached cert,
+            # process) pair on every single event -- N processes re-accessing
+            # an M-cert bundle is O(N*M) series, which is what actually drove
+            # the 2026-07-03 incident (more so than the initial-parse fan-out
+            # capped in _finish_new_certificate_file). Cap per-event tracking
+            # to metrics_cap certs, same threshold as the initial-parse cap.
+            metrics_cap = self._large_file_cert_threshold
+            is_bundle = len(matching_keys) > metrics_cap
+            for i, key in enumerate(matching_keys):
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
                     continue
@@ -1618,6 +1660,8 @@ class CertificateAnalyzer:
                     self._apply_pod_context(cert_info, tetragon_pod)
                 if event.node_name:
                     cert_info.node_name = event.node_name
+                if is_bundle and i >= metrics_cap:
+                    continue
                 # The cert's own properties (expiry, FIPS status, etc.) haven't
                 # changed since the last full update — only the access recency
                 # and the (possibly new) accessing process need refreshing here,
@@ -1626,6 +1670,14 @@ class CertificateAnalyzer:
                 self.log_certificate_status(cert_info, summary_only=True)
                 self.metrics.update_last_accessed(cert_info)
                 self.metrics.record_cert_process_access(cert_info, process_name, parent_process)
+
+            if is_bundle:
+                logger.info(
+                    f"{cert_path}: re-access by {process_name} covers "
+                    f"{len(matching_keys)} cached certs — tracked process-access "
+                    f"for the first {metrics_cap}; {len(matching_keys) - metrics_cap} "
+                    f"more skipped to bound cert_process_info cardinality"
+                )
             return
 
         # Large multi-cert files (e.g. system CA bundles with hundreds of certs)
