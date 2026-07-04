@@ -3394,6 +3394,11 @@ class TestBuildInfo:
         samples = list(analyzer.metrics.build_info.collect()[0].samples)
         assert samples[0].labels['tetragon_build_version'] == _ca.TETRAGON_BUILD_VERSION
 
+    def test_build_info_is_labeled_by_node(self, analyzer):
+        """cert_analyzer_build carries node_name, like the Tetragon version metrics, so a fleet-wide view can show which analyzer version is running per node."""
+        samples = list(analyzer.metrics.build_info.collect()[0].samples)
+        assert samples[0].labels['node_name'] == analyzer.metrics._node_name
+
     def test_cert_analyzer_version_constant_reads_env(self, monkeypatch):
         """CERT_ANALYZER_VERSION env var is read correctly by os.getenv."""
         monkeypatch.setenv('CERT_ANALYZER_VERSION', 'v2.0.0-test')

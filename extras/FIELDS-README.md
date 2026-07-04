@@ -87,9 +87,9 @@ observed loading them.
 | `cert_analyzer_healthy` | Gauge | — | `1` while the analyzer is running normally |
 | `tetragon_connected` | Gauge | — | `1` when the event stream to Tetragon is active, `0` when disconnected or not yet connected. Set to `0` on `gRPC` error or shutdown; returns to `1` as soon as the stream is re-established |
 | `cert_analyzer_last_event_timestamp` | Gauge | — | Unix timestamp of the last event received from Tetragon |
-| `cert_analyzer_tetragon_version` | Info | — | `build_version` and `runtime_version` labels |
-| `cert_analyzer_tetragon_version_match` | Gauge | — | `1` if build and runtime Tetragon versions match, `0` if mismatched |
-| `cert_analyzer_build` | Info | — | `version` (cert-analyzer) and `tetragon_build_version` |
+| `cert_analyzer_tetragon_version` | Info | `node_name` | `build_version` and `runtime_version` labels |
+| `cert_analyzer_tetragon_version_match` | Gauge | `node_name` | `1` if build and runtime Tetragon versions match, `0` if mismatched |
+| `cert_analyzer_build` | Info | `node_name` | `version` (cert-analyzer) and `tetragon_build_version`. `node_name`-labeled so a fleet-wide view can show which analyzer version is running per node |
 | `cert_analyzer_cache_known_certs_size` | Gauge | — | Current number of entries in the known-certs LRU cache |
 | `cert_analyzer_cache_processed_paths_size` | Gauge | — | Current number of entries in the processed-paths LRU cache |
 | `cert_analyzer_cache_password_failed_size` | Gauge | — | Current number of entries in the password-failed LRU cache |
