@@ -5985,6 +5985,8 @@ class TestSelfSignedDetection:
             workload_name="",
             node_name="",
             is_ca="unknown",  # generate_certificate without is_ca=True adds no BasicConstraints
+            issuer=cert_infos[0].issuer[:100],
+            serial=cert_infos[0].serial_number,
         )._value.get()
         assert val == 1.0
 
@@ -6008,6 +6010,8 @@ class TestSelfSignedDetection:
             workload_name="",
             node_name="",
             is_ca="unknown",  # _generate_ca_signed_certificate adds no BasicConstraints
+            issuer=cert_infos[0].issuer[:100],
+            serial=cert_infos[0].serial_number,
         )._value.get()
         assert val == 0.0
 

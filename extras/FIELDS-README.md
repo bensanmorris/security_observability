@@ -50,10 +50,10 @@ All share the same label set:
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `tls_certificate_expired` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name` | `1` if expired, `0` if valid |
+| `tls_certificate_expired` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `issuer`, `serial` | `1` if expired, `0` if valid |
 | `tls_certificate_expiring_soon` | Gauge | above + `threshold_days` | `1` if expiring within threshold, `0` otherwise. Emitted for thresholds `7`, `30`, and `90` days |
-| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `key_algorithm`, `signature_hash` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
-| `tls_certificate_self_signed` | Gauge | `cert_path`, `process`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `is_ca` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
+| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
+| `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `is_ca`, `issuer`, `serial` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
 
 ### Event and error counters
 
