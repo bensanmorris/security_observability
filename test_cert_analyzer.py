@@ -489,6 +489,111 @@ class TestLargeFileBackgroundProcessing:
                    for r in caplog.records)
 
 
+class TestPeriodicScan:
+    """
+    periodic_scan() used to reimplement its own inline
+    metrics/logging/cache/publish loop instead of reusing analyze_certificate()
+    + _finish_new_certificate_file() — so it never got the large_file_metrics_cap
+    fan-out cap (reproducing the 2026-07-03 cardinality incident for any bundle
+    under a scan_paths directory) and always re-published already-known certs to
+    Kafka on every scan_interval. periodic_scan now shares the same threshold
+    routing / cap / known-file-skip logic as the Tetragon event path.
+    """
+
+    def test_bundle_beyond_threshold_caps_metrics_fanout(self, analyzer, temp_dir):
+        """A bundle discovered via periodic_scan gets the same fan-out cap as one discovered via a Tetragon event."""
+        analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(10)]
+        bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and bundle_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 10, "every cert must still be cached, even beyond the metrics cap"
+
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        assert len(samples) == 3, "only the first metrics_cap certs should get full per-cert series"
+
+    def test_large_bundle_routed_to_background_worker(self, analyzer, temp_dir):
+        """A bundle over the threshold is hop-scotched through the same async worker path as a Tetragon event, not parsed inline."""
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "large_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        real_async = analyzer._process_certificate_file_async
+        calls = []
+
+        def spy(cert_path, *args, **kwargs):
+            calls.append(cert_path)
+            return real_async(cert_path, *args, **kwargs)
+
+        analyzer._process_certificate_file_async = spy
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and bundle_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        assert calls == [bundle_path]
+
+    def test_already_known_file_is_not_reparsed_or_republished(self, analyzer, temp_dir):
+        """A file already present in known_certs must be skipped entirely — no re-parse, no duplicate Kafka publish."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("known.example.com", 365)
+        cert_path = os.path.join(temp_dir, "known.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        cert_infos = analyzer.analyze_certificate(cert_path, "test_process", 1234)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+
+        analyzer.kafka_publisher = Mock()
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.periodic_scan([temp_dir])
+
+        assert analyze_calls == [], "already-known files must not be re-parsed"
+        analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_new_file_is_parsed_cached_and_published(self, analyzer, temp_dir):
+        """A file periodic_scan has never seen before is parsed, cached, and published exactly once."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("new.example.com", 365)
+        cert_path = os.path.join(temp_dir, "new.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer.periodic_scan([temp_dir])
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(cert_path + ":")]
+        assert len(matching) == 1
+        analyzer.kafka_publisher.publish.assert_called_once()
+
+    def test_nonexistent_scan_path_is_skipped(self, analyzer):
+        """A configured scan path that doesn't exist on disk is skipped without raising."""
+        analyzer.periodic_scan(["/nonexistent/scan/path"])
+
+
 class TestCertificateAnalysis:
     """Test certificate analysis and information extraction"""
     

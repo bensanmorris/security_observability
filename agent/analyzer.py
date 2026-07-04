@@ -2035,21 +2035,37 @@ class CertificateAnalyzer:
 
                 cert_count = 0
                 for cert_file in path_obj.rglob('*'):
-                    if cert_file.is_file() and self.is_cert_path(str(cert_file)):
-                        cert_infos = self.analyze_certificate(
-                            str(cert_file),
-                            "periodic_scan",
-                            0
-                        )
-                        for cert_info in cert_infos:
-                            self.metrics.update_certificate_metrics(cert_info)
-                            self.log_certificate_status(cert_info)
-                            self.known_certs[cert_info.unique_key] = cert_info
-                            if self.kafka_publisher is not None:
-                                self.kafka_publisher.publish(cert_info)
-                            cert_count += 1
+                    if not cert_file.is_file() or not self.is_cert_path(str(cert_file)):
+                        continue
 
-                logger.info(f"Scanned {cert_count} certificates in {base_path}")
+                    cert_path = str(cert_file)
+                    # Skip files already parsed via a Tetragon event (or an earlier
+                    # scan) — re-parsing every known file on every scan_interval
+                    # is wasted crypto work, and re-running _finish_new_certificate_file
+                    # would re-publish "new discovery" Kafka messages for certs that
+                    # aren't new. Genuinely new files fall through to the same
+                    # threshold-routed / metrics-capped path Tetragon events use.
+                    with self._known_paths_lock:
+                        if cert_path in self._known_paths:
+                            continue
+
+                    if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
+                        self._process_certificate_file_async(
+                            cert_path, "periodic_scan", 0, "",
+                            None, "", 0, "",
+                        )
+                        continue
+
+                    cert_infos = self.analyze_certificate(cert_path, "periodic_scan", 0)
+                    if not cert_infos:
+                        continue
+                    self._finish_new_certificate_file(
+                        cert_infos, tetragon_pod=None, parent_process="",
+                        parent_pid=0, node_name="",
+                    )
+                    cert_count += len(cert_infos)
+
+                logger.info(f"Scanned {cert_count} new certificate(s) in {base_path}")
 
             except Exception as e:
                 logger.error(f"Error scanning {base_path}: {e}")
