@@ -269,6 +269,12 @@ class PrometheusMetrics:
 
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
+        # Computed once and reused below instead of re-evaluating the
+        # days_until_expiry property (each call does its own datetime.utcnow())
+        # once per Gauge that needs it -- cheap for a single cert, but this runs
+        # per-cert across a whole bundle (up to large_file_metrics_cap certs).
+        now = datetime.utcnow()
+        days_left = info.days_until_expiry
         labels = {
             'cert_path':        info.path,
             'subject':          info.subject[:100],
@@ -300,10 +306,10 @@ class PrometheusMetrics:
             checksum=info.checksum,
         ).set(1)
 
-        self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
+        self.cert_expiry_days.labels(**labels).set(days_left)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
         self.cert_valid_from.labels(**labels).set(info.not_before.timestamp())
-        self.cert_last_accessed.labels(**labels).set(datetime.utcnow().timestamp())
+        self.cert_last_accessed.labels(**labels).set(now.timestamp())
 
         self.cert_expired.labels(
             cert_path=info.path,
@@ -331,7 +337,7 @@ class PrometheusMetrics:
                 issuer=info.issuer[:100],
                 serial=info.serial_number,
                 checksum=info.checksum,
-            ).set(1 if 0 < info.days_until_expiry < threshold else 0)
+            ).set(1 if 0 < days_left < threshold else 0)
 
         if info.key_algorithm:
             self.cert_fips_compliant.labels(

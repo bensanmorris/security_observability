@@ -114,6 +114,10 @@ def main():
     # Conflating them meant raising the metrics cap to cover a realistic CA
     # bundle (~130-150 certs) also disabled background-thread parsing for it.
     large_file_metrics_cap = int(cfg(cp, 'certificates', 'large_file_metrics_cap', 'LARGE_FILE_METRICS_CAP', '300'))
+    # Caps concurrent TLS-probe / large-file-parse threads so a burst of events
+    # (e.g. many pods reconnecting to dependencies at once) can't spawn
+    # unbounded OS threads.
+    max_concurrent_background_threads = int(cfg(cp, 'certificates', 'max_concurrent_background_threads', 'MAX_CONCURRENT_BACKGROUND_THREADS', '20'))
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
@@ -155,6 +159,7 @@ def main():
     logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
     logger.info(f"Large file threshold: >{large_file_cert_threshold} certs parsed in background")
     logger.info(f"Large file metrics cap: {large_file_metrics_cap} certs get full Prometheus tracking per bundle")
+    logger.info(f"Max concurrent background threads: {max_concurrent_background_threads}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -214,7 +219,8 @@ def main():
                                    port_probe_connect_delay=port_probe_connect_delay,
                                    tls_outbound_ports=tls_outbound_ports,
                                    large_file_cert_threshold=large_file_cert_threshold,
-                                   large_file_metrics_cap=large_file_metrics_cap)
+                                   large_file_metrics_cap=large_file_metrics_cap,
+                                   max_concurrent_background_threads=max_concurrent_background_threads)
 
     health = HealthServer(
         analyzer=analyzer,
