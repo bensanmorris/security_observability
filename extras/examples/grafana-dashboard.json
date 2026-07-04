@@ -310,14 +310,14 @@
             "indexByName": {
               "node_name": 0,
               "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3,
-              "build_version": 4,
-              "runtime_version": 5,
-              "Value #D": 6,
-              "Value #E": 7,
-              "Value #F": 8,
-              "version": 9
+              "version": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "build_version": 5,
+              "runtime_version": 6,
+              "Value #D": 7,
+              "Value #E": 8,
+              "Value #F": 9
             },
             "renameByName": {
               "node_name": "Node",
