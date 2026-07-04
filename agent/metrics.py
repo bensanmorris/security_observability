@@ -225,6 +225,13 @@ class PrometheusMetrics:
         self.cache_max_size.labels(node_name=self._node_name).set(CACHE_MAX_SIZE)
 
         self._process = psutil.Process()
+        # Primes psutil's internal cpu_percent() sample point. The first call
+        # to cpu_percent(interval=None) after a Process is constructed always
+        # returns 0.0 (nothing to compare against yet) -- priming here means
+        # the first real reading, taken PROCESS_METRICS_INTERVAL later by the
+        # periodic process-metrics monitor, reflects that interval rather
+        # than a meaningless 0. See sample_cpu_percent() below.
+        self._process.cpu_percent(interval=None)
         self.process_rss_bytes = Gauge(
             'cert_analyzer_process_rss_bytes',
             'Resident set size of the cert-analyzer process in bytes',
@@ -233,6 +240,21 @@ class PrometheusMetrics:
         self.process_cpu_seconds = Gauge(
             'cert_analyzer_process_cpu_seconds_total',
             'Cumulative user+system CPU seconds consumed by the cert-analyzer process',
+            ['node_name'],
+        )
+        # Percentage of one CPU core used since the *previous* sample (see
+        # sample_cpu_percent) -- e.g. what `top`/`ps %CPU`/`systemd-cgtop` show,
+        # not a lifetime average. cert_analyzer_process_cpu_seconds_total
+        # above is cumulative since process start: dividing that by uptime (or
+        # graphing it with too wide a rate() window) is dominated by whatever
+        # the heaviest historical burst was, understating current load for a
+        # long-running process and overstating it for a recently-restarted
+        # one. This gauge answers "how busy is it right now" directly.
+        self.process_cpu_percent = Gauge(
+            'cert_analyzer_process_cpu_percent',
+            'Percentage of one CPU core used by the cert-analyzer process, '
+            'sampled over the interval since the previous sample -- not a '
+            'lifetime average',
             ['node_name'],
         )
 
@@ -529,3 +551,25 @@ class PrometheusMetrics:
         cpu = self._process.cpu_times()
         self.process_rss_bytes.labels(node_name=self._node_name).set(mem.rss)
         self.process_cpu_seconds.labels(node_name=self._node_name).set(cpu.user + cpu.system)
+
+    def sample_cpu_percent(self) -> None:
+        """
+        Refresh cert_analyzer_process_cpu_percent -- the percentage of one
+        CPU core used since the *previous* call to this method, computed the
+        same way `top`/`ps %CPU`/`systemd-cgtop` do: compare cumulative CPU
+        time now against cumulative CPU time at the last sample, divided by
+        the wall-clock time between the two samples.
+
+        Deliberately not folded into update_process_metrics() above, which is
+        also called from the per-event cache-metrics path: RSS and cumulative
+        CPU-seconds are harmless to refresh on every event, but
+        cpu_percent(interval=None) is stateful and its accuracy depends on a
+        stable sampling interval -- calling it many times per second during a
+        burst would shrink the window between samples toward zero and produce
+        noisy, spiky readings instead of a stable current-utilization figure.
+        Only the periodic process-metrics monitor (fixed ~PROCESS_METRICS_INTERVAL
+        cadence) calls this.
+        """
+        self.process_cpu_percent.labels(node_name=self._node_name).set(
+            self._process.cpu_percent(interval=None)
+        )

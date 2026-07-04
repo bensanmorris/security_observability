@@ -3008,7 +3008,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "deriv(cert_analyzer_process_cpu_seconds_total{node_name=~\"$node\"}[2m]) * 100",
+          "expr": "cert_analyzer_process_cpu_percent{node_name=~\"$node\"}",
           "legendFormat": "{{node_name}}",
           "refId": "A"
         }

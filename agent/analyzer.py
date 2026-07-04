@@ -253,9 +253,9 @@ class CertificateAnalyzer:
         if pair not in cert_info._seen_processes:
             if len(cert_info._seen_processes) >= self._max_processes_per_cert:
                 logger.debug(
-                    f"cert_process_info fan-out cap ({self._max_processes_per_cert}) "
-                    f"reached for {cert_info.path} — not tracking additional "
-                    f"process {process!r}"
+                    "cert_process_info fan-out cap (%s) reached for %s — "
+                    "not tracking additional process %r",
+                    self._max_processes_per_cert, cert_info.path, process,
                 )
                 self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached').inc()
                 return
@@ -954,11 +954,12 @@ class CertificateAnalyzer:
             cert_info.container_start_time = c.start_time.ToDatetime()
 
         logger.debug(
-            f"Tetragon pod context: pod={cert_info.pod_name} uid={cert_info.pod_uid} "
-            f"namespace={cert_info.namespace} "
-            f"workload={cert_info.workload_kind}/{cert_info.workload_name} "
-            f"container={cert_info.container_name} image={cert_info.container_image} "
-            f"privileged={cert_info.container_privileged} labels={cert_info.pod_labels}"
+            "Tetragon pod context: pod=%s uid=%s namespace=%s workload=%s/%s "
+            "container=%s image=%s privileged=%s labels=%s",
+            cert_info.pod_name, cert_info.pod_uid, cert_info.namespace,
+            cert_info.workload_kind, cert_info.workload_name,
+            cert_info.container_name, cert_info.container_image,
+            cert_info.container_privileged, cert_info.pod_labels,
         )
 
     def log_certificate_status(self, info: CertificateInfo, summary_only: bool = False):
@@ -1122,13 +1123,13 @@ class CertificateAnalyzer:
                     path = arg.file_arg.path
                     if self.is_cert_path(path):
                         cert_path = path
-                        logger.debug(f"Found cert path in file_arg: {cert_path}")
+                        logger.debug("Found cert path in file_arg: %s", cert_path)
                         break
                 elif arg.HasField('string_arg'):
                     path = arg.string_arg
                     if self.is_cert_path(path):
                         cert_path = path
-                        logger.debug(f"Found cert path in string_arg: {cert_path}")
+                        logger.debug("Found cert path in string_arg: %s", cert_path)
                         break
 
         # Handle uprobe events
@@ -1150,7 +1151,7 @@ class CertificateAnalyzer:
                     path = arg.string_arg
                     if self.is_cert_path(path):
                         cert_path = path
-                        logger.debug(f"Found cert path in uprobe string_arg: {cert_path}")
+                        logger.debug("Found cert path in uprobe string_arg: %s", cert_path)
                         break
 
         # Translate host paths — in Kubernetes the cert-analyzer runs in a
@@ -1519,7 +1520,7 @@ class CertificateAnalyzer:
         synthetic_path = f'tls-probe://{host}:{port}'
 
         if f'{host}:{port}' in self._probed_endpoints:
-            logger.debug(f"TLS probe: already probed {synthetic_path}")
+            logger.debug("TLS probe: already probed %s", synthetic_path)
             self.metrics.tls_port_probes_total.labels(status='skipped').inc()
             return
 
@@ -1623,7 +1624,7 @@ class CertificateAnalyzer:
                         bind_addr = '.'.join(str(b) for b in data[4:8])
 
         if not port:
-            logger.debug(f"TLS bind event: could not extract port from {fn} event")
+            logger.debug("TLS bind event: could not extract port from %s event", fn)
             return
 
         host = self._resolve_pid_ip(pid, bind_addr)
@@ -1635,7 +1636,7 @@ class CertificateAnalyzer:
         endpoint_key = f'{host}:{port}'
         with self._probe_in_flight_lock:
             if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
-                logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
+                logger.debug("TLS bind probe: %s already probed or in flight, skipping", endpoint_key)
                 return
             self._probe_in_flight.add(endpoint_key)
 
@@ -1688,7 +1689,7 @@ class CertificateAnalyzer:
             return
 
         if dport not in self._tls_outbound_ports:
-            logger.debug(f"tcp_connect: skipping non-TLS port {dport} from {process_name}")
+            logger.debug("tcp_connect: skipping non-TLS port %s from %s", dport, process_name)
             return
 
         self.last_event_time = time.time()
@@ -1697,7 +1698,7 @@ class CertificateAnalyzer:
         endpoint_key = f'{daddr}:{dport}'
         with self._probe_in_flight_lock:
             if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
-                logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
+                logger.debug("TLS connect probe: %s already probed or in flight, skipping", endpoint_key)
                 return
             self._probe_in_flight.add(endpoint_key)
 
@@ -1752,7 +1753,10 @@ class CertificateAnalyzer:
         cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid = \
             self.extract_cert_path_from_event(event)
         pod_name = tetragon_pod.name if tetragon_pod is not None else ""
-        logger.debug(f"Extracted: cert_path={cert_path}, process={process_name}, pid={pid}, pod={pod_name}")
+        logger.debug(
+            "Extracted: cert_path=%s, process=%s, pid=%s, pod=%s",
+            cert_path, process_name, pid, pod_name,
+        )
 
         if not cert_path:
             # Route PKCS11/NSS events (Java FIPS) to dedicated handlers first.
@@ -1772,12 +1776,12 @@ class CertificateAnalyzer:
         # cert-analyzer pod is itself the workload being observed.
         if self.filter_self_events:
             if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
-                logger.debug(f"Skipping self-generated event from {process_name}")
+                logger.debug("Skipping self-generated event from %s", process_name)
                 return
             # Also filter by PID — Tetragon may report the process binary as '/'
             # on some systems, so name-based filtering alone is insufficient
             if pid == os.getpid():
-                logger.debug(f"Skipping self-generated event from PID {pid}")
+                logger.debug("Skipping self-generated event from PID %s", pid)
                 return
 
         logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
@@ -2041,17 +2045,23 @@ class CertificateAnalyzer:
         """
         Start a background daemon thread that periodically refreshes the
         process CPU/RSS gauges (cert_analyzer_process_cpu_seconds_total,
-        cert_analyzer_process_rss_bytes).
+        cert_analyzer_process_rss_bytes, cert_analyzer_process_cpu_percent).
 
-        These also update as a side-effect of cert-processing events
-        (_update_cache_metrics), but relying on that alone leaves them frozen
-        during quiet periods with no matching Tetragon events. The next event
-        then dumps all the CPU/RSS change accumulated across the whole gap
-        into a single sample — which Grafana's deriv()-based panels render as
-        a large spike that never actually happened at that instant. A fixed
-        timer keeps the gauges live regardless of event traffic, independent
-        of any Tetragon connectivity (unlike the version/policy monitors,
-        this doesn't need a stub).
+        RSS and cumulative CPU-seconds also update as a side-effect of
+        cert-processing events (_update_cache_metrics), but relying on that
+        alone leaves them frozen during quiet periods with no matching
+        Tetragon events. The next event then dumps all the CPU/RSS change
+        accumulated across the whole gap into a single sample — which
+        Grafana's deriv()-based panels render as a large spike that never
+        actually happened at that instant. A fixed timer keeps the gauges
+        live regardless of event traffic, independent of any Tetragon
+        connectivity (unlike the version/policy monitors, this doesn't need
+        a stub).
+
+        cert_analyzer_process_cpu_percent (sample_cpu_percent) is only ever
+        sampled here, at this fixed cadence, never from the per-event path —
+        see its docstring for why calling it more often would make it noisy
+        rather than more accurate.
 
         Interval is configurable via PROCESS_METRICS_INTERVAL env var
         (default: 15 seconds, matching the default Prometheus scrape interval).
@@ -2063,6 +2073,7 @@ class CertificateAnalyzer:
                 time.sleep(interval)
                 try:
                     self.metrics.update_process_metrics()
+                    self.metrics.sample_cpu_percent()
                 except Exception as e:
                     logger.warning(f"Process metrics monitor error: {e}")
 
