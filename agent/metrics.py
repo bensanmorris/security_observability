@@ -73,6 +73,21 @@ class PrometheusMetrics:
              'checksum'],
         )
 
+        # TLS protocol version and cipher suite negotiated during a TLS port
+        # probe (_probe_tls_endpoint). This is connection metadata, not a
+        # certificate property -- file-discovered certificates have no live
+        # connection, so this only ever has samples for TLS-probed endpoints.
+        # protocol/cipher are both drawn from small, bounded vocabularies
+        # (a handful of TLS versions and cipher suite names), and the
+        # cert-identity labels are already bounded by the number of probed
+        # endpoints (_probed_endpoints dedupes per host:port), so this
+        # doesn't add meaningful cardinality risk.
+        self.tls_negotiated_protocol = Gauge(
+            'tls_certificate_negotiated_protocol',
+            'TLS protocol version and cipher suite negotiated during a TLS port probe (1=observed)',
+            ['cert_path', 'cert_index', 'serial', 'node_name', 'protocol', 'cipher'],
+        )
+
         # Event counters
         self.cert_events_total = Counter(
             'tls_certificate_events_total',
@@ -395,6 +410,24 @@ class PrometheusMetrics:
             parent_process=parent_process,
             node_name=info.node_name,
             checksum=info.checksum,
+        ).set(1)
+
+    def record_tls_negotiation(self, info: CertificateInfo, protocol: str, cipher: str) -> None:
+        """
+        Record the TLS protocol version and cipher suite negotiated for a
+        certificate discovered via a TLS port probe.
+
+        Reflects what cert-analyzer's own probe negotiated with
+        ssl.create_default_context() -- the server's ceiling with a modern
+        client, not necessarily what every real client gets.
+        """
+        self.tls_negotiated_protocol.labels(
+            cert_path=info.path,
+            cert_index=str(info.cert_index),
+            serial=info.serial_number,
+            node_name=info.node_name,
+            protocol=protocol,
+            cipher=cipher,
         ).set(1)
 
     def update_process_metrics(self) -> None:
