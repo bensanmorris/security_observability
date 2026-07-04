@@ -2045,17 +2045,23 @@ class CertificateAnalyzer:
         """
         Start a background daemon thread that periodically refreshes the
         process CPU/RSS gauges (cert_analyzer_process_cpu_seconds_total,
-        cert_analyzer_process_rss_bytes).
+        cert_analyzer_process_rss_bytes, cert_analyzer_process_cpu_percent).
 
-        These also update as a side-effect of cert-processing events
-        (_update_cache_metrics), but relying on that alone leaves them frozen
-        during quiet periods with no matching Tetragon events. The next event
-        then dumps all the CPU/RSS change accumulated across the whole gap
-        into a single sample — which Grafana's deriv()-based panels render as
-        a large spike that never actually happened at that instant. A fixed
-        timer keeps the gauges live regardless of event traffic, independent
-        of any Tetragon connectivity (unlike the version/policy monitors,
-        this doesn't need a stub).
+        RSS and cumulative CPU-seconds also update as a side-effect of
+        cert-processing events (_update_cache_metrics), but relying on that
+        alone leaves them frozen during quiet periods with no matching
+        Tetragon events. The next event then dumps all the CPU/RSS change
+        accumulated across the whole gap into a single sample — which
+        Grafana's deriv()-based panels render as a large spike that never
+        actually happened at that instant. A fixed timer keeps the gauges
+        live regardless of event traffic, independent of any Tetragon
+        connectivity (unlike the version/policy monitors, this doesn't need
+        a stub).
+
+        cert_analyzer_process_cpu_percent (sample_cpu_percent) is only ever
+        sampled here, at this fixed cadence, never from the per-event path —
+        see its docstring for why calling it more often would make it noisy
+        rather than more accurate.
 
         Interval is configurable via PROCESS_METRICS_INTERVAL env var
         (default: 15 seconds, matching the default Prometheus scrape interval).
@@ -2067,6 +2073,7 @@ class CertificateAnalyzer:
                 time.sleep(interval)
                 try:
                     self.metrics.update_process_metrics()
+                    self.metrics.sample_cpu_percent()
                 except Exception as e:
                     logger.warning(f"Process metrics monitor error: {e}")
 
