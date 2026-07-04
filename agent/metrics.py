@@ -371,6 +371,81 @@ class PrometheusMetrics:
             checksum=info.checksum,
         ).set(1 if info.is_self_signed else 0)
 
+    @staticmethod
+    def _safe_remove(metric, labelvalues: tuple) -> None:
+        """Remove a label-set if present; a missing series (never set, or
+        already removed) is not an error here."""
+        try:
+            metric.remove(*labelvalues)
+        except KeyError:
+            pass
+
+    def remove_certificate_metrics(self, info: CertificateInfo) -> None:
+        """
+        Remove the per-cert Gauge series written by update_certificate_metrics.
+
+        Called from LRUCache's on_evict callback when a cert falls out of
+        known_certs, so Prometheus's own memory tracks cache occupancy instead
+        of growing for the entire life of the process — update_certificate_metrics
+        creates ~10 new label-sets per newly-discovered cert and nothing
+        previously removed them on eviction, so every certificate ever seen
+        stayed resident in the registry forever.
+
+        cert_process_info is only partially cleaned up: it fans out to one
+        series per distinct process that has accessed this cert, but only the
+        most recently recorded (process, parent_process) pair is retained on
+        CertificateInfo, so earlier distinct-process series for the same cert
+        can't be reconstructed and removed here. tls_negotiated_protocol
+        (TLS-probe discoveries only) isn't cleaned up at all for the same
+        reason — protocol/cipher aren't persisted on CertificateInfo after the
+        probe completes.
+        """
+        shared_labels = (
+            info.path, info.subject[:100], info.issuer[:100], info.serial_number,
+            info.common_name, ','.join(info.san_dns_names), ','.join(info.san_ip_addresses),
+            str(info.cert_index), info.pod_name, info.namespace, info.workload_kind,
+            info.workload_name, info.node_name, info.app_label, info.container_name,
+            info.checksum,
+            ','.join(info.key_usage) if info.key_usage else '',
+            ','.join(info.extended_key_usage) if info.extended_key_usage else '',
+        )
+        for gauge in (self.cert_expiry_days, self.cert_expiry_timestamp,
+                      self.cert_valid_from, self.cert_last_accessed):
+            self._safe_remove(gauge, shared_labels)
+
+        self._safe_remove(self.cert_process_info, (
+            info.path, str(info.cert_index), info.serial_number,
+            info.process, info.parent_process, info.node_name, info.checksum,
+        ))
+
+        self._safe_remove(self.cert_expired, (
+            info.path, str(info.cert_index), info.pod_name, info.namespace,
+            info.workload_kind, info.workload_name, info.node_name,
+            info.issuer[:100], info.serial_number, info.checksum,
+        ))
+
+        for threshold in (7, 30, 90):
+            self._safe_remove(self.cert_expiring_soon, (
+                info.path, str(threshold), str(info.cert_index), info.pod_name,
+                info.namespace, info.workload_kind, info.workload_name,
+                info.node_name, info.issuer[:100], info.serial_number, info.checksum,
+            ))
+
+        if info.key_algorithm:
+            self._safe_remove(self.cert_fips_compliant, (
+                info.path, str(info.cert_index), info.pod_name, info.namespace,
+                info.workload_kind, info.workload_name, info.node_name,
+                info.key_algorithm, info.signature_hash, str(info.key_size),
+                info.curve_name, info.issuer[:100], info.serial_number, info.checksum,
+            ))
+
+        is_ca_label = 'true' if info.is_ca else ('false' if info.is_ca is False else 'unknown')
+        self._safe_remove(self.cert_self_signed, (
+            info.path, str(info.cert_index), info.pod_name, info.namespace,
+            info.workload_kind, info.workload_name, info.node_name,
+            is_ca_label, info.issuer[:100], info.serial_number, info.checksum,
+        ))
+
     def update_last_accessed(self, info: CertificateInfo) -> None:
         """
         Refresh only the last-accessed timestamp for an already-known certificate.

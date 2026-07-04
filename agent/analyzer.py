@@ -190,7 +190,12 @@ class CertificateAnalyzer:
             self._known_paths.setdefault(path, set()).add(key)
 
     def _deindex_known_cert(self, key: str, value) -> None:
-        """known_certs on_evict callback — the inverse of _index_known_cert."""
+        """
+        known_certs on_evict callback — the inverse of _index_known_cert, plus
+        removing the evicted cert's Prometheus series so metric memory tracks
+        cache occupancy instead of growing for the life of the process (see
+        PrometheusMetrics.remove_certificate_metrics).
+        """
         path = getattr(value, 'path', None)
         if path is None:
             return
@@ -200,6 +205,14 @@ class CertificateAnalyzer:
                 keys_for_path.discard(key)
                 if not keys_for_path:
                     del self._known_paths[path]
+        try:
+            self.metrics.remove_certificate_metrics(value)
+        except Exception as e:
+            # value may be a bare/partial object in tests that seed known_certs
+            # directly — degrade to a leaked series rather than crashing the
+            # thread that's mutating the cache (event consumer, periodic scan,
+            # or a background parse worker).
+            logger.debug(f"Could not remove Prometheus metrics for evicted cert {key}: {e}")
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
