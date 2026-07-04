@@ -2233,6 +2233,96 @@ class TestKnownCertsIndex:
         assert len(analyzer._known_paths) == 0
 
 
+class TestMetricsCleanupOnEviction:
+    """
+    Tests for PrometheusMetrics.remove_certificate_metrics, wired into
+    CertificateAnalyzer._deindex_known_cert (known_certs' on_evict callback).
+
+    Before this, evicting a cert from known_certs only cleaned up the
+    _known_paths index -- the ~10 per-cert Prometheus Gauge series created by
+    update_certificate_metrics were never removed, so Prometheus registry
+    memory grew for the entire life of the process regardless of cache size.
+    A single first-time scan of the system CA trust bundle (146 certs, all
+    under large_file_metrics_cap) added ~32MB in one burst in production.
+    """
+
+    @staticmethod
+    def _samples_for(gauge, cert_path):
+        return [
+            s for metric in gauge.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == cert_path
+        ]
+
+    def test_per_cert_series_removed_on_lru_eviction(self, analyzer, temp_dir):
+        """
+        Evicting a cert from known_certs must remove its cert_expiry_days,
+        cert_expired, cert_process_info, and cert_self_signed series --
+        otherwise Prometheus keeps every cert ever discovered in memory
+        forever, independent of whether the LRU cache actually evicted it.
+        """
+        import cert_analyzer as _ca
+
+        cert, _ = TestCertificateGeneration.generate_certificate("evict-me.example.com", 365)
+        path = os.path.join(temp_dir, "evict-me.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test-proc", 111)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        target_key = cert_infos[0].unique_key
+
+        gauges = (
+            analyzer.metrics.cert_expiry_days,
+            analyzer.metrics.cert_expired,
+            analyzer.metrics.cert_process_info,
+            analyzer.metrics.cert_self_signed,
+        )
+
+        assert target_key in analyzer.known_certs
+        for gauge in gauges:
+            assert self._samples_for(gauge, path), \
+                f"{gauge._name} should have a series before eviction"
+
+        # Fill the rest of the cache directly (cheap — bypasses callbacks,
+        # same approach as TestKnownCertsIndex.test_index_cleaned_up_on_lru_eviction)
+        # so the next real insert pushes `target_key` out as the LRU-oldest entry.
+        for i in range(_ca.CACHE_MAX_SIZE - 1):
+            analyzer.known_certs._store[f"filler:{i}:serial"] = None
+        filler = CertificateInfo(
+            path="/tmp/new-entry.pem", subject='CN=y', issuer='CN=ca',
+            serial_number='2',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        analyzer.known_certs[filler.unique_key] = filler
+
+        assert target_key not in analyzer.known_certs
+        for gauge in gauges:
+            assert not self._samples_for(gauge, path), \
+                f"{gauge._name} series must be removed when its cert is evicted"
+
+    def test_metrics_removal_ignores_entries_missing_fields(self, analyzer):
+        """
+        An evicted entry with a .path but missing other CertificateInfo
+        fields (e.g. a minimal stub, mirroring how
+        test_index_ignores_entries_without_a_path covers a bare None value)
+        must not crash metric removal -- it should degrade to a debug log,
+        same as the _known_paths index already does.
+        """
+        import types
+
+        stub = types.SimpleNamespace(path="/tmp/stub-only-path.pem")
+        analyzer.known_certs["stub:0:serial"] = stub
+        assert "/tmp/stub-only-path.pem" in analyzer._known_paths
+
+        # Must not raise, even though remove_certificate_metrics will hit an
+        # AttributeError reading stub.subject/issuer/etc.
+        analyzer.known_certs.discard("stub:0:serial")
+
+        assert "/tmp/stub-only-path.pem" not in analyzer._known_paths
+
+
 class TestCacheHitReDetection:
     """
     Tests for the "already known certificate file" branch in process_event
