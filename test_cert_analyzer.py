@@ -3593,6 +3593,39 @@ class TestReconnection:
         assert second_call.wait(timeout=3.0), "GetEvents was not called a second time"
         assert call_count[0] >= 2
 
+    def test_keyboard_interrupt_propagates_after_cleanup(self, analyzer, monkeypatch):
+        """
+        start() must re-raise KeyboardInterrupt after its own cleanup (metrics,
+        channel.close()) instead of swallowing it. agent.config.main() wraps
+        start() in its own try/except KeyboardInterrupt specifically to flush
+        the Kafka producer and stop the health server on a graceful shutdown
+        signal -- if start() swallows the interrupt, that handler never runs
+        and unflushed in-flight Kafka messages can be lost.
+        """
+        class _InterruptingStub:
+            def GetEvents(self_, request, **kwargs):
+                raise KeyboardInterrupt()
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        class _FakeChannel:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        fake_channel = _FakeChannel()
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: fake_channel)
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
+                            lambda ch: _InterruptingStub())
+
+        with pytest.raises(KeyboardInterrupt):
+            analyzer.start()
+
+        assert fake_channel.closed, "channel.close() must still run via finally"
+
 
 class TestVersionMonitor:
     """Tests for _start_version_monitor background thread."""

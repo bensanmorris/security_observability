@@ -2043,6 +2043,14 @@ class CertificateAnalyzer:
             logger.info("Shutting down...")
             self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
             self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
+            # Re-raise so callers (agent.config.main()) get a chance to run their
+            # own shutdown handling -- flushing/closing the Kafka producer and
+            # stopping the health server. Swallowing it here previously made
+            # main()'s except KeyboardInterrupt block dead code: this method
+            # returned normally, so main() fell off the end of its try block
+            # without ever closing the Kafka producer, risking loss of
+            # unflushed in-flight messages on a graceful shutdown signal.
+            raise
         finally:
             channel.close()
 
