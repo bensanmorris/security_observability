@@ -3632,6 +3632,48 @@ class TestBuildInfo:
         assert value == 'dev'
 
 
+class TestScrapeIntervalMetric:
+    """
+    Tests for the _ScrapeIntervalCollector powering
+    cert_analyzer_scrape_interval_seconds, which measures the observed
+    wall-clock gap between successive /metrics scrapes.
+    """
+
+    def _collector(self, analyzer):
+        from agent.metrics import _ScrapeIntervalCollector
+        from prometheus_client import REGISTRY
+        return next(
+            c for c in REGISTRY._collector_to_names
+            if isinstance(c, _ScrapeIntervalCollector)
+        )
+
+    def test_first_collect_yields_nothing(self, analyzer):
+        """No prior scrape to diff against, so nothing is reported yet."""
+        collector = self._collector(analyzer)
+        assert list(collector.collect()) == []
+
+    def test_second_collect_reports_elapsed_interval(self, analyzer):
+        """The second collect() reports the wall-clock gap since the first."""
+        collector = self._collector(analyzer)
+        list(collector.collect())
+        time.sleep(0.05)
+        metrics = list(collector.collect())
+
+        assert len(metrics) == 1
+        sample = metrics[0].samples[0]
+        assert sample.value >= 0.05
+        assert sample.labels['node_name'] == analyzer.metrics._node_name
+
+    def test_registration_does_not_prime_last_scrape(self, analyzer):
+        """
+        describe() must stop the registry's register()-time collect() call
+        from priming _last_scrape -- otherwise the first real scrape would
+        measure from registration time instead of reporting nothing.
+        """
+        collector = self._collector(analyzer)
+        assert collector._last_scrape is None
+
+
 # ── Reconnection and version monitor tests ────────────────────────────────────
 
 import threading as _threading

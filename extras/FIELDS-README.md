@@ -99,6 +99,7 @@ Only emitted when `bind_probe_enabled=true` or `connect_probe_enabled=true` (bot
 | `cert_analyzer_tetragon_version` | Info | `node_name` | `build_version` and `runtime_version` labels |
 | `cert_analyzer_tetragon_version_match` | Gauge | `node_name` | `1` if build and runtime Tetragon versions match, `0` if mismatched |
 | `cert_analyzer_build` | Info | `node_name` | `version` (cert-analyzer) and `tetragon_build_version`. `node_name`-labeled so a fleet-wide view can show which analyzer version is running per node |
+| `cert_analyzer_scrape_interval_seconds` | Gauge | `node_name` | Observed wall-clock interval since the previous `/metrics` scrape of this node. Computed at scrape time rather than read from Prometheus config, so it reflects actual scheduler drift/overhead; absent on a node's first-ever scrape |
 | `cert_analyzer_cache_known_certs_size` | Gauge | — | Current number of entries in the known-certs LRU cache |
 | `cert_analyzer_cache_processed_paths_size` | Gauge | — | Current number of entries in the processed-paths LRU cache |
 | `cert_analyzer_cache_password_failed_size` | Gauge | — | Current number of entries in the password-failed LRU cache |

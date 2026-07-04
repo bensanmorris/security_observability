@@ -1,12 +1,51 @@
 import logging
+import time
 import psutil
 from datetime import datetime
-from prometheus_client import Gauge, Counter, Info
+from prometheus_client import Gauge, Counter, Info, REGISTRY
+from prometheus_client.core import GaugeMetricFamily
 
 from .constants import CERT_ANALYZER_VERSION, TETRAGON_BUILD_VERSION, CACHE_MAX_SIZE
 from .models import CertificateInfo
 
 logger = logging.getLogger(__name__)
+
+
+class _ScrapeIntervalCollector:
+    """
+    Reports the observed wall-clock gap between successive /metrics scrapes.
+
+    collect() only runs when something actually pulls /metrics, so timing it
+    (rather than reading Prometheus's own configured scrape_interval, which
+    this process has no access to) gives the real interval including any
+    scheduler drift -- the number that actually matters for judging scrape
+    overhead. Nothing is yielded on the first-ever scrape since there's no
+    prior timestamp to diff against.
+    """
+
+    def __init__(self, node_name: str):
+        self._node_name = node_name
+        self._last_scrape = None
+
+    def describe(self):
+        # Opts out of the registry's default behaviour of calling collect()
+        # once at register() time to check for name collisions -- collect()
+        # here has the side effect of priming _last_scrape, which would make
+        # the very first real scrape measure from registration time instead
+        # of reporting nothing as intended.
+        return []
+
+    def collect(self):
+        now = time.monotonic()
+        if self._last_scrape is not None:
+            metric = GaugeMetricFamily(
+                'cert_analyzer_scrape_interval_seconds',
+                'Observed wall-clock interval since the previous /metrics scrape',
+                labels=['node_name'],
+            )
+            metric.add_metric([self._node_name], now - self._last_scrape)
+            yield metric
+        self._last_scrape = now
 
 
 class PrometheusMetrics:
@@ -200,6 +239,11 @@ class PrometheusMetrics:
             'version':                CERT_ANALYZER_VERSION,
             'tetragon_build_version': TETRAGON_BUILD_VERSION,
         })
+
+        # Registered directly with the registry rather than stored as a Gauge
+        # attribute: its value is computed at scrape time (see collect()
+        # above), not set imperatively like the other metrics here.
+        REGISTRY.register(_ScrapeIntervalCollector(self._node_name))
 
         # Cache size metrics — track LRU cache occupancy for capacity planning
         self.cache_known_certs_size = Gauge(

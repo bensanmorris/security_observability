@@ -274,6 +274,16 @@
           "instant": true,
           "format": "table",
           "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_scrape_interval_seconds{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "I"
         }
       ],
       "transformations": [
@@ -297,6 +307,7 @@
               "Time 6": true,
               "Time 7": true,
               "Time 8": true,
+              "Time 9": true,
               "__name__": true,
               "instance": true,
               "job": true,
@@ -311,13 +322,14 @@
               "node_name": 0,
               "Value #A": 1,
               "version": 2,
-              "Value #B": 3,
-              "Value #C": 4,
-              "build_version": 5,
-              "runtime_version": 6,
-              "Value #D": 7,
-              "Value #E": 8,
-              "Value #F": 9
+              "Value #I": 3,
+              "Value #B": 4,
+              "Value #C": 5,
+              "build_version": 6,
+              "runtime_version": 7,
+              "Value #D": 8,
+              "Value #E": 9,
+              "Value #F": 10
             },
             "renameByName": {
               "node_name": "Node",
@@ -329,7 +341,8 @@
               "Value #D": "Active Policies",
               "Value #E": "Policy Errors",
               "Value #F": "Kafka Err/s",
-              "version": "Analyzer Version"
+              "version": "Analyzer Version",
+              "Value #I": "Scraping Interval"
             }
           }
         }
@@ -630,6 +643,22 @@
                 "value": {
                   "mode": "thresholds"
                 }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Scraping Interval"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           }
