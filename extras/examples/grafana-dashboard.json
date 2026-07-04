@@ -270,7 +270,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_build{node_name=~\"$node\"}",
+          "expr": "cert_analyzer_build_info{node_name=~\"$node\"}",
           "instant": true,
           "format": "table",
           "refId": "H"
