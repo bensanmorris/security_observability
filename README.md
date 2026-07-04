@@ -32,8 +32,8 @@ An application is not a single binary. It is a tree of executables and shared li
 
 - Every certificate file access system-wide via eBPF fd_install kprobe (PEM, DER, JKS, PKCS12)
 - In-memory certificates post-handshake via OpenSSL and NSS uprobes (no private keys required)
-- TLS endpoints discovered via bind events — triggers a TLS handshake against the bound address/port and [ingests the served certificate](https://github.com/bensanmorris/security_observability/releases/tag/v0.47)
-- Remote server certificates discovered via outbound `tcp_connect` events to common TLS ports (443, 8443, 5671, 6380, 9093, …) — makes remote server expiry visible without any per-service configuration
+- TLS endpoints discovered via bind events — triggers a TLS handshake against the bound address/port and [ingests the served certificate](https://github.com/bensanmorris/security_observability/releases/tag/v0.47), along with the negotiated TLS protocol version and cipher suite
+- Remote server certificates discovered via outbound `tcp_connect` events to common TLS ports (443, 8443, 5671, 6380, 9093, …) — makes remote server expiry visible without any per-service configuration, along with the negotiated TLS protocol version and cipher suite
 - Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
 - Which process accessed which certificate, when, and from which Kubernetes pod
 - An extensive set of surfaced fields and metrics per certificate access. Refer to our [surfaced fields guide](extras/FIELDS-README.md)
