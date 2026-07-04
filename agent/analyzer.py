@@ -131,9 +131,15 @@ class CertificateAnalyzer:
         # _probe_in_flight: "host:port" strings currently being probed — prevents
         #   duplicate concurrent probes when several events for a new endpoint
         #   arrive before the first probe completes (e.g. connection pooling).
-        # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
+        # Individual set ops (in/add/discard) are GIL-atomic, but the check-then-add
+        # at each call site is a *pair* of ops, and its discard() runs on a different
+        # thread (the probe worker) than its check+add (the event-consumer thread) —
+        # the GIL can switch between the check and the add, racing against a same-key
+        # discard() completing in between, letting two probes get spawned for one
+        # endpoint. Needs its own lock.
         self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
+        self._probe_in_flight_lock = threading.Lock()
         # Paths whose large multi-cert file (see _count_pem_certs) is currently
         # being parsed on a background thread — de-dupes repeat Tetragon events
         # for the same path that arrive before the worker populates known_certs.
@@ -1506,10 +1512,11 @@ class CertificateAnalyzer:
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         endpoint_key = f'{host}:{port}'
-        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
-            logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
-            return
-        self._probe_in_flight.add(endpoint_key)
+        with self._probe_in_flight_lock:
+            if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+                logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
+                return
+            self._probe_in_flight.add(endpoint_key)
 
         def _probe():
             if delay:
@@ -1519,7 +1526,8 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
             finally:
-                self._probe_in_flight.discard(endpoint_key)
+                with self._probe_in_flight_lock:
+                    self._probe_in_flight.discard(endpoint_key)
                 self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
@@ -1560,10 +1568,11 @@ class CertificateAnalyzer:
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         endpoint_key = f'{daddr}:{dport}'
-        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
-            logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
-            return
-        self._probe_in_flight.add(endpoint_key)
+        with self._probe_in_flight_lock:
+            if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+                logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
+                return
+            self._probe_in_flight.add(endpoint_key)
 
         def _probe():
             try:
@@ -1571,7 +1580,8 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
             finally:
-                self._probe_in_flight.discard(endpoint_key)
+                with self._probe_in_flight_lock:
+                    self._probe_in_flight.discard(endpoint_key)
                 self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
