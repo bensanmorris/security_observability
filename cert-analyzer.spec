@@ -250,6 +250,38 @@ if [ -f "$_CONF" ] && grep -q '^\[port_probe\]' "$_CONF" 2>/dev/null \
     && printf '#tls_outbound_ports = 443,636,5671,5672,6380,8443,8883,9093,9094\n' >> "$_CONF" \
     || echo "WARNING: failed to append tls_outbound_ports to $_CONF" >&2
 fi
+# Hosts upgraded from a release predating large_file_metrics_cap: insert it
+# into the existing [certificates] section, right after
+# large_file_cert_threshold (which every prior release has). Unlike the
+# [port_probe] cases above this can't be a plain end-of-file append -- that
+# would land the key after whatever section happens to be last in the
+# operator's file instead of under [certificates], where the loader expects
+# it (configparser reads options by section, not by file position).
+if [ -f "$_CONF" ] && grep -q '^large_file_cert_threshold[ \t]*=' "$_CONF" 2>/dev/null \
+        && ! grep -q '^large_file_metrics_cap[ \t]*=' "$_CONF" 2>/dev/null; then
+    awk '
+    /^large_file_cert_threshold[ \t]*=/ {
+        print
+        print ""
+        print "# Caps how many certs in a single bundle file get full Prometheus metrics"
+        print "# and per-cert logging. Independent of large_file_cert_threshold above —"
+        print "# that one only controls background-thread parsing; this one bounds"
+        print "# Prometheus cardinality/memory. Certs beyond the cap are still cached"
+        print "# internally (known-file lookups stay correct) and still published to"
+        print "# Kafka if enabled, just not individually tracked in Prometheus. Default"
+        print "# of 300 comfortably covers a real system CA trust bundle (~130-150"
+        print "# certs) without truncation. Raise with care: each additional cert here"
+        print "# costs ~10 Prometheus series."
+        print "large_file_metrics_cap = 300"
+        next
+    }
+    { print }
+    ' "$_CONF" > "$_CONF.new" \
+    && mv "$_CONF.new" "$_CONF" \
+    && chown root:%{ana_group} "$_CONF" \
+    && chmod 0640 "$_CONF" \
+    || echo "WARNING: failed to insert large_file_metrics_cap into $_CONF" >&2
+fi
 unset _CONF
 
 # Reload systemd to pick up the Tetragon drop-in

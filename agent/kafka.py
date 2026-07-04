@@ -51,7 +51,9 @@ class KafkaPublisher:
     self._producer and self._last_connect_attempt (including the async
     _on_error errback, which kafka-python invokes from its own I/O thread) so
     reconnects can't race and a producer can't be closed out from under a
-    concurrent send().
+    concurrent send(). _on_error also carries the specific producer instance
+    its send() was issued from, so a delayed errback for a producer that's
+    since been superseded by a reconnect can't nullify the new one.
 
     Message schema (all fields present, empty string when not applicable):
     {
@@ -242,21 +244,30 @@ class KafkaPublisher:
             if self._producer is None:
                 if not self._connect():
                     return
+            producer = self._producer
 
             try:
-                self._producer.send(
+                producer.send(
                     self._topic,
                     key=key,
                     value=message,
-                ).add_errback(self._on_error)
+                ).add_errback(lambda exc, _producer=producer: self._on_error(_producer, exc))
             except Exception as e:
                 logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
                 # Nullify the producer so the next publish attempt triggers reconnect
-                self._producer = None
+                if self._producer is producer:
+                    self._producer = None
 
-    def _on_error(self, exc: Exception) -> None:
-        # kafka-python invokes errbacks from its own internal I/O thread, so
-        # this can run concurrently with publish()/close() on other threads.
+    def _on_error(self, producer, exc: Exception) -> None:
+        # kafka-python invokes errbacks from its own internal I/O thread, so this
+        # can run concurrently with publish()/close() on other threads, and can
+        # fire long after the send() call that registered it -- kafka-python
+        # retries internally before giving up, so the callback for an old send()
+        # can land well after a later reconnect has already installed a new,
+        # healthy producer. `producer` is the specific instance this failure
+        # came from (captured at send() time); only nullify self._producer if
+        # it's still that same instance, so a stale error from an
+        # already-superseded producer can't tear down a newer one.
         logger.warning(f"Kafka delivery error: {exc}")
         _kafka_delivery_errors.labels(node_name=_NODE_NAME).inc()
         # Nullify the producer so the next publish attempt triggers reconnect.
@@ -264,7 +275,8 @@ class KafkaPublisher:
         # auth failure, topic deleted) would leave the producer in a state where
         # send() appears to succeed but nothing is ever delivered.
         with self._lock:
-            self._producer = None
+            if self._producer is producer:
+                self._producer = None
 
     def close(self) -> None:
         """Flush pending messages and close the producer cleanly."""

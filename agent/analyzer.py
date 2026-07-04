@@ -87,7 +87,8 @@ class CertificateAnalyzer:
                  port_probe_timeout: float = 5.0,
                  port_probe_connect_delay: float = 2.0,
                  tls_outbound_ports: Optional[frozenset] = None,
-                 large_file_cert_threshold: int = 20):
+                 large_file_cert_threshold: int = 20,
+                 large_file_metrics_cap: int = 300):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -103,6 +104,7 @@ class CertificateAnalyzer:
         self._port_probe_connect_delay = port_probe_connect_delay
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self._large_file_cert_threshold = large_file_cert_threshold
+        self._large_file_metrics_cap = large_file_metrics_cap
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
@@ -129,14 +131,38 @@ class CertificateAnalyzer:
         # _probe_in_flight: "host:port" strings currently being probed — prevents
         #   duplicate concurrent probes when several events for a new endpoint
         #   arrive before the first probe completes (e.g. connection pooling).
-        # CPython set operations (in / add / discard) are GIL-atomic; no lock needed.
+        # Individual set ops (in/add/discard) are GIL-atomic, but the check-then-add
+        # at each call site is a *pair* of ops, and its discard() runs on a different
+        # thread (the probe worker) than its check+add (the event-consumer thread) —
+        # the GIL can switch between the check and the add, racing against a same-key
+        # discard() completing in between, letting two probes get spawned for one
+        # endpoint. Needs its own lock.
         self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
+        self._probe_in_flight_lock = threading.Lock()
         # Paths whose large multi-cert file (see _count_pem_certs) is currently
         # being parsed on a background thread — de-dupes repeat Tetragon events
         # for the same path that arrive before the worker populates known_certs.
-        # GIL-atomic set ops, same reasoning as _probe_in_flight above.
+        # Individual set ops (in/add/discard) are GIL-atomic, but the check-then-add
+        # in _process_certificate_file_async is a *pair* of ops, and its discard()
+        # runs on a different thread (the background worker) than its check+add
+        # (the main event-consumer thread) — the GIL can switch between the check
+        # and the add, racing against a same-path discard() completing in between,
+        # letting two workers get spawned for one file. Needs its own lock.
         self._large_file_in_flight: Set[str] = set()
+        self._large_file_in_flight_lock = threading.Lock()
+        # Paths below _large_file_cert_threshold (so parsed synchronously rather
+        # than via _process_certificate_file_async) that are currently being
+        # analyzed for the first time. process_event() runs on a single thread
+        # so it can't race against itself, but periodic_scan() runs on its own
+        # thread and re-walks scan_paths independently — without this guard, a
+        # file first seen at almost the same moment by both a Tetragon event and
+        # a periodic scan tick (most likely right after agent startup) would get
+        # parsed and _finish_new_certificate_file'd twice, double-publishing it
+        # to Kafka as two separate "new discovery" events. Same check-then-add
+        # race shape as _probe_in_flight/_large_file_in_flight above.
+        self._new_file_in_flight: Set[str] = set()
+        self._new_file_in_flight_lock = threading.Lock()
         self.last_event_time: float = 0.0
 
     def _index_known_cert(self, key: str, value) -> None:
@@ -676,15 +702,40 @@ class CertificateAnalyzer:
         node_name: str,
     ) -> None:
         """Apply pod/event context, update metrics, log, cache, and publish for a freshly-parsed file."""
-        for cert_info in cert_infos:
+        # update_certificate_metrics() writes ~10 Prometheus series per cert.
+        # A bundle file (e.g. a system CA trust store) can hold hundreds of
+        # certs, so tracking every one individually turns a single file event
+        # into thousands of new series in one burst — this is what drove
+        # cert-analyzer's cardinality/memory spike and hang on 2026-07-03.
+        # Beyond large_file_metrics_cap (deliberately separate from
+        # _large_file_cert_threshold, which only controls background-thread
+        # parsing — conflating the two would mean raising the metrics cap to
+        # cover a realistic bundle also disables the background-thread path
+        # for that same bundle), only the first `metrics_cap` certs get full
+        # per-cert metrics/logging; the rest are still cached — so known-file
+        # lookups and cache size stay accurate — but summarized in one log
+        # line instead of fanning out more series.
+        metrics_cap = self._large_file_metrics_cap
+        is_bundle = len(cert_infos) > metrics_cap
+        skipped_self_signed = 0
+        skipped_fips_noncompliant = 0
+
+        for i, cert_info in enumerate(cert_infos):
             try:
                 self._apply_pod_context(cert_info, tetragon_pod)
                 cert_info.node_name      = node_name
                 cert_info.parent_process = parent_process
                 cert_info.parent_pid     = parent_pid
 
-                self.metrics.update_certificate_metrics(cert_info)
-                self.log_certificate_status(cert_info)
+                if not is_bundle or i < metrics_cap:
+                    self.metrics.update_certificate_metrics(cert_info)
+                    self.log_certificate_status(cert_info)
+                else:
+                    if cert_info.is_self_signed:
+                        skipped_self_signed += 1
+                    if cert_info.fips_violations:
+                        skipped_fips_noncompliant += 1
+
                 self.known_certs[cert_info.unique_key] = cert_info
 
                 if self.kafka_publisher is not None:
@@ -700,6 +751,16 @@ class CertificateAnalyzer:
                     event_type='processing', status='error'
                 ).inc()
                 self.metrics.cert_analysis_errors.labels(error_type='finish_error').inc()
+
+        if is_bundle:
+            remaining = len(cert_infos) - metrics_cap
+            logger.info(
+                f"{cert_infos[0].path}: bundle of {len(cert_infos)} certs — "
+                f"tracked metrics/logging for the first {metrics_cap}; "
+                f"{remaining} more cached but not individually tracked "
+                f"({skipped_self_signed} self-signed, {skipped_fips_noncompliant} "
+                f"FIPS non-compliant among them, not individually alertable)"
+            )
 
         self._update_cache_metrics()
 
@@ -723,13 +784,14 @@ class CertificateAnalyzer:
         de-dupes repeat Tetragon events for the same path that arrive before the
         worker finishes and populates known_certs.
         """
-        if cert_path in self._large_file_in_flight:
-            logger.debug(
-                f"Large certificate file {cert_path} already being processed "
-                f"in the background — skipping duplicate event"
-            )
-            return
-        self._large_file_in_flight.add(cert_path)
+        with self._large_file_in_flight_lock:
+            if cert_path in self._large_file_in_flight:
+                logger.debug(
+                    f"Large certificate file {cert_path} already being processed "
+                    f"in the background — skipping duplicate event"
+                )
+                return
+            self._large_file_in_flight.add(cert_path)
 
         def _worker():
             try:
@@ -753,7 +815,8 @@ class CertificateAnalyzer:
                         event_type='processing', status='error'
                     ).inc()
             finally:
-                self._large_file_in_flight.discard(cert_path)
+                with self._large_file_in_flight_lock:
+                    self._large_file_in_flight.discard(cert_path)
 
         threading.Thread(
             target=_worker, daemon=True, name=f'cert-parse-{Path(cert_path).name}'
@@ -1461,10 +1524,11 @@ class CertificateAnalyzer:
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         endpoint_key = f'{host}:{port}'
-        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
-            logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
-            return
-        self._probe_in_flight.add(endpoint_key)
+        with self._probe_in_flight_lock:
+            if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+                logger.debug(f"TLS bind probe: {endpoint_key} already probed or in flight, skipping")
+                return
+            self._probe_in_flight.add(endpoint_key)
 
         def _probe():
             if delay:
@@ -1474,7 +1538,8 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
             finally:
-                self._probe_in_flight.discard(endpoint_key)
+                with self._probe_in_flight_lock:
+                    self._probe_in_flight.discard(endpoint_key)
                 self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
@@ -1515,10 +1580,11 @@ class CertificateAnalyzer:
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
         endpoint_key = f'{daddr}:{dport}'
-        if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
-            logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
-            return
-        self._probe_in_flight.add(endpoint_key)
+        with self._probe_in_flight_lock:
+            if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
+                logger.debug(f"TLS connect probe: {endpoint_key} already probed or in flight, skipping")
+                return
+            self._probe_in_flight.add(endpoint_key)
 
         def _probe():
             try:
@@ -1526,7 +1592,8 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
             finally:
-                self._probe_in_flight.discard(endpoint_key)
+                with self._probe_in_flight_lock:
+                    self._probe_in_flight.discard(endpoint_key)
                 self._probed_endpoints.add(endpoint_key)
 
         t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
@@ -1609,7 +1676,17 @@ class CertificateAnalyzer:
             matching_keys = list(self._known_paths.get(cert_path, ()))
         if matching_keys:
             logger.info(f"Re-detected known certificate file: {cert_path}")
-            for key in matching_keys:
+            # A bundle file re-accessed by many distinct processes (e.g. the
+            # system CA bundle opened by dozens of unrelated binaries) would
+            # otherwise mint a cert_process_info series per (cached cert,
+            # process) pair on every single event -- N processes re-accessing
+            # an M-cert bundle is O(N*M) series, which is what actually drove
+            # the 2026-07-03 incident (more so than the initial-parse fan-out
+            # capped in _finish_new_certificate_file). Cap per-event tracking
+            # to large_file_metrics_cap certs, same cap as the initial-parse cap.
+            metrics_cap = self._large_file_metrics_cap
+            is_bundle = len(matching_keys) > metrics_cap
+            for i, key in enumerate(matching_keys):
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
                     continue
@@ -1618,6 +1695,8 @@ class CertificateAnalyzer:
                     self._apply_pod_context(cert_info, tetragon_pod)
                 if event.node_name:
                     cert_info.node_name = event.node_name
+                if is_bundle and i >= metrics_cap:
+                    continue
                 # The cert's own properties (expiry, FIPS status, etc.) haven't
                 # changed since the last full update — only the access recency
                 # and the (possibly new) accessing process need refreshing here,
@@ -1626,6 +1705,14 @@ class CertificateAnalyzer:
                 self.log_certificate_status(cert_info, summary_only=True)
                 self.metrics.update_last_accessed(cert_info)
                 self.metrics.record_cert_process_access(cert_info, process_name, parent_process)
+
+            if is_bundle:
+                logger.info(
+                    f"{cert_path}: re-access by {process_name} covers "
+                    f"{len(matching_keys)} cached certs — tracked process-access "
+                    f"for the first {metrics_cap}; {len(matching_keys) - metrics_cap} "
+                    f"more skipped to bound cert_process_info cardinality"
+                )
             return
 
         # Large multi-cert files (e.g. system CA bundles with hundreds of certs)
@@ -1638,15 +1725,27 @@ class CertificateAnalyzer:
             )
             return
 
-        # Analyze new certificate file (may contain multiple certs)
-        cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
-        if not cert_infos:
-            return
+        # Analyze new certificate file (may contain multiple certs). Guarded by
+        # _new_file_in_flight so a periodic_scan tick landing on this same
+        # never-before-seen path at the same moment doesn't double-parse and
+        # double-publish it — see the comment on _new_file_in_flight in __init__.
+        with self._new_file_in_flight_lock:
+            if cert_path in self._new_file_in_flight:
+                logger.debug(f"New-file parse for {cert_path} already in flight, skipping duplicate")
+                return
+            self._new_file_in_flight.add(cert_path)
+        try:
+            cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
+            if not cert_infos:
+                return
 
-        logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
-        self._finish_new_certificate_file(
-            cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
-        )
+            logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
+            self._finish_new_certificate_file(
+                cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
+            )
+        finally:
+            with self._new_file_in_flight_lock:
+                self._new_file_in_flight.discard(cert_path)
 
     def get_runtime_tetragon_version(self, stub) -> str:
         """
@@ -1944,6 +2043,14 @@ class CertificateAnalyzer:
             logger.info("Shutting down...")
             self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
             self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
+            # Re-raise so callers (agent.config.main()) get a chance to run their
+            # own shutdown handling -- flushing/closing the Kafka producer and
+            # stopping the health server. Swallowing it here previously made
+            # main()'s except KeyboardInterrupt block dead code: this method
+            # returned normally, so main() fell off the end of its try block
+            # without ever closing the Kafka producer, risking loss of
+            # unflushed in-flight messages on a graceful shutdown signal.
+            raise
         finally:
             channel.close()
 
@@ -1960,21 +2067,48 @@ class CertificateAnalyzer:
 
                 cert_count = 0
                 for cert_file in path_obj.rglob('*'):
-                    if cert_file.is_file() and self.is_cert_path(str(cert_file)):
-                        cert_infos = self.analyze_certificate(
-                            str(cert_file),
-                            "periodic_scan",
-                            0
-                        )
-                        for cert_info in cert_infos:
-                            self.metrics.update_certificate_metrics(cert_info)
-                            self.log_certificate_status(cert_info)
-                            self.known_certs[cert_info.unique_key] = cert_info
-                            if self.kafka_publisher is not None:
-                                self.kafka_publisher.publish(cert_info)
-                            cert_count += 1
+                    if not cert_file.is_file() or not self.is_cert_path(str(cert_file)):
+                        continue
 
-                logger.info(f"Scanned {cert_count} certificates in {base_path}")
+                    cert_path = str(cert_file)
+                    # Skip files already parsed via a Tetragon event (or an earlier
+                    # scan) — re-parsing every known file on every scan_interval
+                    # is wasted crypto work, and re-running _finish_new_certificate_file
+                    # would re-publish "new discovery" Kafka messages for certs that
+                    # aren't new. Genuinely new files fall through to the same
+                    # threshold-routed / metrics-capped path Tetragon events use.
+                    with self._known_paths_lock:
+                        if cert_path in self._known_paths:
+                            continue
+
+                    if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
+                        self._process_certificate_file_async(
+                            cert_path, "periodic_scan", 0, "",
+                            None, "", 0, "",
+                        )
+                        continue
+
+                    # Guarded by _new_file_in_flight so a Tetragon event landing on
+                    # this same never-before-seen path at the same moment doesn't
+                    # double-parse and double-publish it — see the comment on
+                    # _new_file_in_flight in __init__.
+                    with self._new_file_in_flight_lock:
+                        if cert_path in self._new_file_in_flight:
+                            continue
+                        self._new_file_in_flight.add(cert_path)
+                    try:
+                        cert_infos = self.analyze_certificate(cert_path, "periodic_scan", 0)
+                        if cert_infos:
+                            self._finish_new_certificate_file(
+                                cert_infos, tetragon_pod=None, parent_process="",
+                                parent_pid=0, node_name="",
+                            )
+                            cert_count += len(cert_infos)
+                    finally:
+                        with self._new_file_in_flight_lock:
+                            self._new_file_in_flight.discard(cert_path)
+
+                logger.info(f"Scanned {cert_count} new certificate(s) in {base_path}")
 
             except Exception as e:
                 logger.error(f"Error scanning {base_path}: {e}")

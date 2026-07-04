@@ -229,13 +229,13 @@ class TestLargeFileBackgroundProcessing:
     """Files with more PEM certs than large_file_cert_threshold are parsed off-thread"""
 
     @staticmethod
-    def _make_event(path):
+    def _make_event(path, process='/usr/bin/cat', pid=4242):
         from unittest.mock import MagicMock
         mock_event = MagicMock()
         mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
         mock_kprobe = MagicMock()
-        mock_kprobe.process.binary = '/usr/bin/cat'
-        mock_kprobe.process.pid.value = 4242
+        mock_kprobe.process.binary = process
+        mock_kprobe.process.pid.value = pid
         mock_kprobe.process.HasField.return_value = False
         mock_kprobe.HasField.return_value = False
         mock_arg = MagicMock()
@@ -291,6 +291,123 @@ class TestLargeFileBackgroundProcessing:
         self._wait_for_background_processing(analyzer, bundle_path)
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
+
+    def test_background_threading_and_metrics_cap_are_independent(self, analyzer, temp_dir):
+        """
+        _large_file_cert_threshold (background-thread routing) and
+        _large_file_metrics_cap (Prometheus fan-out cap) are separate knobs.
+        A bundle over the (low) threshold but under the (higher) metrics cap
+        must still be parsed on a background thread AND get full per-cert
+        metrics for every cert -- raising the metrics cap to cover a realistic
+        bundle must not also disable background-thread parsing for it.
+        """
+        analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 10
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "midsize_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        # Over the cert threshold (5 > 3) -> routed to the background-thread
+        # path (same routing logic covered by test_count_pem_certs and
+        # test_large_file_processed_in_background).
+        self._wait_for_background_processing(analyzer, bundle_path)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
+
+        # Under the metrics cap (5 <= 10) -> every cert gets full metrics, none skipped.
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        assert len(samples) == 5, "certs under the metrics cap must all get full per-cert series"
+
+    def test_bundle_beyond_threshold_caps_metrics_fanout(self, analyzer, temp_dir):
+        """
+        A bundle file (e.g. a system CA trust store) with far more certs than
+        the large-file threshold must only get full per-cert Prometheus series
+        for the first `metrics_cap` certs -- otherwise one bundle file turns
+        into thousands of new series in a single burst, which is what drove
+        cert-analyzer's cardinality/memory spike and hang on 2026-07-03.
+        All certs must still land in known_certs (so known-file lookups and
+        cache-size accounting stay correct) even though metrics are capped.
+        """
+        analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(10)]
+        bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.process_event(self._make_event(bundle_path))
+        self._wait_for_background_processing(analyzer, bundle_path)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 10, "every cert must still be cached, even beyond the metrics cap"
+
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        assert len(samples) == 3, "only the first metrics_cap certs should get full per-cert series"
+
+    @pytest.mark.parametrize("n_processes", [5, 25, 100])
+    def test_many_processes_reaccessing_cached_bundle(self, analyzer, temp_dir, n_processes):
+        """
+        Reproduces the dominant cardinality driver behind the 2026-07-03
+        incident: once a bundle is cached, every *subsequent* access from a
+        distinct process (e.g. the system CA bundle being opened by dozens of
+        unrelated binaries) re-walks every cached cert for that path and
+        records a process-access sample per (cert, process) pair via
+        record_cert_process_access(). Uncapped, N processes re-accessing an
+        M-cert bundle mints N*M series. process_event() now caps how many of
+        the cached certs get a process-access sample per re-access event to
+        metrics_cap, so growth is O(N*metrics_cap) instead of O(N*M) -- still
+        linear in N, but with a small constant slope instead of the full
+        (much larger) bundle size.
+        """
+        analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(10)]
+        bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        # First access parses and caches the bundle (metrics fan-out already
+        # capped by the fix above).
+        analyzer.process_event(self._make_event(bundle_path))
+        self._wait_for_background_processing(analyzer, bundle_path)
+
+        # N independent processes each re-access the now-cached bundle.
+        for i in range(n_processes):
+            analyzer.process_event(
+                self._make_event(bundle_path, process=f"/usr/bin/proc{i}", pid=5000 + i)
+            )
+
+        samples = [
+            s for metric in analyzer.metrics.cert_process_info.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        metrics_cap = analyzer._large_file_metrics_cap
+        # +1 covers the initial parsing event (process=/usr/bin/cat), which
+        # also contributes up to metrics_cap series of its own.
+        max_expected = metrics_cap * (n_processes + 1)
+        assert len(samples) <= max_expected, (
+            f"process-access fan-out should be capped at ~metrics_cap per event, "
+            f"got {len(samples)} cert_process_info series for {n_processes} "
+            f"processes re-accessing a {len(certs)}-cert bundle (expected <= {max_expected})"
+        )
+        # Confirm the cap is actually doing something, not just a loose bound:
+        # uncapped behavior would be up to n_processes * len(certs) series.
+        assert len(samples) < n_processes * len(certs), (
+            "fan-out should be well below the old uncapped N*M behavior"
+        )
 
     def test_duplicate_events_for_large_file_in_flight_are_deduped(self, analyzer, temp_dir):
         """A second event for the same large file while the first is still parsing is skipped"""
@@ -370,6 +487,204 @@ class TestLargeFileBackgroundProcessing:
         assert errors_after == errors_before + 1
         assert any("Error processing large certificate file" in r.message
                    for r in caplog.records)
+
+
+class TestPeriodicScan:
+    """
+    periodic_scan() used to reimplement its own inline
+    metrics/logging/cache/publish loop instead of reusing analyze_certificate()
+    + _finish_new_certificate_file() — so it never got the large_file_metrics_cap
+    fan-out cap (reproducing the 2026-07-03 cardinality incident for any bundle
+    under a scan_paths directory) and always re-published already-known certs to
+    Kafka on every scan_interval. periodic_scan now shares the same threshold
+    routing / cap / known-file-skip logic as the Tetragon event path.
+    """
+
+    def test_bundle_beyond_threshold_caps_metrics_fanout(self, analyzer, temp_dir):
+        """A bundle discovered via periodic_scan gets the same fan-out cap as one discovered via a Tetragon event."""
+        analyzer._large_file_cert_threshold = 3
+        analyzer._large_file_metrics_cap = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(10)]
+        bundle_path = os.path.join(temp_dir, "ca_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and bundle_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 10, "every cert must still be cached, even beyond the metrics cap"
+
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == bundle_path
+        ]
+        assert len(samples) == 3, "only the first metrics_cap certs should get full per-cert series"
+
+    def test_large_bundle_routed_to_background_worker(self, analyzer, temp_dir):
+        """A bundle over the threshold is hop-scotched through the same async worker path as a Tetragon event, not parsed inline."""
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "large_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        real_async = analyzer._process_certificate_file_async
+        calls = []
+
+        def spy(cert_path, *args, **kwargs):
+            calls.append(cert_path)
+            return real_async(cert_path, *args, **kwargs)
+
+        analyzer._process_certificate_file_async = spy
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and bundle_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        assert calls == [bundle_path]
+
+    def test_already_known_file_is_not_reparsed_or_republished(self, analyzer, temp_dir):
+        """A file already present in known_certs must be skipped entirely — no re-parse, no duplicate Kafka publish."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("known.example.com", 365)
+        cert_path = os.path.join(temp_dir, "known.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        cert_infos = analyzer.analyze_certificate(cert_path, "test_process", 1234)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+
+        analyzer.kafka_publisher = Mock()
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.periodic_scan([temp_dir])
+
+        assert analyze_calls == [], "already-known files must not be re-parsed"
+        analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_new_file_is_parsed_cached_and_published(self, analyzer, temp_dir):
+        """A file periodic_scan has never seen before is parsed, cached, and published exactly once."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("new.example.com", 365)
+        cert_path = os.path.join(temp_dir, "new.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer.periodic_scan([temp_dir])
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(cert_path + ":")]
+        assert len(matching) == 1
+        analyzer.kafka_publisher.publish.assert_called_once()
+
+    def test_nonexistent_scan_path_is_skipped(self, analyzer):
+        """A configured scan path that doesn't exist on disk is skipped without raising."""
+        analyzer.periodic_scan(["/nonexistent/scan/path"])
+
+    @staticmethod
+    def _make_event(path, process='/usr/bin/cat', pid=4242):
+        from unittest.mock import MagicMock
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = process
+        mock_kprobe.process.pid.value = pid
+        mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+        mock_event.node_name = ''
+        return mock_event
+
+    def test_new_file_in_flight_prevents_periodic_scan_reparsing_file_claimed_by_event_path(
+        self, analyzer, temp_dir
+    ):
+        """
+        If a Tetragon event for a brand-new small file is mid-parse (has claimed
+        the path in _new_file_in_flight) right as periodic_scan's directory walk
+        reaches the same path, periodic_scan must not also parse/publish it.
+        """
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer._new_file_in_flight.add(cert_path)  # simulate process_event already claiming it
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.periodic_scan([temp_dir])
+
+        assert analyze_calls == [], "a path already claimed by another thread must not be re-parsed"
+        analyzer.kafka_publisher.publish.assert_not_called()
+        assert cert_path not in analyzer.known_certs.keys()
+
+    def test_new_file_in_flight_prevents_event_path_reparsing_file_claimed_by_periodic_scan(
+        self, analyzer, temp_dir
+    ):
+        """Same race, mirrored: process_event must not re-parse/publish a path periodic_scan has already claimed."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy2.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy2.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer._new_file_in_flight.add(cert_path)  # simulate periodic_scan already claiming it
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.process_event(self._make_event(cert_path))
+
+        assert analyze_calls == [], "a path already claimed by another thread must not be re-parsed"
+        analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_new_file_in_flight_cleared_after_periodic_scan_completes(self, analyzer, temp_dir):
+        """_new_file_in_flight must not leak an entry once periodic_scan finishes with a path."""
+        cert, _ = TestCertificateGeneration.generate_certificate("cleanup.example.com", 365)
+        cert_path = os.path.join(temp_dir, "cleanup.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        assert cert_path not in analyzer._new_file_in_flight
+
+    def test_new_file_in_flight_cleared_after_process_event_completes(self, analyzer, temp_dir):
+        """_new_file_in_flight must not leak an entry once process_event finishes with a path."""
+        cert, _ = TestCertificateGeneration.generate_certificate("cleanup2.example.com", 365)
+        cert_path = os.path.join(temp_dir, "cleanup2.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.process_event(self._make_event(cert_path))
+
+        assert cert_path not in analyzer._new_file_in_flight
 
 
 class TestCertificateAnalysis:
@@ -3278,6 +3593,39 @@ class TestReconnection:
         assert second_call.wait(timeout=3.0), "GetEvents was not called a second time"
         assert call_count[0] >= 2
 
+    def test_keyboard_interrupt_propagates_after_cleanup(self, analyzer, monkeypatch):
+        """
+        start() must re-raise KeyboardInterrupt after its own cleanup (metrics,
+        channel.close()) instead of swallowing it. agent.config.main() wraps
+        start() in its own try/except KeyboardInterrupt specifically to flush
+        the Kafka producer and stop the health server on a graceful shutdown
+        signal -- if start() swallows the interrupt, that handler never runs
+        and unflushed in-flight Kafka messages can be lost.
+        """
+        class _InterruptingStub:
+            def GetEvents(self_, request, **kwargs):
+                raise KeyboardInterrupt()
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        class _FakeChannel:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        fake_channel = _FakeChannel()
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: fake_channel)
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
+                            lambda ch: _InterruptingStub())
+
+        with pytest.raises(KeyboardInterrupt):
+            analyzer.start()
+
+        assert fake_channel.closed, "channel.close() must still run via finally"
+
 
 class TestVersionMonitor:
     """Tests for _start_version_monitor background thread."""
@@ -4157,10 +4505,99 @@ class TestKafkaPublisher:
             publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
 
             with caplog.at_level(logging.WARNING):
-                publisher._on_error(Exception('delivery failed'))
+                publisher._on_error(publisher._producer, Exception('delivery failed'))
 
             assert any('delivery' in r.message.lower() or 'kafka' in r.message.lower()
                        for r in caplog.records)
+
+    def test_on_error_nullifies_matching_current_producer(self, monkeypatch):
+        """_on_error() nullifies self._producer when it's still the producer the failed send came from."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            current_producer = publisher._producer
+
+            publisher._on_error(current_producer, Exception('delivery failed'))
+
+            assert publisher._producer is None
+
+    def test_stale_on_error_does_not_nullify_a_superseded_producer(self, monkeypatch):
+        """
+        kafka-python invokes errbacks from its own internal I/O thread, and can
+        do so long after the send() call that registered it (after internal
+        retries/timeouts) -- possibly after a reconnect has already replaced
+        self._producer with a new, healthy one. A stale errback for the OLD
+        producer must not tear down the new one.
+        """
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            old_producer = publisher._producer
+
+            # Simulate a reconnect installing a new, healthy producer.
+            new_producer = MagicMock()
+            publisher._producer = new_producer
+
+            # The old producer's delayed errback finally fires.
+            publisher._on_error(old_producer, Exception('stale delivery failure'))
+
+            assert publisher._producer is new_producer, \
+                "a stale error from a superseded producer must not nullify the current one"
+
+    def test_publish_errback_captures_producer_instance_at_send_time(self, monkeypatch, sample_cert_info):
+        """
+        publish() must bind the errback to the specific producer instance send()
+        was issued from (not to whatever self._producer happens to be when the
+        errback eventually fires) -- otherwise a delayed error from an old send
+        could nullify a producer installed by a later reconnect.
+        """
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+
+        class FakeProducer:
+            def __init__(self, **kwargs):
+                self.errback = None
+
+            def send(self, *args, **kwargs):
+                future = MagicMock()
+                future.add_errback = lambda cb: setattr(self, 'errback', cb)
+                return future
+
+            def close(self, timeout=None):
+                pass
+
+        with patch('agent.kafka.KafkaProducer', FakeProducer):
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher._reconnect_cooldown = 0
+
+            old_producer = publisher._producer
+            publisher.publish(sample_cert_info)
+            assert old_producer.errback is not None
+
+            # Reconnect: old producer is replaced by a new one.
+            publisher._producer = None
+            publisher.publish(sample_cert_info)
+            new_producer = publisher._producer
+            assert new_producer is not old_producer
+
+            # The OLD producer's stale errback fires after the reconnect.
+            old_producer.errback(Exception('old delivery failed'))
+
+            assert publisher._producer is new_producer, \
+                "a stale error bound to the old producer must not nullify the new one"
 
     # ── close ─────────────────────────────────────────────────────────────────
 
