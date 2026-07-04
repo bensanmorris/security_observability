@@ -1428,11 +1428,16 @@ class CertificateAnalyzer:
         ctx.verify_mode = ssl.CERT_NONE
 
         raw_sock = None
+        tls_version = None
+        cipher_name = None
         try:
             raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
             with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
                 raw_sock = None  # SSL socket owns it now; closed by the with-block
                 der_bytes = ssock.getpeercert(binary_form=True)
+                tls_version = ssock.version()
+                cipher = ssock.cipher()
+                cipher_name = cipher[0] if cipher else None
         except Exception as e:
             logger.debug(f"TLS probe failed {host}:{port}: {e}")
             self.metrics.tls_port_probes_total.labels(status='failed').inc()
@@ -1467,13 +1472,17 @@ class CertificateAnalyzer:
         self._probed_endpoints.add(f'{host}:{port}')
         self._update_cache_metrics()
 
+        if tls_version and cipher_name:
+            self.metrics.record_tls_negotiation(cert_info, tls_version, cipher_name)
+
         if self.kafka_publisher is not None:
             self.kafka_publisher.publish(cert_info)
 
         self.metrics.tls_port_probes_total.labels(status='success').inc()
         logger.info(
             f"TLS probe: discovered cert at {host}:{port} "
-            f"CN={cert_info.common_name} process={process_name}"
+            f"CN={cert_info.common_name} process={process_name} "
+            f"protocol={tls_version} cipher={cipher_name}"
         )
 
     def _handle_tls_bind_event(self, event) -> None:

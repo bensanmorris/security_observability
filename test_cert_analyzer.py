@@ -6507,6 +6507,25 @@ class TestPortProbe:
         assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
         assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success')._value.get() == 1
 
+    def test_probe_records_negotiated_protocol_and_cipher(self, probe_analyzer, temp_dir):
+        """A successful probe records the negotiated TLS protocol/cipher on tls_certificate_negotiated_protocol."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop = self._start_tls_server(cert_path, key_path)
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/sbin/nginx', 1234, 'node-1', None
+            )
+        finally:
+            stop.set()
+
+        samples = list(probe_analyzer.metrics.tls_negotiated_protocol.collect()[0].samples)
+        assert len(samples) == 1
+        assert samples[0].value == 1.0
+        assert samples[0].labels['protocol'].startswith('TLSv1')
+        assert samples[0].labels['cipher']
+        assert samples[0].labels['node_name'] == 'node-1'
+        assert samples[0].labels['process'] == '/usr/sbin/nginx'
+
     def test_probe_skips_already_cached_endpoint(self, probe_analyzer, temp_dir):
         """Probing an endpoint already in known_certs increments the skipped counter."""
         cert_path, key_path, _ = self._gen_server_cert(temp_dir)
