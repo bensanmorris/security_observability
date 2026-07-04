@@ -1128,7 +1128,9 @@
               "serial": 14,
               "subject": 15,
               "Value": 16,
-              "checksum": 17
+              "checksum": 17,
+              "key_usage": 18,
+              "extended_key_usage": 19
             },
             "renameByName": {
               "Value": "Days Until Expiry",
@@ -1147,7 +1149,9 @@
               "cert_index": "Cert #",
               "serial": "Serial",
               "subject": "Subject",
-              "checksum": "Checksum"
+              "checksum": "Checksum",
+              "key_usage": "Key Usage",
+              "extended_key_usage": "Extended Key Usage"
             }
           }
         },
