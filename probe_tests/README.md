@@ -426,6 +426,14 @@ sudo python3 probe_tests/test_large_cert_bundle.py --keep
 # growing as N * cert-count — see agent/analyzer.py process_event's
 # cache-hit branch.
 sudo python3 probe_tests/test_large_cert_bundle.py --parallel-processes 25
+
+# Soak test: repeat the whole test every N seconds until Ctrl-C, generating a
+# fresh bundle/canary (and, with --parallel-processes, a fresh re-access
+# burst) each iteration — useful for watching cert_analyzer's memory/CPU over
+# a few hours instead of a single burst. Each iteration's files are actually
+# deleted afterward (not just printed as an rm command) unless --keep is also
+# given, including if an iteration is cut off mid-run by Ctrl-C.
+sudo python3 probe_tests/test_large_cert_bundle.py --parallel-processes 25 --loop-interval 300
 ```
 
 The script generates an N-cert PEM bundle plus a single-cert "canary" file,

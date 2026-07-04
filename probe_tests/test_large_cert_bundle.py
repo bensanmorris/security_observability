@@ -30,6 +30,16 @@ Usage:
   # N * cert-count.
   python3 test_large_cert_bundle.py --parallel-processes 25
 
+  # Soak test: repeat the whole test every N seconds until Ctrl-C, generating
+  # a fresh bundle/canary (and, with --parallel-processes, a fresh re-access
+  # burst) each iteration -- e.g. to watch cert_analyzer's memory/CPU over a
+  # few hours instead of a single burst. Each iteration's files are actually
+  # deleted afterward (not just printed as an rm command) unless --keep is
+  # also given, since nothing is around to run a printed command between
+  # iterations of an unattended loop -- including if an iteration is cut off
+  # mid-run by Ctrl-C, not just between iterations.
+  python3 test_large_cert_bundle.py --parallel-processes 25 --loop-interval 300
+
 Requires:
   - Tetragon running with tetragon-policies/certificate-file-access.yaml loaded
   - cert_analyzer running
@@ -48,6 +58,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -198,8 +209,50 @@ def main() -> None:
                         help='after the bundle is cached, re-access it from this many distinct, '
                              'concurrently-running processes to verify the cert_process_info '
                              're-access cardinality cap (default: 0 = skip this check)')
+    parser.add_argument('--loop-interval', type=float, default=0,
+                        help='if set, repeat the entire test every N seconds until interrupted '
+                             '(Ctrl-C) instead of running once. Each iteration generates a fresh '
+                             'bundle/canary (unique per-iteration filenames, same as separate '
+                             'runs) and actually deletes them afterward unless --keep is also '
+                             'given (default: 0 = run once)')
     args = parser.parse_args()
 
+    if args.loop_interval > 0:
+        _run_loop(args)
+    else:
+        _run_once(args)
+
+
+def _run_loop(args: argparse.Namespace) -> None:
+    """Repeat _run_once every args.loop_interval seconds until Ctrl-C."""
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            print(f'########## iteration {iteration} '
+                  f'({datetime.utcnow().isoformat()}Z) ##########')
+            _run_once(args, iteration=iteration)
+            print(f'[test] Sleeping {args.loop_interval}s before next iteration (Ctrl-C to stop)...')
+            print()
+            time.sleep(args.loop_interval)
+    except KeyboardInterrupt:
+        print(f'\n[test] Stopped after {iteration} iteration(s).')
+
+
+def _run_once(args: argparse.Namespace, iteration: Optional[int] = None) -> None:
+    """
+    Run a single instance of the bundle/canary/re-access test.
+
+    `iteration` is None for a plain one-shot invocation (main()'s original
+    behavior: generated files are left in place with an rm command printed
+    for the user to run manually, unless --keep). When called repeatedly by
+    _run_loop, generated files are actually deleted at the end of each
+    iteration instead (unless --keep) -- there's no one watching to run a
+    printed rm command between iterations of an unattended, possibly
+    hours-long loop. That deletion happens in a finally block so it still
+    runs if this iteration is cut off partway through by Ctrl-C, not only on
+    a clean finish.
+    """
     threshold = _effective_threshold()
     metrics_cap = _effective_metrics_cap()
     if args.count <= threshold:
@@ -217,91 +270,106 @@ def main() -> None:
     bundle_path = os.path.join(args.out_dir, f'cert-analyzer-large-bundle-test-{run_id}.pem')
     canary_path = os.path.join(args.out_dir, f'cert-analyzer-canary-test-{run_id}.pem')
 
-    print(f'=== large-cert-bundle background-parsing test ({args.count} certs) ===')
-    print()
-    print('Prerequisites:')
-    print('  Tetragon running with certificate-file-access.yaml policy loaded:')
-    print('    sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml')
-    print()
-    print(f'Configured large_file_cert_threshold: {threshold}')
-    print(f'Configured large_file_metrics_cap:    {metrics_cap}')
-    print()
+    try:
+        print(f'=== large-cert-bundle background-parsing test ({args.count} certs) ===')
+        print()
+        print('Prerequisites:')
+        print('  Tetragon running with certificate-file-access.yaml policy loaded:')
+        print('    sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml')
+        print()
+        print(f'Configured large_file_cert_threshold: {threshold}')
+        print(f'Configured large_file_metrics_cap:    {metrics_cap}')
+        print()
 
-    print(f'[test] Generating {args.count} self-signed certs -> {bundle_path}')
-    bundle_data = b''.join(
-        _make_self_signed_cert(f'bundle-test-{i}.example.com') for i in range(args.count)
-    )
-    _write_file(bundle_path, bundle_data)
+        print(f'[test] Generating {args.count} self-signed certs -> {bundle_path}')
+        bundle_data = b''.join(
+            _make_self_signed_cert(f'bundle-test-{i}.example.com') for i in range(args.count)
+        )
+        _write_file(bundle_path, bundle_data)
 
-    print(f'[test] Generating 1 canary cert -> {canary_path}')
-    _write_file(canary_path, _make_self_signed_cert('canary.example.com'))
-    print()
+        print(f'[test] Generating 1 canary cert -> {canary_path}')
+        _write_file(canary_path, _make_self_signed_cert('canary.example.com'))
+        print()
 
-    print('[test] Opening the bundle — this fires fd_install and should be picked up')
-    print('       by cert_analyzer as a large file and handed to a background thread.')
-    t0 = time.time()
-    with open(bundle_path, 'rb') as f:
-        f.read()
-    print(f'[test]   bundle opened at t=+{time.time() - t0:.3f}s')
+        print('[test] Opening the bundle — this fires fd_install and should be picked up')
+        print('       by cert_analyzer as a large file and handed to a background thread.')
+        t0 = time.time()
+        with open(bundle_path, 'rb') as f:
+            f.read()
+        print(f'[test]   bundle opened at t=+{time.time() - t0:.3f}s')
 
-    print('[test] Immediately opening the canary — proves the event-consumer thread')
-    print('       is still free to process new events while the bundle parses.')
-    with open(canary_path, 'rb') as f:
-        f.read()
-    print(f'[test]   canary opened at t=+{time.time() - t0:.3f}s')
-    print()
+        print('[test] Immediately opening the canary — proves the event-consumer thread')
+        print('       is still free to process new events while the bundle parses.')
+        with open(canary_path, 'rb') as f:
+            f.read()
+        print(f'[test]   canary opened at t=+{time.time() - t0:.3f}s')
+        print()
 
-    print(f'[test] Waiting {_SETTLE_WAIT}s for cert_analyzer to log both...')
-    time.sleep(_SETTLE_WAIT)
-    print()
-
-    if args.parallel_processes > 0:
-        # Only meaningful once the bundle is actually cached — re-accessing it
-        # while the background parse is still in flight would just pile onto
-        # the initial-parse path (already capped in _finish_new_certificate_file)
-        # instead of exercising process_event's cache-hit re-access cap.
-        _reaccess_from_parallel_processes(bundle_path, args.parallel_processes, run_id)
-        print(f'[test] Waiting {_SETTLE_WAIT}s for cert_analyzer to process the re-accesses...')
+        print(f'[test] Waiting {_SETTLE_WAIT}s for cert_analyzer to log both...')
         time.sleep(_SETTLE_WAIT)
         print()
 
-    print('=== Verify ===')
-    print()
-    print('journalctl -u cert-analyzer --since "-1 min" | grep -E "bundle-test|canary"')
-    print()
-    print('Expected (canary lines should NOT be delayed behind the bundle):')
-    print(f'  🔍 Detected certificate access: {bundle_path} ...')
-    print(f'  🔍 Detected certificate access: {canary_path} ...')
-    print(f'  ✅ OK: {canary_path} [cert #1] ... CN=canary.example.com ...')
-    print(f'  Found {args.count} certificate(s) in {bundle_path} (parsed in background — large file)')
-    print()
-    print('If the canary\'s "Detected certificate access" / "OK" lines appear within')
-    print('a second or two of being triggered — even though the bundle line above may')
-    print('land later — the background thread is doing its job and the event loop was')
-    print('not blocked by the large file.')
-    print()
-    print(f'curl -s http://localhost:9090/metrics | grep -c \'CN="bundle-test\'')
-    print(f'# Expect {args.count} once the background parse finishes')
-    print()
+        if args.parallel_processes > 0:
+            # Only meaningful once the bundle is actually cached — re-accessing it
+            # while the background parse is still in flight would just pile onto
+            # the initial-parse path (already capped in _finish_new_certificate_file)
+            # instead of exercising process_event's cache-hit re-access cap.
+            _reaccess_from_parallel_processes(bundle_path, args.parallel_processes, run_id)
+            print(f'[test] Waiting {_SETTLE_WAIT}s for cert_analyzer to process the re-accesses...')
+            time.sleep(_SETTLE_WAIT)
+            print()
 
-    if args.parallel_processes > 0:
-        cap = metrics_cap
-        print('--- Re-access cardinality cap ---')
+        print('=== Verify ===')
         print()
-        print(f'{args.parallel_processes} distinct processes each re-opened the already-cached')
-        print(f'bundle. Each re-access is capped to large_file_metrics_cap '
-              f'({cap}) tracked certs (agent/analyzer.py process_event, cache-hit branch),')
-        print(f'instead of one tls_certificate_process_info series per (cached cert, process) pair:')
+        print('journalctl -u cert-analyzer --since "-1 min" | grep -E "bundle-test|canary"')
         print()
-        print(f'curl -s http://localhost:9090/metrics | grep \'^tls_certificate_process_info\' '
-              f'| grep -cF \'cert_path="{bundle_path}"\'')
-        print(f'# Before the fix: up to {args.parallel_processes + 1} * {args.count} = '
-              f'{(args.parallel_processes + 1) * args.count} series (N processes x every cached cert)')
-        print(f'# After the fix:  at most {args.parallel_processes + 1} * {cap} = '
-              f'{(args.parallel_processes + 1) * cap} series (capped per event to large_file_metrics_cap)')
+        print('Expected (canary lines should NOT be delayed behind the bundle):')
+        print(f'  🔍 Detected certificate access: {bundle_path} ...')
+        print(f'  🔍 Detected certificate access: {canary_path} ...')
+        print(f'  ✅ OK: {canary_path} [cert #1] ... CN=canary.example.com ...')
+        print(f'  Found {args.count} certificate(s) in {bundle_path} (parsed in background — large file)')
+        print()
+        print('If the canary\'s "Detected certificate access" / "OK" lines appear within')
+        print('a second or two of being triggered — even though the bundle line above may')
+        print('land later — the background thread is doing its job and the event loop was')
+        print('not blocked by the large file.')
+        print()
+        print(f'curl -s http://localhost:9090/metrics | grep -c \'CN="bundle-test\'')
+        print(f'# Expect {args.count} once the background parse finishes')
         print()
 
-    if not args.keep:
+        if args.parallel_processes > 0:
+            cap = metrics_cap
+            print('--- Re-access cardinality cap ---')
+            print()
+            print(f'{args.parallel_processes} distinct processes each re-opened the already-cached')
+            print(f'bundle. Each re-access is capped to large_file_metrics_cap '
+                  f'({cap}) tracked certs (agent/analyzer.py process_event, cache-hit branch),')
+            print(f'instead of one tls_certificate_process_info series per (cached cert, process) pair:')
+            print()
+            print(f'curl -s http://localhost:9090/metrics | grep \'^tls_certificate_process_info\' '
+                  f'| grep -cF \'cert_path="{bundle_path}"\'')
+            print(f'# Before the fix: up to {args.parallel_processes + 1} * {args.count} = '
+                  f'{(args.parallel_processes + 1) * args.count} series (N processes x every cached cert)')
+            print(f'# After the fix:  at most {args.parallel_processes + 1} * {cap} = '
+                  f'{(args.parallel_processes + 1) * cap} series (capped per event to large_file_metrics_cap)')
+            print()
+    finally:
+        if not args.keep and iteration is not None:
+            # Looping: actually delete rather than printing an rm command --
+            # there's no one watching to run it between iterations of an
+            # unattended, possibly hours-long loop. In a finally block so an
+            # iteration interrupted partway through (e.g. mid-settle-wait)
+            # still cleans up whatever it had already created, rather than
+            # leaking files on every interrupted iteration.
+            for path in (bundle_path, canary_path):
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError as e:
+                        print(f'[test] WARNING: could not remove {path}: {e}', file=sys.stderr)
+
+    if not args.keep and iteration is None:
         rm_prefix = 'sudo ' if not os.access(args.out_dir, os.W_OK) else ''
         print('=== Cleanup ===')
         print(f'{rm_prefix}rm {bundle_path} {canary_path}')
