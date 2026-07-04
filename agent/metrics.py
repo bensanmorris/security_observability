@@ -171,11 +171,17 @@ class PrometheusMetrics:
         )
 
         # Build info — single source of truth for version diagnostics.
+        # node_name-labeled (like tetragon_version_info/tetragon_version_match
+        # above) so a fleet-wide dashboard can show which analyzer version is
+        # actually running on each node -- e.g. to verify a rollout landed
+        # everywhere, rather than only being able to compare Tetragon's own
+        # build/runtime versions per node.
         self.build_info = Info(
             'cert_analyzer_build',
             'Build information for the cert-analyzer',
+            ['node_name'],
         )
-        self.build_info.info({
+        self.build_info.labels(node_name=self._node_name).info({
             'version':                CERT_ANALYZER_VERSION,
             'tetragon_build_version': TETRAGON_BUILD_VERSION,
         })

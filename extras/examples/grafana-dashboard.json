@@ -264,6 +264,16 @@
           "instant": true,
           "format": "table",
           "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_build{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "H"
         }
       ],
       "transformations": [
@@ -286,13 +296,16 @@
               "Time 5": true,
               "Time 6": true,
               "Time 7": true,
+              "Time 8": true,
               "__name__": true,
               "instance": true,
               "job": true,
               "state": true,
               "state 1": true,
               "state 2": true,
-              "Value #G": true
+              "Value #G": true,
+              "Value #H": true,
+              "tetragon_build_version": true
             },
             "indexByName": {
               "node_name": 0,
@@ -303,7 +316,8 @@
               "runtime_version": 5,
               "Value #D": 6,
               "Value #E": 7,
-              "Value #F": 8
+              "Value #F": 8,
+              "version": 9
             },
             "renameByName": {
               "node_name": "Node",
@@ -314,7 +328,8 @@
               "runtime_version": "Runtime Version",
               "Value #D": "Active Policies",
               "Value #E": "Policy Errors",
-              "Value #F": "Kafka Err/s"
+              "Value #F": "Kafka Err/s",
+              "version": "Analyzer Version"
             }
           }
         }
