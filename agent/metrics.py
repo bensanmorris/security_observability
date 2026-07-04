@@ -305,6 +305,11 @@ class PrometheusMetrics:
             node_name=info.node_name,
             checksum=info.checksum,
         ).set(1)
+        # The discovering process is always allowed (an empty seen-set can
+        # never already be at the fan-out cap) — seed it here so a later
+        # cache-hit re-access by this same process isn't mistaken for a new
+        # distinct process by CertificateAnalyzer._record_cert_process_access.
+        info._seen_processes.add((info.process, info.parent_process))
 
         self.cert_expiry_days.labels(**labels).set(days_left)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
@@ -391,14 +396,14 @@ class PrometheusMetrics:
         previously removed them on eviction, so every certificate ever seen
         stayed resident in the registry forever.
 
-        cert_process_info is only partially cleaned up: it fans out to one
-        series per distinct process that has accessed this cert, but only the
-        most recently recorded (process, parent_process) pair is retained on
-        CertificateInfo, so earlier distinct-process series for the same cert
-        can't be reconstructed and removed here. tls_negotiated_protocol
-        (TLS-probe discoveries only) isn't cleaned up at all for the same
-        reason — protocol/cipher aren't persisted on CertificateInfo after the
-        probe completes.
+        cert_process_info fans out to one series per distinct process that
+        has accessed this cert, capped at max_processes_per_cert -- every
+        (process, parent_process) pair that was ever actually given a series
+        is tracked in info._seen_processes, so all of them are removed here,
+        not just the most recent. tls_negotiated_protocol (TLS-probe
+        discoveries only) still isn't cleaned up: protocol/cipher aren't
+        persisted on CertificateInfo after the probe completes, so there's
+        nothing to reconstruct that label tuple from.
         """
         shared_labels = (
             info.path, info.subject[:100], info.issuer[:100], info.serial_number,
@@ -413,10 +418,12 @@ class PrometheusMetrics:
                       self.cert_valid_from, self.cert_last_accessed):
             self._safe_remove(gauge, shared_labels)
 
-        self._safe_remove(self.cert_process_info, (
-            info.path, str(info.cert_index), info.serial_number,
-            info.process, info.parent_process, info.node_name, info.checksum,
-        ))
+        seen_processes = getattr(info, '_seen_processes', None) or {(info.process, info.parent_process)}
+        for process, parent_process in seen_processes:
+            self._safe_remove(self.cert_process_info, (
+                info.path, str(info.cert_index), info.serial_number,
+                process, parent_process, info.node_name, info.checksum,
+            ))
 
         self._safe_remove(self.cert_expired, (
             info.path, str(info.cert_index), info.pod_name, info.namespace,
@@ -482,6 +489,11 @@ class PrometheusMetrics:
         A distinct (process, parent_process) label pair is its own Prometheus series,
         so repeated calls for different processes accumulate into a multi-process view
         of who has loaded this cert, rather than overwriting the original discoverer.
+
+        This method always writes the series unconditionally — capping the
+        number of distinct processes tracked per cert (max_processes_per_cert)
+        is the caller's job: see CertificateAnalyzer._record_cert_process_access,
+        which decides whether to call this at all.
         """
         self.cert_process_info.labels(
             cert_path=info.path,

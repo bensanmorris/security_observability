@@ -118,6 +118,12 @@ def main():
     # (e.g. many pods reconnecting to dependencies at once) can't spawn
     # unbounded OS threads.
     max_concurrent_background_threads = int(cfg(cp, 'certificates', 'max_concurrent_background_threads', 'MAX_CONCURRENT_BACKGROUND_THREADS', '20'))
+    # Caps how many distinct (process, parent_process) pairs get their own
+    # tls_certificate_process_info series per cert -- otherwise a file opened
+    # by many unrelated binaries over the process's lifetime (e.g. the system
+    # CA trust bundle) accumulates one permanent series per distinct process,
+    # forever, regardless of known_certs cache size.
+    max_processes_per_cert = int(cfg(cp, 'certificates', 'max_processes_per_cert', 'MAX_PROCESSES_PER_CERT', '20'))
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
@@ -160,6 +166,7 @@ def main():
     logger.info(f"Large file threshold: >{large_file_cert_threshold} certs parsed in background")
     logger.info(f"Large file metrics cap: {large_file_metrics_cap} certs get full Prometheus tracking per bundle")
     logger.info(f"Max concurrent background threads: {max_concurrent_background_threads}")
+    logger.info(f"Max processes tracked per cert: {max_processes_per_cert}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
@@ -220,7 +227,8 @@ def main():
                                    tls_outbound_ports=tls_outbound_ports,
                                    large_file_cert_threshold=large_file_cert_threshold,
                                    large_file_metrics_cap=large_file_metrics_cap,
-                                   max_concurrent_background_threads=max_concurrent_background_threads)
+                                   max_concurrent_background_threads=max_concurrent_background_threads,
+                                   max_processes_per_cert=max_processes_per_cert)
 
     health = HealthServer(
         analyzer=analyzer,

@@ -89,7 +89,8 @@ class CertificateAnalyzer:
                  tls_outbound_ports: Optional[frozenset] = None,
                  large_file_cert_threshold: int = 20,
                  large_file_metrics_cap: int = 300,
-                 max_concurrent_background_threads: int = 20):
+                 max_concurrent_background_threads: int = 20,
+                 max_processes_per_cert: int = 20):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -115,6 +116,14 @@ class CertificateAnalyzer:
         # finally block, so it can never over-release.
         self._max_concurrent_background_threads = max_concurrent_background_threads
         self._background_thread_semaphore = threading.Semaphore(max_concurrent_background_threads)
+        # Bounds the number of distinct (process, parent_process) pairs
+        # tracked in tls_certificate_process_info per cert. Without this, a
+        # file opened by many unrelated binaries over the life of the process
+        # (e.g. the system CA trust bundle touched by curl, dnf, git, python,
+        # docker, ...) accumulates one permanent series per distinct process,
+        # forever — unbounded regardless of known_certs cache size, since the
+        # cert entry itself may never be evicted. See _record_cert_process_access.
+        self._max_processes_per_cert = max_processes_per_cert
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
@@ -220,6 +229,38 @@ class CertificateAnalyzer:
         self.metrics.cache_processed_paths_size.labels(node_name=self.metrics._node_name).set(len(self.processed_paths))
         self.metrics.cache_password_failed_size.labels(node_name=self.metrics._node_name).set(len(self.password_failed_paths))
         self.metrics.update_process_metrics()
+
+    def _record_cert_process_access(self, cert_info: CertificateInfo, process: str, parent_process: str) -> None:
+        """
+        Record that `process` has accessed an already-known cert, capped at
+        max_processes_per_cert distinct (process, parent_process) pairs per
+        cert.
+
+        Without this cap, a file opened by many unrelated binaries over the
+        life of the process (e.g. the system CA trust bundle touched by curl,
+        dnf, git, python, docker, ...) accumulates one permanent
+        tls_certificate_process_info series per distinct process, forever —
+        unlike the cert's own expiry/FIPS/self-signed metrics, this fan-out
+        isn't bounded by known_certs' LRU size, since the cert entry itself
+        may never get evicted while still being actively re-accessed.
+
+        Only ever called from process_event, which runs on the single
+        gRPC event-consumer thread, so cert_info._seen_processes needs no
+        lock — nothing else mutates it after the initial seed in
+        PrometheusMetrics.update_certificate_metrics.
+        """
+        pair = (process, parent_process)
+        if pair not in cert_info._seen_processes:
+            if len(cert_info._seen_processes) >= self._max_processes_per_cert:
+                logger.debug(
+                    f"cert_process_info fan-out cap ({self._max_processes_per_cert}) "
+                    f"reached for {cert_info.path} — not tracking additional "
+                    f"process {process!r}"
+                )
+                self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached').inc()
+                return
+            cert_info._seen_processes.add(pair)
+        self.metrics.record_cert_process_access(cert_info, process, parent_process)
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -1784,7 +1825,7 @@ class CertificateAnalyzer:
                 # in this file.
                 self.log_certificate_status(cert_info, summary_only=True)
                 self.metrics.update_last_accessed(cert_info)
-                self.metrics.record_cert_process_access(cert_info, process_name, parent_process)
+                self._record_cert_process_access(cert_info, process_name, parent_process)
 
             if is_bundle:
                 logger.info(
