@@ -87,7 +87,7 @@ Only emitted when `bind_probe_enabled=true` or `connect_probe_enabled=true` (bot
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `tls_port_probes_total` | Counter | `status` | Total TLS port probe attempts. `status=success\|failed\|skipped` (`skipped` = endpoint already probed) |
-| `tls_certificate_negotiated_protocol` | Gauge | `cert_path`, `cert_index`, `serial`, `node_name`, `protocol`, `cipher` | `1` if observed. Records the TLS protocol version and cipher suite negotiated with `ssl.create_default_context()` during the probe — the server's ceiling with a modern client, not necessarily what every real client gets. Only emitted for TLS-probed endpoints; file-discovered certificates have no live connection to negotiate |
+| `tls_certificate_negotiated_protocol` | Gauge | `cert_path`, `cert_index`, `serial`, `node_name`, `protocol`, `cipher`, `process` | `1` if observed. Records the TLS protocol version and cipher suite negotiated with `ssl.create_default_context()` during the probe — the server's ceiling with a modern client, not necessarily what every real client gets. `process` is the binary that triggered the probe (the bind/connect event's process). Only emitted for TLS-probed endpoints; file-discovered certificates have no live connection to negotiate |
 
 ### Analyzer health and operational metrics
 

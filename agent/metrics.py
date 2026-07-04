@@ -85,7 +85,7 @@ class PrometheusMetrics:
         self.tls_negotiated_protocol = Gauge(
             'tls_certificate_negotiated_protocol',
             'TLS protocol version and cipher suite negotiated during a TLS port probe (1=observed)',
-            ['cert_path', 'cert_index', 'serial', 'node_name', 'protocol', 'cipher'],
+            ['cert_path', 'cert_index', 'serial', 'node_name', 'protocol', 'cipher', 'process'],
         )
 
         # Event counters
@@ -428,6 +428,7 @@ class PrometheusMetrics:
             node_name=info.node_name,
             protocol=protocol,
             cipher=cipher,
+            process=info.process,
         ).set(1)
 
     def update_process_metrics(self) -> None:

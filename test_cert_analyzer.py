@@ -6524,6 +6524,7 @@ class TestPortProbe:
         assert samples[0].labels['protocol'].startswith('TLSv1')
         assert samples[0].labels['cipher']
         assert samples[0].labels['node_name'] == 'node-1'
+        assert samples[0].labels['process'] == '/usr/sbin/nginx'
 
     def test_probe_skips_already_cached_endpoint(self, probe_analyzer, temp_dir):
         """Probing an endpoint already in known_certs increments the skipped counter."""
