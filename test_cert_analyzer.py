@@ -593,6 +593,99 @@ class TestPeriodicScan:
         """A configured scan path that doesn't exist on disk is skipped without raising."""
         analyzer.periodic_scan(["/nonexistent/scan/path"])
 
+    @staticmethod
+    def _make_event(path, process='/usr/bin/cat', pid=4242):
+        from unittest.mock import MagicMock
+        mock_event = MagicMock()
+        mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        mock_kprobe = MagicMock()
+        mock_kprobe.process.binary = process
+        mock_kprobe.process.pid.value = pid
+        mock_kprobe.process.HasField.return_value = False
+        mock_kprobe.HasField.return_value = False
+        mock_arg = MagicMock()
+        mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+        mock_arg.file_arg.path = path
+        mock_kprobe.args = [mock_arg]
+        mock_event.process_kprobe = mock_kprobe
+        mock_event.node_name = ''
+        return mock_event
+
+    def test_new_file_in_flight_prevents_periodic_scan_reparsing_file_claimed_by_event_path(
+        self, analyzer, temp_dir
+    ):
+        """
+        If a Tetragon event for a brand-new small file is mid-parse (has claimed
+        the path in _new_file_in_flight) right as periodic_scan's directory walk
+        reaches the same path, periodic_scan must not also parse/publish it.
+        """
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer._new_file_in_flight.add(cert_path)  # simulate process_event already claiming it
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.periodic_scan([temp_dir])
+
+        assert analyze_calls == [], "a path already claimed by another thread must not be re-parsed"
+        analyzer.kafka_publisher.publish.assert_not_called()
+        assert cert_path not in analyzer.known_certs.keys()
+
+    def test_new_file_in_flight_prevents_event_path_reparsing_file_claimed_by_periodic_scan(
+        self, analyzer, temp_dir
+    ):
+        """Same race, mirrored: process_event must not re-parse/publish a path periodic_scan has already claimed."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy2.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy2.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer._new_file_in_flight.add(cert_path)  # simulate periodic_scan already claiming it
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.process_event(self._make_event(cert_path))
+
+        assert analyze_calls == [], "a path already claimed by another thread must not be re-parsed"
+        analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_new_file_in_flight_cleared_after_periodic_scan_completes(self, analyzer, temp_dir):
+        """_new_file_in_flight must not leak an entry once periodic_scan finishes with a path."""
+        cert, _ = TestCertificateGeneration.generate_certificate("cleanup.example.com", 365)
+        cert_path = os.path.join(temp_dir, "cleanup.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        assert cert_path not in analyzer._new_file_in_flight
+
+    def test_new_file_in_flight_cleared_after_process_event_completes(self, analyzer, temp_dir):
+        """_new_file_in_flight must not leak an entry once process_event finishes with a path."""
+        cert, _ = TestCertificateGeneration.generate_certificate("cleanup2.example.com", 365)
+        cert_path = os.path.join(temp_dir, "cleanup2.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.process_event(self._make_event(cert_path))
+
+        assert cert_path not in analyzer._new_file_in_flight
+
 
 class TestCertificateAnalysis:
     """Test certificate analysis and information extraction"""

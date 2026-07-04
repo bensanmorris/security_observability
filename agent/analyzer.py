@@ -151,6 +151,18 @@ class CertificateAnalyzer:
         # letting two workers get spawned for one file. Needs its own lock.
         self._large_file_in_flight: Set[str] = set()
         self._large_file_in_flight_lock = threading.Lock()
+        # Paths below _large_file_cert_threshold (so parsed synchronously rather
+        # than via _process_certificate_file_async) that are currently being
+        # analyzed for the first time. process_event() runs on a single thread
+        # so it can't race against itself, but periodic_scan() runs on its own
+        # thread and re-walks scan_paths independently — without this guard, a
+        # file first seen at almost the same moment by both a Tetragon event and
+        # a periodic scan tick (most likely right after agent startup) would get
+        # parsed and _finish_new_certificate_file'd twice, double-publishing it
+        # to Kafka as two separate "new discovery" events. Same check-then-add
+        # race shape as _probe_in_flight/_large_file_in_flight above.
+        self._new_file_in_flight: Set[str] = set()
+        self._new_file_in_flight_lock = threading.Lock()
         self.last_event_time: float = 0.0
 
     def _index_known_cert(self, key: str, value) -> None:
@@ -1713,15 +1725,27 @@ class CertificateAnalyzer:
             )
             return
 
-        # Analyze new certificate file (may contain multiple certs)
-        cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
-        if not cert_infos:
-            return
+        # Analyze new certificate file (may contain multiple certs). Guarded by
+        # _new_file_in_flight so a periodic_scan tick landing on this same
+        # never-before-seen path at the same moment doesn't double-parse and
+        # double-publish it — see the comment on _new_file_in_flight in __init__.
+        with self._new_file_in_flight_lock:
+            if cert_path in self._new_file_in_flight:
+                logger.debug(f"New-file parse for {cert_path} already in flight, skipping duplicate")
+                return
+            self._new_file_in_flight.add(cert_path)
+        try:
+            cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
+            if not cert_infos:
+                return
 
-        logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
-        self._finish_new_certificate_file(
-            cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
-        )
+            logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
+            self._finish_new_certificate_file(
+                cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
+            )
+        finally:
+            with self._new_file_in_flight_lock:
+                self._new_file_in_flight.discard(cert_path)
 
     def get_runtime_tetragon_version(self, stub) -> str:
         """
@@ -2056,14 +2080,25 @@ class CertificateAnalyzer:
                         )
                         continue
 
-                    cert_infos = self.analyze_certificate(cert_path, "periodic_scan", 0)
-                    if not cert_infos:
-                        continue
-                    self._finish_new_certificate_file(
-                        cert_infos, tetragon_pod=None, parent_process="",
-                        parent_pid=0, node_name="",
-                    )
-                    cert_count += len(cert_infos)
+                    # Guarded by _new_file_in_flight so a Tetragon event landing on
+                    # this same never-before-seen path at the same moment doesn't
+                    # double-parse and double-publish it — see the comment on
+                    # _new_file_in_flight in __init__.
+                    with self._new_file_in_flight_lock:
+                        if cert_path in self._new_file_in_flight:
+                            continue
+                        self._new_file_in_flight.add(cert_path)
+                    try:
+                        cert_infos = self.analyze_certificate(cert_path, "periodic_scan", 0)
+                        if cert_infos:
+                            self._finish_new_certificate_file(
+                                cert_infos, tetragon_pod=None, parent_process="",
+                                parent_pid=0, node_name="",
+                            )
+                            cert_count += len(cert_infos)
+                    finally:
+                        with self._new_file_in_flight_lock:
+                            self._new_file_in_flight.discard(cert_path)
 
                 logger.info(f"Scanned {cert_count} new certificate(s) in {base_path}")
 
