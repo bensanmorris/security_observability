@@ -654,7 +654,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"}))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_expiry_days{namespace=~\"$namespace\",node_name=~\"$node\"}))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -664,7 +664,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_expired{namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_expired{namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
           "instant": true,
           "format": "table",
           "refId": "B"
@@ -674,7 +674,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_expiring_soon{threshold_days=\"7\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_expiring_soon{threshold_days=\"7\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
           "instant": true,
           "format": "table",
           "refId": "C"
@@ -684,7 +684,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_expiring_soon{threshold_days=\"30\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_expiring_soon{threshold_days=\"30\",namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
           "instant": true,
           "format": "table",
           "refId": "D"
@@ -694,7 +694,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 0))",
           "instant": true,
           "format": "table",
           "refId": "E"
@@ -704,7 +704,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_self_signed{namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
           "instant": true,
           "format": "table",
           "refId": "F"
@@ -724,7 +724,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (node_name) (count by (node_name, issuer, serial) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
+          "expr": "count by (node_name) (count by (node_name, issuer, serial, checksum) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"} == 1))",
           "instant": true,
           "format": "table",
           "refId": "H"

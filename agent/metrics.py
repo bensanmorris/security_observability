@@ -82,11 +82,22 @@ class PrometheusMetrics:
         # several file paths) instead of counting one row per observation.
         # This adds attributes to already one-series-per-cert Gauges rather
         # than a new fan-out axis, so it doesn't add cardinality risk.
+        #
+        # checksum is also included: issuer+serial is only a unique identity
+        # if the issuing CA never reuses a serial number. Grouping by checksum
+        # too means two certs that claim the same issuer+serial but actually
+        # differ in content (serial collision/reuse, or tampering) stay as two
+        # distinct groups instead of silently merging into one -- turning the
+        # distinct count itself into a tamper signal. checksum is "" for every
+        # series when checksum_enabled=false (the default), and grouping by a
+        # label with the same value on every series is a no-op, so this is
+        # free when the feature is off.
         self.cert_expired = Gauge(
             'tls_certificate_expired',
             'Whether certificate is expired (1=expired, 0=valid)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'issuer', 'serial']
+             'workload_kind', 'workload_name', 'node_name', 'issuer', 'serial',
+             'checksum']
         )
 
         self.cert_expiring_soon = Gauge(
@@ -94,7 +105,7 @@ class PrometheusMetrics:
             'Whether certificate expires within threshold (1=yes, 0=no)',
             ['cert_path', 'threshold_days', 'cert_index', 'pod_name',
              'namespace', 'workload_kind', 'workload_name', 'node_name',
-             'issuer', 'serial']
+             'issuer', 'serial', 'checksum']
         )
 
         self.cert_fips_compliant = Gauge(
@@ -102,14 +113,15 @@ class PrometheusMetrics:
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash',
-             'key_size', 'curve_name', 'issuer', 'serial']
+             'key_size', 'curve_name', 'issuer', 'serial', 'checksum']
         )
 
         self.cert_self_signed = Gauge(
             'tls_certificate_self_signed',
             'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'is_ca', 'issuer', 'serial']
+             'workload_kind', 'workload_name', 'node_name', 'is_ca', 'issuer', 'serial',
+             'checksum']
         )
 
         # System health
@@ -268,6 +280,7 @@ class PrometheusMetrics:
             node_name=info.node_name,
             issuer=info.issuer[:100],
             serial=info.serial_number,
+            checksum=info.checksum,
         ).set(1 if info.is_expired else 0)
 
         for threshold in [7, 30, 90]:
@@ -282,6 +295,7 @@ class PrometheusMetrics:
                 node_name=info.node_name,
                 issuer=info.issuer[:100],
                 serial=info.serial_number,
+                checksum=info.checksum,
             ).set(1 if 0 < info.days_until_expiry < threshold else 0)
 
         if info.key_algorithm:
@@ -299,6 +313,7 @@ class PrometheusMetrics:
                 curve_name=info.curve_name,
                 issuer=info.issuer[:100],
                 serial=info.serial_number,
+                checksum=info.checksum,
             ).set(1 if info.fips_compliant else 0)
 
         self.cert_self_signed.labels(
@@ -312,6 +327,7 @@ class PrometheusMetrics:
             is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
             issuer=info.issuer[:100],
             serial=info.serial_number,
+            checksum=info.checksum,
         ).set(1 if info.is_self_signed else 0)
 
     def update_last_accessed(self, info: CertificateInfo) -> None:
