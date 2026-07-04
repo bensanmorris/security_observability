@@ -31,7 +31,6 @@ All share the same label set:
 | `subject` | X.509 | RFC 4514 string, truncated to 100 chars |
 | `issuer` | X.509 | RFC 4514 string, truncated to 100 chars |
 | `serial` | X.509 | Decimal serial number as string |
-| `process` | Tetragon event | Binary path of the process that accessed the cert |
 | `common_name` | X.509 | CN from the Subject, empty if absent |
 | `san_dns_names` | X.509 | Comma-joined DNS SANs; empty string if none |
 | `san_ip_addresses` | X.509 | Comma-joined IP SANs; empty string if none |
@@ -44,7 +43,13 @@ All share the same label set:
 | `app_label` | k8s pod labels | Value of `app`, `app.kubernetes.io/name`, or `k8s-app` label; empty if none |
 | `container_name` | Tetragon / k8s | Empty on bare metal |
 | `checksum` | X.509 | SHA-256 hex fingerprint of DER-encoded cert; empty string when `checksum_enabled=false` |
-| `parent_process` | Tetragon event | Binary path of the process that spawned the cert loader; empty when Tetragon's process cache did not have the parent at event time (common at startup) |
+| `key_usage` | X.509 | Comma-joined Key Usage bits (e.g. `digital_signature,key_encipherment`); empty string if the extension is absent |
+| `extended_key_usage` | X.509 | Comma-joined Extended Key Usage OIDs (e.g. `server_auth,client_auth`); empty string if the extension is absent |
+
+Note: `process`/`parent_process` are per-*access*, not per-certificate, so they are
+deliberately not labels on these four gauges — they're tracked instead on the
+`tls_certificate_process_info` gauge, which maps certificates to the processes
+observed loading them.
 
 ### Certificate status flags
 

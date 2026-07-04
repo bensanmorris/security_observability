@@ -18,13 +18,22 @@ class PrometheusMetrics:
         # process/parent_process are intentionally absent: these are cert properties,
         # not per-accessor properties.  Use tls_certificate_process_info to map certs
         # to the processes that have loaded them.
+        #
+        # key_usage/extended_key_usage are comma-joined (same pattern as
+        # san_dns_names/san_ip_addresses below) so key-usage-abuse queries
+        # (e.g. a serverAuth-only cert observed somewhere clientAuth is
+        # expected) are filterable/alertable from Prometheus instead of only
+        # visible in the detail log or the optional Kafka event stream. Real
+        # KU/EKU combinations cluster into a handful of common patterns, so
+        # this doesn't add meaningful cardinality risk.
         self.cert_expiry_days = Gauge(
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum',
+             'key_usage', 'extended_key_usage']
         )
 
         self.cert_expiry_timestamp = Gauge(
@@ -33,7 +42,8 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum',
+             'key_usage', 'extended_key_usage']
         )
 
         self.cert_valid_from = Gauge(
@@ -42,7 +52,8 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum',
+             'key_usage', 'extended_key_usage']
         )
 
         self.cert_last_accessed = Gauge(
@@ -51,7 +62,8 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum']
+             'node_name', 'app_label', 'container_name', 'checksum',
+             'key_usage', 'extended_key_usage']
         )
 
         self.cert_process_info = Gauge(
@@ -253,6 +265,8 @@ class PrometheusMetrics:
             'app_label':        info.app_label,
             'container_name':   info.container_name,
             'checksum':         info.checksum,
+            'key_usage':          ','.join(info.key_usage) if info.key_usage else '',
+            'extended_key_usage': ','.join(info.extended_key_usage) if info.extended_key_usage else '',
         }
 
         self.cert_process_info.labels(
@@ -355,6 +369,8 @@ class PrometheusMetrics:
             app_label=info.app_label,
             container_name=info.container_name,
             checksum=info.checksum,
+            key_usage=','.join(info.key_usage) if info.key_usage else '',
+            extended_key_usage=','.join(info.extended_key_usage) if info.extended_key_usage else '',
         ).set(datetime.utcnow().timestamp())
 
     def record_cert_process_access(self, info: CertificateInfo, process: str, parent_process: str) -> None:

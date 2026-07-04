@@ -2328,7 +2328,7 @@ class TestCacheHitReDetection:
             serial='42', common_name='', san_dns_names='', san_ip_addresses='',
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
-            checksum='',
+            checksum='', key_usage='', extended_key_usage='',
         )._value.get()
         assert before == 0.0
 
@@ -2339,7 +2339,7 @@ class TestCacheHitReDetection:
             serial='42', common_name='', san_dns_names='', san_ip_addresses='',
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
-            checksum='',
+            checksum='', key_usage='', extended_key_usage='',
         )._value.get()
         assert after > 0.0
 
