@@ -1,6 +1,6 @@
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Set, Tuple
 
 
 @dataclass
@@ -60,6 +60,14 @@ class CertificateInfo:
     # verifies against its own public key). Root CA certificates are legitimately
     # self-signed; self-signed leaf certificates are typically a configuration risk.
     is_self_signed: bool = False
+    # Distinct (process, parent_process) pairs already given their own
+    # tls_certificate_process_info series for this cert, capped at
+    # max_processes_per_cert (see CertificateAnalyzer._record_cert_process_access).
+    # Internal bookkeeping only — not cert data, not published to Kafka, and
+    # excluded from repr/equality so it doesn't affect anything that compares
+    # or prints a CertificateInfo. Dies naturally when the cert is LRU-evicted
+    # from known_certs, so it needs no separate cleanup of its own.
+    _seen_processes: Set[Tuple[str, str]] = field(default_factory=set, repr=False, compare=False)
 
     @property
     def days_until_expiry(self) -> float:

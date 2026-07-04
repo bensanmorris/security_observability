@@ -2233,6 +2233,226 @@ class TestKnownCertsIndex:
         assert len(analyzer._known_paths) == 0
 
 
+class TestMetricsCleanupOnEviction:
+    """
+    Tests for PrometheusMetrics.remove_certificate_metrics, wired into
+    CertificateAnalyzer._deindex_known_cert (known_certs' on_evict callback).
+
+    Before this, evicting a cert from known_certs only cleaned up the
+    _known_paths index -- the ~10 per-cert Prometheus Gauge series created by
+    update_certificate_metrics were never removed, so Prometheus registry
+    memory grew for the entire life of the process regardless of cache size.
+    A single first-time scan of the system CA trust bundle (146 certs, all
+    under large_file_metrics_cap) added ~32MB in one burst in production.
+    """
+
+    @staticmethod
+    def _samples_for(gauge, cert_path):
+        return [
+            s for metric in gauge.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == cert_path
+        ]
+
+    def test_per_cert_series_removed_on_lru_eviction(self, analyzer, temp_dir):
+        """
+        Evicting a cert from known_certs must remove its cert_expiry_days,
+        cert_expired, cert_process_info, and cert_self_signed series --
+        otherwise Prometheus keeps every cert ever discovered in memory
+        forever, independent of whether the LRU cache actually evicted it.
+        """
+        import cert_analyzer as _ca
+
+        cert, _ = TestCertificateGeneration.generate_certificate("evict-me.example.com", 365)
+        path = os.path.join(temp_dir, "evict-me.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test-proc", 111)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        target_key = cert_infos[0].unique_key
+
+        gauges = (
+            analyzer.metrics.cert_expiry_days,
+            analyzer.metrics.cert_expired,
+            analyzer.metrics.cert_process_info,
+            analyzer.metrics.cert_self_signed,
+        )
+
+        assert target_key in analyzer.known_certs
+        for gauge in gauges:
+            assert self._samples_for(gauge, path), \
+                f"{gauge._name} should have a series before eviction"
+
+        # Fill the rest of the cache directly (cheap — bypasses callbacks,
+        # same approach as TestKnownCertsIndex.test_index_cleaned_up_on_lru_eviction)
+        # so the next real insert pushes `target_key` out as the LRU-oldest entry.
+        for i in range(_ca.CACHE_MAX_SIZE - 1):
+            analyzer.known_certs._store[f"filler:{i}:serial"] = None
+        filler = CertificateInfo(
+            path="/tmp/new-entry.pem", subject='CN=y', issuer='CN=ca',
+            serial_number='2',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        analyzer.known_certs[filler.unique_key] = filler
+
+        assert target_key not in analyzer.known_certs
+        for gauge in gauges:
+            assert not self._samples_for(gauge, path), \
+                f"{gauge._name} series must be removed when its cert is evicted"
+
+    def test_metrics_removal_ignores_entries_missing_fields(self, analyzer):
+        """
+        An evicted entry with a .path but missing other CertificateInfo
+        fields (e.g. a minimal stub, mirroring how
+        test_index_ignores_entries_without_a_path covers a bare None value)
+        must not crash metric removal -- it should degrade to a debug log,
+        same as the _known_paths index already does.
+        """
+        import types
+
+        stub = types.SimpleNamespace(path="/tmp/stub-only-path.pem")
+        analyzer.known_certs["stub:0:serial"] = stub
+        assert "/tmp/stub-only-path.pem" in analyzer._known_paths
+
+        # Must not raise, even though remove_certificate_metrics will hit an
+        # AttributeError reading stub.subject/issuer/etc.
+        analyzer.known_certs.discard("stub:0:serial")
+
+        assert "/tmp/stub-only-path.pem" not in analyzer._known_paths
+
+    def test_all_tracked_process_series_removed_on_eviction(self, analyzer, temp_dir):
+        """
+        remove_certificate_metrics must clean up every distinct process
+        series tracked in cert_process_info for an evicted cert, not just
+        the most recently recorded one -- possible now that CertificateInfo
+        tracks its full _seen_processes set (added for the fan-out cap),
+        closing the "only partially cleaned up" gap this class's docstring
+        used to note.
+        """
+        import cert_analyzer as _ca
+
+        cert, _ = TestCertificateGeneration.generate_certificate("multi-proc.example.com", 365)
+        path = os.path.join(temp_dir, "multi-proc.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "discoverer-proc", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        target = cert_infos[0]
+        target_key = target.unique_key
+
+        for i in range(3):
+            analyzer._record_cert_process_access(target, f"/usr/bin/proc{i}", "")
+
+        samples_before = self._samples_for(analyzer.metrics.cert_process_info, path)
+        assert len(samples_before) == 4, "discoverer + 3 distinct re-accessing processes"
+
+        # Fill the rest of the cache and evict `target` as the LRU-oldest entry
+        # (same approach as test_per_cert_series_removed_on_lru_eviction above).
+        for i in range(_ca.CACHE_MAX_SIZE - 1):
+            analyzer.known_certs._store[f"filler:{i}:serial"] = None
+        filler = CertificateInfo(
+            path="/tmp/new-entry.pem", subject='CN=y', issuer='CN=ca',
+            serial_number='2',
+            not_before=datetime.utcnow() - timedelta(days=1),
+            not_after=datetime.utcnow() + timedelta(days=365),
+            process='test', pid=1,
+        )
+        analyzer.known_certs[filler.unique_key] = filler
+
+        assert target_key not in analyzer.known_certs
+        assert self._samples_for(analyzer.metrics.cert_process_info, path) == [], \
+            "all 4 process series must be removed, not just the most recent one"
+
+
+class TestCertProcessInfoFanoutCap:
+    """
+    Tests for CertificateAnalyzer._record_cert_process_access's cap on
+    distinct (process, parent_process) pairs tracked per cert
+    (max_processes_per_cert).
+
+    TestMetricsCleanupOnEviction closes the leak for certs that actually get
+    LRU-evicted, but a file re-accessed by many distinct processes (e.g. the
+    system CA trust bundle touched by curl, dnf, git, python, docker, ...)
+    may never be evicted while still actively in use -- without this cap,
+    cert_process_info would keep growing by one series per new distinct
+    process, forever, regardless of known_certs cache size.
+    """
+
+    @staticmethod
+    def _samples_for(gauge, cert_path):
+        return [
+            s for metric in gauge.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == cert_path
+        ]
+
+    def test_distinct_processes_capped_at_max_processes_per_cert(self, analyzer, temp_dir):
+        """Only the first max_processes_per_cert distinct processes (including
+        the discoverer) ever get their own cert_process_info series."""
+        analyzer._max_processes_per_cert = 3
+        cert, _ = TestCertificateGeneration.generate_certificate("fanout.example.com", 365)
+        path = os.path.join(temp_dir, "fanout.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "discoverer-proc", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        cert_info = cert_infos[0]
+
+        for i in range(10):
+            analyzer._record_cert_process_access(cert_info, f"/usr/bin/proc{i}", "")
+
+        samples = self._samples_for(analyzer.metrics.cert_process_info, path)
+        assert len(samples) == 3, \
+            f"expected exactly max_processes_per_cert (3) series, got {len(samples)}"
+
+    def test_repeat_access_by_already_tracked_process_is_not_capped(self, analyzer, temp_dir):
+        """
+        Re-access by a process that already has a series must keep refreshing
+        it rather than being mistaken for a new distinct process competing
+        for the (already-exhausted) cap.
+        """
+        analyzer._max_processes_per_cert = 1
+        cert, _ = TestCertificateGeneration.generate_certificate("repeat.example.com", 365)
+        path = os.path.join(temp_dir, "repeat.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "discoverer-proc", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        cert_info = cert_infos[0]
+
+        # Cap (1) is already exhausted by the discoverer alone.
+        analyzer._record_cert_process_access(cert_info, "discoverer-proc", "")
+        analyzer._record_cert_process_access(cert_info, "discoverer-proc", "")
+
+        samples = self._samples_for(analyzer.metrics.cert_process_info, path)
+        assert len(samples) == 1
+        assert samples[0].labels.get('process') == 'discoverer-proc'
+
+    def test_process_dropped_by_cap_increments_error_metric(self, analyzer, temp_dir):
+        """A process rejected by the cap must be observable, not silent."""
+        analyzer._max_processes_per_cert = 1
+        cert, _ = TestCertificateGeneration.generate_certificate("capmetric.example.com", 365)
+        path = os.path.join(temp_dir, "capmetric.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "discoverer-proc", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        cert_info = cert_infos[0]
+
+        before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='process_fanout_cap_reached'
+        )._value.get()
+
+        analyzer._record_cert_process_access(cert_info, "/usr/bin/other", "")
+
+        after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='process_fanout_cap_reached'
+        )._value.get()
+        assert after == before + 1
+
+
 class TestCacheHitReDetection:
     """
     Tests for the "already known certificate file" branch in process_event

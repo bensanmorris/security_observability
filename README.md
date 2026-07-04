@@ -211,6 +211,8 @@ sudo systemctl enable --now cert-analyzer
 | `demo_mode` | `false` | Log certificate details (subject, issuer, serial, validity, SANs) at INFO level instead of DEBUG — for demos only, leave false in production |
 | `large_file_cert_threshold` | `20` | Files with more PEM certs than this (e.g. a system CA bundle) are parsed on a background thread instead of the Tetragon event-consumer thread |
 | `large_file_metrics_cap` | `300` | Caps how many certs in a single bundle file get full Prometheus metrics/logging, independent of `large_file_cert_threshold` above. Certs beyond the cap are still cached internally and still published to Kafka if enabled, just not tracked as individual Prometheus series. Default comfortably covers a real system CA trust bundle (~130-150 certs) |
+| `max_concurrent_background_threads` | `20` | Caps how many TLS-probe / large-file-parse background threads can run at once, so a burst of events (e.g. many pods reconnecting to dependencies after a restart) can't spawn unbounded OS threads. Events beyond the cap are dropped and retried on a later qualifying event rather than queued |
+| `max_processes_per_cert` | `20` | Caps how many distinct `(process, parent_process)` pairs get their own `tls_certificate_process_info` series per certificate. Without this, a file opened by many unrelated binaries over the life of the process (e.g. the system CA trust bundle touched by curl, dnf, git, python, docker, ...) accumulates one permanent series per distinct process, forever, regardless of cache size. The certificate's own expiry/FIPS/self-signed metrics and Kafka discovery event are unaffected — only this per-process attribution axis is capped |
 
 **[passwords]**
 

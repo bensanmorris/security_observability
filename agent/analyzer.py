@@ -88,7 +88,9 @@ class CertificateAnalyzer:
                  port_probe_connect_delay: float = 2.0,
                  tls_outbound_ports: Optional[frozenset] = None,
                  large_file_cert_threshold: int = 20,
-                 large_file_metrics_cap: int = 300):
+                 large_file_metrics_cap: int = 300,
+                 max_concurrent_background_threads: int = 20,
+                 max_processes_per_cert: int = 20):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -105,6 +107,23 @@ class CertificateAnalyzer:
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self._large_file_cert_threshold = large_file_cert_threshold
         self._large_file_metrics_cap = large_file_metrics_cap
+        # Bounds how many TLS-probe / large-file-parse threads can run at once.
+        # Without this, a burst of events (e.g. every pod on a node reconnecting
+        # to its dependencies after a restart, each opening a distinct host:port
+        # tls_outbound_port) spawns one raw OS thread per event with no limit.
+        # A plain (non-bounded) Semaphore is fine here: every acquire() this
+        # class makes is matched by exactly one release() in the worker's
+        # finally block, so it can never over-release.
+        self._max_concurrent_background_threads = max_concurrent_background_threads
+        self._background_thread_semaphore = threading.Semaphore(max_concurrent_background_threads)
+        # Bounds the number of distinct (process, parent_process) pairs
+        # tracked in tls_certificate_process_info per cert. Without this, a
+        # file opened by many unrelated binaries over the life of the process
+        # (e.g. the system CA trust bundle touched by curl, dnf, git, python,
+        # docker, ...) accumulates one permanent series per distinct process,
+        # forever — unbounded regardless of known_certs cache size, since the
+        # cert entry itself may never be evicted. See _record_cert_process_access.
+        self._max_processes_per_cert = max_processes_per_cert
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
@@ -180,7 +199,12 @@ class CertificateAnalyzer:
             self._known_paths.setdefault(path, set()).add(key)
 
     def _deindex_known_cert(self, key: str, value) -> None:
-        """known_certs on_evict callback — the inverse of _index_known_cert."""
+        """
+        known_certs on_evict callback — the inverse of _index_known_cert, plus
+        removing the evicted cert's Prometheus series so metric memory tracks
+        cache occupancy instead of growing for the life of the process (see
+        PrometheusMetrics.remove_certificate_metrics).
+        """
         path = getattr(value, 'path', None)
         if path is None:
             return
@@ -190,6 +214,14 @@ class CertificateAnalyzer:
                 keys_for_path.discard(key)
                 if not keys_for_path:
                     del self._known_paths[path]
+        try:
+            self.metrics.remove_certificate_metrics(value)
+        except Exception as e:
+            # value may be a bare/partial object in tests that seed known_certs
+            # directly — degrade to a leaked series rather than crashing the
+            # thread that's mutating the cache (event consumer, periodic scan,
+            # or a background parse worker).
+            logger.debug(f"Could not remove Prometheus metrics for evicted cert {key}: {e}")
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -197,6 +229,38 @@ class CertificateAnalyzer:
         self.metrics.cache_processed_paths_size.labels(node_name=self.metrics._node_name).set(len(self.processed_paths))
         self.metrics.cache_password_failed_size.labels(node_name=self.metrics._node_name).set(len(self.password_failed_paths))
         self.metrics.update_process_metrics()
+
+    def _record_cert_process_access(self, cert_info: CertificateInfo, process: str, parent_process: str) -> None:
+        """
+        Record that `process` has accessed an already-known cert, capped at
+        max_processes_per_cert distinct (process, parent_process) pairs per
+        cert.
+
+        Without this cap, a file opened by many unrelated binaries over the
+        life of the process (e.g. the system CA trust bundle touched by curl,
+        dnf, git, python, docker, ...) accumulates one permanent
+        tls_certificate_process_info series per distinct process, forever —
+        unlike the cert's own expiry/FIPS/self-signed metrics, this fan-out
+        isn't bounded by known_certs' LRU size, since the cert entry itself
+        may never get evicted while still being actively re-accessed.
+
+        Only ever called from process_event, which runs on the single
+        gRPC event-consumer thread, so cert_info._seen_processes needs no
+        lock — nothing else mutates it after the initial seed in
+        PrometheusMetrics.update_certificate_metrics.
+        """
+        pair = (process, parent_process)
+        if pair not in cert_info._seen_processes:
+            if len(cert_info._seen_processes) >= self._max_processes_per_cert:
+                logger.debug(
+                    f"cert_process_info fan-out cap ({self._max_processes_per_cert}) "
+                    f"reached for {cert_info.path} — not tracking additional "
+                    f"process {process!r}"
+                )
+                self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached').inc()
+                return
+            cert_info._seen_processes.add(pair)
+        self.metrics.record_cert_process_access(cert_info, process, parent_process)
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -764,6 +828,34 @@ class CertificateAnalyzer:
 
         self._update_cache_metrics()
 
+    def _start_background_thread(self, target, name: str) -> bool:
+        """
+        Start a daemon thread for probe/large-file work, bounded by
+        _background_thread_semaphore so a burst of events (many simultaneous
+        TLS binds/connects, or several large CA bundles at once) can't spawn
+        unbounded concurrent OS threads.
+
+        Returns False without starting a thread if the concurrency cap is
+        already reached. Callers already de-dupe via their own in-flight
+        tracking before calling this, so a dropped attempt just means the
+        same work is retried on a later event rather than queuing here.
+        """
+        if not self._background_thread_semaphore.acquire(blocking=False):
+            logger.warning(
+                f"Background thread cap ({self._max_concurrent_background_threads}) "
+                f"reached, skipping {name}"
+            )
+            return False
+
+        def _run():
+            try:
+                target()
+            finally:
+                self._background_thread_semaphore.release()
+
+        threading.Thread(target=_run, daemon=True, name=name).start()
+        return True
+
     def _process_certificate_file_async(
         self,
         cert_path: str,
@@ -818,9 +910,13 @@ class CertificateAnalyzer:
                 with self._large_file_in_flight_lock:
                     self._large_file_in_flight.discard(cert_path)
 
-        threading.Thread(
-            target=_worker, daemon=True, name=f'cert-parse-{Path(cert_path).name}'
-        ).start()
+        started = self._start_background_thread(_worker, name=f'cert-parse-{Path(cert_path).name}')
+        if not started:
+            # _worker's finally never ran, so undo the in-flight marker here —
+            # the file will be retried on its next qualifying event.
+            with self._large_file_in_flight_lock:
+                self._large_file_in_flight.discard(cert_path)
+            self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached').inc()
 
     def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
         """Populate all Tetragon Pod proto fields onto cert_info."""
@@ -1204,7 +1300,9 @@ class CertificateAnalyzer:
             f"by {process_name} (PID: {pid})"
         )
 
-        if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
+        with self._known_paths_lock:
+            already_known = synthetic_path in self._known_paths
+        if already_known:
             logger.info(f"Re-detected known Java FIPS certificate: {synthetic_path}")
             return True
 
@@ -1333,7 +1431,9 @@ class CertificateAnalyzer:
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
         logger.info(f"🔍 Detected in-memory certificate: {synthetic_path} by {process_name} (PID: {pid})")
 
-        if any(k.startswith(synthetic_path + ":") for k in self.known_certs):
+        with self._known_paths_lock:
+            already_known = synthetic_path in self._known_paths
+        if already_known:
             logger.info(f"Re-detected known in-memory certificate: {synthetic_path}")
             return True
 
@@ -1551,8 +1651,14 @@ class CertificateAnalyzer:
                     self._probe_in_flight.discard(endpoint_key)
                 self._probed_endpoints.add(endpoint_key)
 
-        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-{host}-{port}')
-        t.start()
+        started = self._start_background_thread(_probe, name=f'tls-probe-{host}-{port}')
+        if not started:
+            # _probe's finally never ran, so undo the in-flight marker here —
+            # this endpoint will be retried on its next qualifying event.
+            with self._probe_in_flight_lock:
+                self._probe_in_flight.discard(endpoint_key)
+            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            return
         logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
 
     def _handle_tls_connect_event(self, event) -> None:
@@ -1605,8 +1711,14 @@ class CertificateAnalyzer:
                     self._probe_in_flight.discard(endpoint_key)
                 self._probed_endpoints.add(endpoint_key)
 
-        t = threading.Thread(target=_probe, daemon=True, name=f'tls-probe-out-{daddr}-{dport}')
-        t.start()
+        started = self._start_background_thread(_probe, name=f'tls-probe-out-{daddr}-{dport}')
+        if not started:
+            # _probe's finally never ran, so undo the in-flight marker here —
+            # this endpoint will be retried on its next qualifying event.
+            with self._probe_in_flight_lock:
+                self._probe_in_flight.discard(endpoint_key)
+            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            return
         logger.debug(
             f"Scheduled TLS outbound probe {daddr}:{dport} pid={pid} process={process_name}"
         )
@@ -1713,7 +1825,7 @@ class CertificateAnalyzer:
                 # in this file.
                 self.log_certificate_status(cert_info, summary_only=True)
                 self.metrics.update_last_accessed(cert_info)
-                self.metrics.record_cert_process_access(cert_info, process_name, parent_process)
+                self._record_cert_process_access(cert_info, process_name, parent_process)
 
             if is_bundle:
                 logger.info(

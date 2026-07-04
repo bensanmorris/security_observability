@@ -269,6 +269,12 @@ class PrometheusMetrics:
 
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""
+        # Computed once and reused below instead of re-evaluating the
+        # days_until_expiry property (each call does its own datetime.utcnow())
+        # once per Gauge that needs it -- cheap for a single cert, but this runs
+        # per-cert across a whole bundle (up to large_file_metrics_cap certs).
+        now = datetime.utcnow()
+        days_left = info.days_until_expiry
         labels = {
             'cert_path':        info.path,
             'subject':          info.subject[:100],
@@ -299,11 +305,16 @@ class PrometheusMetrics:
             node_name=info.node_name,
             checksum=info.checksum,
         ).set(1)
+        # The discovering process is always allowed (an empty seen-set can
+        # never already be at the fan-out cap) — seed it here so a later
+        # cache-hit re-access by this same process isn't mistaken for a new
+        # distinct process by CertificateAnalyzer._record_cert_process_access.
+        info._seen_processes.add((info.process, info.parent_process))
 
-        self.cert_expiry_days.labels(**labels).set(info.days_until_expiry)
+        self.cert_expiry_days.labels(**labels).set(days_left)
         self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
         self.cert_valid_from.labels(**labels).set(info.not_before.timestamp())
-        self.cert_last_accessed.labels(**labels).set(datetime.utcnow().timestamp())
+        self.cert_last_accessed.labels(**labels).set(now.timestamp())
 
         self.cert_expired.labels(
             cert_path=info.path,
@@ -331,7 +342,7 @@ class PrometheusMetrics:
                 issuer=info.issuer[:100],
                 serial=info.serial_number,
                 checksum=info.checksum,
-            ).set(1 if 0 < info.days_until_expiry < threshold else 0)
+            ).set(1 if 0 < days_left < threshold else 0)
 
         if info.key_algorithm:
             self.cert_fips_compliant.labels(
@@ -364,6 +375,83 @@ class PrometheusMetrics:
             serial=info.serial_number,
             checksum=info.checksum,
         ).set(1 if info.is_self_signed else 0)
+
+    @staticmethod
+    def _safe_remove(metric, labelvalues: tuple) -> None:
+        """Remove a label-set if present; a missing series (never set, or
+        already removed) is not an error here."""
+        try:
+            metric.remove(*labelvalues)
+        except KeyError:
+            pass
+
+    def remove_certificate_metrics(self, info: CertificateInfo) -> None:
+        """
+        Remove the per-cert Gauge series written by update_certificate_metrics.
+
+        Called from LRUCache's on_evict callback when a cert falls out of
+        known_certs, so Prometheus's own memory tracks cache occupancy instead
+        of growing for the entire life of the process — update_certificate_metrics
+        creates ~10 new label-sets per newly-discovered cert and nothing
+        previously removed them on eviction, so every certificate ever seen
+        stayed resident in the registry forever.
+
+        cert_process_info fans out to one series per distinct process that
+        has accessed this cert, capped at max_processes_per_cert -- every
+        (process, parent_process) pair that was ever actually given a series
+        is tracked in info._seen_processes, so all of them are removed here,
+        not just the most recent. tls_negotiated_protocol (TLS-probe
+        discoveries only) still isn't cleaned up: protocol/cipher aren't
+        persisted on CertificateInfo after the probe completes, so there's
+        nothing to reconstruct that label tuple from.
+        """
+        shared_labels = (
+            info.path, info.subject[:100], info.issuer[:100], info.serial_number,
+            info.common_name, ','.join(info.san_dns_names), ','.join(info.san_ip_addresses),
+            str(info.cert_index), info.pod_name, info.namespace, info.workload_kind,
+            info.workload_name, info.node_name, info.app_label, info.container_name,
+            info.checksum,
+            ','.join(info.key_usage) if info.key_usage else '',
+            ','.join(info.extended_key_usage) if info.extended_key_usage else '',
+        )
+        for gauge in (self.cert_expiry_days, self.cert_expiry_timestamp,
+                      self.cert_valid_from, self.cert_last_accessed):
+            self._safe_remove(gauge, shared_labels)
+
+        seen_processes = getattr(info, '_seen_processes', None) or {(info.process, info.parent_process)}
+        for process, parent_process in seen_processes:
+            self._safe_remove(self.cert_process_info, (
+                info.path, str(info.cert_index), info.serial_number,
+                process, parent_process, info.node_name, info.checksum,
+            ))
+
+        self._safe_remove(self.cert_expired, (
+            info.path, str(info.cert_index), info.pod_name, info.namespace,
+            info.workload_kind, info.workload_name, info.node_name,
+            info.issuer[:100], info.serial_number, info.checksum,
+        ))
+
+        for threshold in (7, 30, 90):
+            self._safe_remove(self.cert_expiring_soon, (
+                info.path, str(threshold), str(info.cert_index), info.pod_name,
+                info.namespace, info.workload_kind, info.workload_name,
+                info.node_name, info.issuer[:100], info.serial_number, info.checksum,
+            ))
+
+        if info.key_algorithm:
+            self._safe_remove(self.cert_fips_compliant, (
+                info.path, str(info.cert_index), info.pod_name, info.namespace,
+                info.workload_kind, info.workload_name, info.node_name,
+                info.key_algorithm, info.signature_hash, str(info.key_size),
+                info.curve_name, info.issuer[:100], info.serial_number, info.checksum,
+            ))
+
+        is_ca_label = 'true' if info.is_ca else ('false' if info.is_ca is False else 'unknown')
+        self._safe_remove(self.cert_self_signed, (
+            info.path, str(info.cert_index), info.pod_name, info.namespace,
+            info.workload_kind, info.workload_name, info.node_name,
+            is_ca_label, info.issuer[:100], info.serial_number, info.checksum,
+        ))
 
     def update_last_accessed(self, info: CertificateInfo) -> None:
         """
@@ -401,6 +489,11 @@ class PrometheusMetrics:
         A distinct (process, parent_process) label pair is its own Prometheus series,
         so repeated calls for different processes accumulate into a multi-process view
         of who has loaded this cert, rather than overwriting the original discoverer.
+
+        This method always writes the series unconditionally — capping the
+        number of distinct processes tracked per cert (max_processes_per_cert)
+        is the caller's job: see CertificateAnalyzer._record_cert_process_access,
+        which decides whether to call this at all.
         """
         self.cert_process_info.labels(
             cert_path=info.path,

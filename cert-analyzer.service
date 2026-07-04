@@ -47,7 +47,15 @@ ReadWritePaths=/var/log/cert-analyzer
 
 # Resource limits
 LimitNOFILE=65536
-MemoryMax=256M
+# Raised from 256M as a stopgap: Prometheus metric memory grows with every
+# distinct cert this process discovers and previously was never reclaimed on
+# LRU eviction (see PrometheusMetrics.remove_certificate_metrics, wired up in
+# CertificateAnalyzer._deindex_known_cert). A single first-time scan of the
+# system CA trust bundle alone added ~32M in one burst; 256M had already been
+# touched (systemd reported peak == max) before that eviction-cleanup fix
+# existed. Revisit this number after that fix has had time to bound growth
+# for real, rather than treating 384M as the new steady-state ceiling.
+MemoryMax=384M
 CPUQuota=200%
 
 [Install]
