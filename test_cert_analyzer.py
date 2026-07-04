@@ -4472,10 +4472,99 @@ class TestKafkaPublisher:
             publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
 
             with caplog.at_level(logging.WARNING):
-                publisher._on_error(Exception('delivery failed'))
+                publisher._on_error(publisher._producer, Exception('delivery failed'))
 
             assert any('delivery' in r.message.lower() or 'kafka' in r.message.lower()
                        for r in caplog.records)
+
+    def test_on_error_nullifies_matching_current_producer(self, monkeypatch):
+        """_on_error() nullifies self._producer when it's still the producer the failed send came from."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            current_producer = publisher._producer
+
+            publisher._on_error(current_producer, Exception('delivery failed'))
+
+            assert publisher._producer is None
+
+    def test_stale_on_error_does_not_nullify_a_superseded_producer(self, monkeypatch):
+        """
+        kafka-python invokes errbacks from its own internal I/O thread, and can
+        do so long after the send() call that registered it (after internal
+        retries/timeouts) -- possibly after a reconnect has already replaced
+        self._producer with a new, healthy one. A stale errback for the OLD
+        producer must not tear down the new one.
+        """
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            old_producer = publisher._producer
+
+            # Simulate a reconnect installing a new, healthy producer.
+            new_producer = MagicMock()
+            publisher._producer = new_producer
+
+            # The old producer's delayed errback finally fires.
+            publisher._on_error(old_producer, Exception('stale delivery failure'))
+
+            assert publisher._producer is new_producer, \
+                "a stale error from a superseded producer must not nullify the current one"
+
+    def test_publish_errback_captures_producer_instance_at_send_time(self, monkeypatch, sample_cert_info):
+        """
+        publish() must bind the errback to the specific producer instance send()
+        was issued from (not to whatever self._producer happens to be when the
+        errback eventually fires) -- otherwise a delayed error from an old send
+        could nullify a producer installed by a later reconnect.
+        """
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+
+        class FakeProducer:
+            def __init__(self, **kwargs):
+                self.errback = None
+
+            def send(self, *args, **kwargs):
+                future = MagicMock()
+                future.add_errback = lambda cb: setattr(self, 'errback', cb)
+                return future
+
+            def close(self, timeout=None):
+                pass
+
+        with patch('agent.kafka.KafkaProducer', FakeProducer):
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher._reconnect_cooldown = 0
+
+            old_producer = publisher._producer
+            publisher.publish(sample_cert_info)
+            assert old_producer.errback is not None
+
+            # Reconnect: old producer is replaced by a new one.
+            publisher._producer = None
+            publisher.publish(sample_cert_info)
+            new_producer = publisher._producer
+            assert new_producer is not old_producer
+
+            # The OLD producer's stale errback fires after the reconnect.
+            old_producer.errback(Exception('old delivery failed'))
+
+            assert publisher._producer is new_producer, \
+                "a stale error bound to the old producer must not nullify the new one"
 
     # ── close ─────────────────────────────────────────────────────────────────
 
