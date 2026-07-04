@@ -2097,7 +2097,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (key_algorithm, key_size, curve_name) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"})",
+          "expr": "count by (key_algorithm, key_size, curve_name) (count by (key_algorithm, key_size, curve_name, issuer, serial, checksum) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"}))",
           "instant": true,
           "format": "table",
           "refId": "A"
