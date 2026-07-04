@@ -3417,6 +3417,93 @@
           }
         }
       ]
+    },
+    {
+      "id": 48,
+      "title": "TLS Port Probes (optional — enable bind_probe_enabled/connect_probe_enabled)",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 128
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "id": 49,
+          "title": "TLS Probe Results",
+          "description": "Protocol version and cipher suite negotiated during a TLS port probe. The server's ceiling with a modern client, not necessarily what every real client gets.",
+          "type": "table",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 129
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "tls_certificate_negotiated_protocol{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "instance": true,
+                  "job": true,
+                  "Value": true
+                },
+                "indexByName": {
+                  "node_name": 0,
+                  "process": 1,
+                  "cert_path": 2,
+                  "cert_index": 3,
+                  "serial": 4,
+                  "protocol": 5,
+                  "cipher": 6
+                },
+                "renameByName": {
+                  "node_name": "Node",
+                  "process": "Process",
+                  "cert_path": "Path",
+                  "cert_index": "Cert #",
+                  "serial": "Serial",
+                  "protocol": "Protocol",
+                  "cipher": "Cipher"
+                }
+              }
+            }
+          ],
+          "options": {
+            "showHeader": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "displayMode": "auto",
+                "filterable": true
+              }
+            },
+            "overrides": []
+          }
+        }
+      ]
     }
   ]
 }
