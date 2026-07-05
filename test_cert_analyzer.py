@@ -3632,6 +3632,140 @@ class TestBuildInfo:
         assert value == 'dev'
 
 
+class TestScrapeIntervalMetric:
+    """
+    Tests for the _ScrapeIntervalCollector powering
+    cert_analyzer_scrape_interval_seconds, which measures the observed
+    wall-clock gap between successive /metrics scrapes.
+    """
+
+    def _collector(self, analyzer):
+        from agent.metrics import _ScrapeIntervalCollector
+        from prometheus_client import REGISTRY
+        return next(
+            c for c in REGISTRY._collector_to_names
+            if isinstance(c, _ScrapeIntervalCollector)
+        )
+
+    def test_first_collect_yields_nothing(self, analyzer):
+        """No prior scrape to diff against, so nothing is reported yet."""
+        collector = self._collector(analyzer)
+        assert list(collector.collect()) == []
+
+    def test_second_collect_reports_elapsed_interval(self, analyzer):
+        """The second collect() reports the wall-clock gap since the first."""
+        collector = self._collector(analyzer)
+        list(collector.collect())
+        time.sleep(0.05)
+        metrics = list(collector.collect())
+
+        assert len(metrics) == 1
+        sample = metrics[0].samples[0]
+        assert sample.value >= 0.05
+        assert sample.labels['node_name'] == analyzer.metrics._node_name
+
+    def test_registration_does_not_prime_last_scrape(self, analyzer):
+        """
+        describe() must stop the registry's register()-time collect() call
+        from priming _last_scrape -- otherwise the first real scrape would
+        measure from registration time instead of reporting nothing.
+        """
+        collector = self._collector(analyzer)
+        assert collector._last_scrape is None
+
+
+class TestScrapeThrottleMiddleware:
+    """
+    Tests for _ScrapeThrottleMiddleware, which enforces a minimum interval
+    between real /metrics scrapes by replaying the last cached response for
+    any request arriving too soon after the previous one actually served.
+    """
+
+    def _environ(self, method='GET', path='/metrics', accept=None, accept_encoding=None):
+        environ = {'REQUEST_METHOD': method, 'PATH_INFO': path}
+        if accept is not None:
+            environ['HTTP_ACCEPT'] = accept
+        if accept_encoding is not None:
+            environ['HTTP_ACCEPT_ENCODING'] = accept_encoding
+        return environ
+
+    def _fake_app(self, calls):
+        def app(environ, start_response):
+            calls.append(environ)
+            start_response('200 OK', [('Content-Type', 'text/plain')])
+            return [f'body-{len(calls)}'.encode()]
+        return app
+
+    def _start_response(self, *args):
+        pass
+
+    def test_first_request_calls_wrapped_app(self):
+        from agent.metrics import _ScrapeThrottleMiddleware
+        calls = []
+        middleware = _ScrapeThrottleMiddleware(self._fake_app(calls), min_interval_seconds=60)
+
+        body = middleware(self._environ(), self._start_response)
+
+        assert len(calls) == 1
+        assert b''.join(body) == b'body-1'
+
+    def test_too_soon_request_replays_cached_body_without_calling_app_again(self):
+        from agent.metrics import _ScrapeThrottleMiddleware
+        calls = []
+        middleware = _ScrapeThrottleMiddleware(self._fake_app(calls), min_interval_seconds=60)
+
+        middleware(self._environ(), self._start_response)
+        body = middleware(self._environ(), self._start_response)
+
+        assert len(calls) == 1
+        assert b''.join(body) == b'body-1'
+
+    def test_request_after_interval_elapses_calls_app_again(self):
+        from agent.metrics import _ScrapeThrottleMiddleware
+        calls = []
+        middleware = _ScrapeThrottleMiddleware(self._fake_app(calls), min_interval_seconds=0.05)
+
+        middleware(self._environ(), self._start_response)
+        time.sleep(0.06)
+        body = middleware(self._environ(), self._start_response)
+
+        assert len(calls) == 2
+        assert b''.join(body) == b'body-2'
+
+    def test_non_get_method_bypasses_throttle(self):
+        from agent.metrics import _ScrapeThrottleMiddleware
+        calls = []
+        middleware = _ScrapeThrottleMiddleware(self._fake_app(calls), min_interval_seconds=60)
+
+        middleware(self._environ(method='OPTIONS'), self._start_response)
+        middleware(self._environ(method='OPTIONS'), self._start_response)
+
+        assert len(calls) == 2
+
+    def test_mismatched_accept_header_bypasses_cache(self):
+        from agent.metrics import _ScrapeThrottleMiddleware
+        calls = []
+        middleware = _ScrapeThrottleMiddleware(self._fake_app(calls), min_interval_seconds=60)
+
+        middleware(self._environ(accept='text/plain'), self._start_response)
+        middleware(self._environ(accept='application/openmetrics-text'), self._start_response)
+
+        assert len(calls) == 2
+
+    def test_disabled_when_min_interval_is_zero(self):
+        """start_metrics_server skips wrapping entirely when disabled, but the
+        middleware itself should also just never throttle if min_interval<=0
+        were passed directly."""
+        from agent.metrics import _ScrapeThrottleMiddleware
+        calls = []
+        middleware = _ScrapeThrottleMiddleware(self._fake_app(calls), min_interval_seconds=0)
+
+        middleware(self._environ(), self._start_response)
+        middleware(self._environ(), self._start_response)
+
+        assert len(calls) == 2
+
+
 # ── Reconnection and version monitor tests ────────────────────────────────────
 
 import threading as _threading

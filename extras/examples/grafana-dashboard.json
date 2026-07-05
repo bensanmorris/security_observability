@@ -220,16 +220,6 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_tetragon_version_match",
-          "instant": true,
-          "format": "table",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "tetragon_policies_total{state=\"enabled\"}",
           "instant": true,
           "format": "table",
@@ -274,6 +264,16 @@
           "instant": true,
           "format": "table",
           "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_scrape_interval_seconds{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "I"
         }
       ],
       "transformations": [
@@ -297,6 +297,7 @@
               "Time 6": true,
               "Time 7": true,
               "Time 8": true,
+              "Time 9": true,
               "__name__": true,
               "instance": true,
               "job": true,
@@ -311,8 +312,8 @@
               "node_name": 0,
               "Value #A": 1,
               "version": 2,
-              "Value #B": 3,
-              "Value #C": 4,
+              "Value #I": 3,
+              "Value #B": 4,
               "build_version": 5,
               "runtime_version": 6,
               "Value #D": 7,
@@ -323,13 +324,13 @@
               "node_name": "Node",
               "Value #A": "Analyzer Health",
               "Value #B": "Tetragon Connected",
-              "Value #C": "Version Match",
               "build_version": "Build Version",
               "runtime_version": "Runtime Version",
               "Value #D": "Active Policies",
               "Value #E": "Policy Errors",
               "Value #F": "Kafka Err/s",
-              "version": "Analyzer Version"
+              "version": "Analyzer Version",
+              "Value #I": "Scraping Interval"
             }
           }
         }
@@ -423,60 +424,6 @@
                       },
                       "1": {
                         "text": "Connected",
-                        "color": "green",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Version Match"
-            },
-            "properties": [
-              {
-                "id": "custom.displayMode",
-                "value": "color-background"
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "Mismatch",
-                        "color": "red",
-                        "index": 0
-                      },
-                      "1": {
-                        "text": "Match",
                         "color": "green",
                         "index": 1
                       }
@@ -630,6 +577,22 @@
                 "value": {
                   "mode": "thresholds"
                 }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Scraping Interval"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           }
