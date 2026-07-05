@@ -220,16 +220,6 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "cert_analyzer_tetragon_version_match",
-          "instant": true,
-          "format": "table",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "tetragon_policies_total{state=\"enabled\"}",
           "instant": true,
           "format": "table",
@@ -324,18 +314,16 @@
               "version": 2,
               "Value #I": 3,
               "Value #B": 4,
-              "Value #C": 5,
-              "build_version": 6,
-              "runtime_version": 7,
-              "Value #D": 8,
-              "Value #E": 9,
-              "Value #F": 10
+              "build_version": 5,
+              "runtime_version": 6,
+              "Value #D": 7,
+              "Value #E": 8,
+              "Value #F": 9
             },
             "renameByName": {
               "node_name": "Node",
               "Value #A": "Analyzer Health",
               "Value #B": "Tetragon Connected",
-              "Value #C": "Version Match",
               "build_version": "Build Version",
               "runtime_version": "Runtime Version",
               "Value #D": "Active Policies",
@@ -436,60 +424,6 @@
                       },
                       "1": {
                         "text": "Connected",
-                        "color": "green",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Version Match"
-            },
-            "properties": [
-              {
-                "id": "custom.displayMode",
-                "value": "color-background"
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "Mismatch",
-                        "color": "red",
-                        "index": 0
-                      },
-                      "1": {
-                        "text": "Match",
                         "color": "green",
                         "index": 1
                       }
