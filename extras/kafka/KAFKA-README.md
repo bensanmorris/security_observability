@@ -18,7 +18,7 @@ verify and view the data it produces.
 ## Install
 
 ```bash
-./extras/install-kafka.sh
+./extras/kafka/install-kafka.sh
 ```
 
 This installs a single-node Apache Kafka broker in **KRaft mode** (no
@@ -42,7 +42,7 @@ broker and topic.
 To use a different topic name:
 
 ```bash
-CERT_ANALYZER_TOPIC=my-test-topic ./extras/install-kafka.sh
+CERT_ANALYZER_TOPIC=my-test-topic ./extras/kafka/install-kafka.sh
 ```
 
 ---
@@ -169,9 +169,9 @@ polling loop) should let it settle before creating the topic.
 **Downloading the tarball fails with a TLS error (e.g.
 `SSL_ERROR_ZERO_RETURN`)**
 
-Run the script as your normal user (`./extras/install-kafka.sh`), not via
-`sudo ./install-kafka.sh` — it only elevates the specific steps that need
-root. Running the whole script under `sudo` resets your environment,
+Run the script as your normal user (`./extras/kafka/install-kafka.sh`), not
+via `sudo ./install-kafka.sh` — it only elevates the specific steps that
+need root. Running the whole script under `sudo` resets your environment,
 which can drop proxy/CA settings your shell relies on for outbound HTTPS.
 
 ---
