@@ -107,6 +107,37 @@ new certificate access, or clear cert-analyzer's `known_certs` cache
 
 ---
 
+## View the data in a browser (Kafdrop)
+
+The console consumer works, but for a columnar/tree view of topics,
+partitions, offsets, and each message's JSON, run
+[Kafdrop](https://github.com/obsidiandynamics/kafdrop) as a container:
+
+```bash
+podman run -d --name kafdrop --network=host \
+  -e KAFKA_BROKERCONNECT=localhost:9092 \
+  docker.io/obsidiandynamics/kafdrop
+```
+
+`--network=host` is required — the broker's listener is bound to
+`localhost:9092`, which is only reachable from inside a container if it
+shares the host's network namespace. Without it, Kafdrop would be looking
+at its own loopback instead of the host's.
+
+Open **http://localhost:9000** — it lists topics, and clicking into
+`cert-analyzer-events` shows partitions/offsets in a table, with each
+message expandable as a JSON tree.
+
+Manage the container:
+
+```bash
+podman stop kafdrop   # stop
+podman start kafdrop  # restart
+podman rm -f kafdrop  # remove entirely
+```
+
+---
+
 ## Troubleshooting
 
 **`kafka.service` crash-loops with `Failed to locate executable
