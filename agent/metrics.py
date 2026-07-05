@@ -1,8 +1,13 @@
 import logging
+import socket
+import threading
 import time
 import psutil
 from datetime import datetime
-from prometheus_client import Gauge, Counter, Info, REGISTRY
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
+
+from prometheus_client import Gauge, Counter, Info, REGISTRY, make_wsgi_app
 from prometheus_client.core import GaugeMetricFamily
 
 from .constants import CERT_ANALYZER_VERSION, TETRAGON_BUILD_VERSION, CACHE_MAX_SIZE
@@ -46,6 +51,111 @@ class _ScrapeIntervalCollector:
             metric.add_metric([self._node_name], now - self._last_scrape)
             yield metric
         self._last_scrape = now
+
+
+class _ScrapeThrottleMiddleware:
+    """
+    WSGI middleware enforcing a minimum interval between real /metrics scrapes.
+
+    Prometheus's scrape_interval lives entirely on the server side -- a
+    misconfigured or malicious scraper can hit /metrics as often as it
+    likes, forcing a fresh registry collect() every time. This replays the
+    last real response verbatim for any request arriving less than
+    min_interval_seconds after the previous one actually served, so an
+    over-frequent scraper gets a cheap cached reply instead.
+
+    Only GET requests for the metrics payload are throttled; OPTIONS,
+    non-GET, and /favicon.ico pass straight through since prometheus_client
+    handles those cheaply itself. The cache is keyed on the Accept /
+    Accept-Encoding request headers so a too-soon request negotiating a
+    different content type or encoding than what's cached falls through to
+    a real collect() rather than replaying a mismatched response.
+    """
+
+    def __init__(self, app, min_interval_seconds: float):
+        self._app = app
+        self._min_interval = min_interval_seconds
+        self._lock = threading.Lock()
+        self._last_served = None
+        self._cached = None  # (status, headers, body, accept, accept_encoding)
+
+    def __call__(self, environ, start_response):
+        if environ['REQUEST_METHOD'] != 'GET' or environ['PATH_INFO'] == '/favicon.ico':
+            return self._app(environ, start_response)
+
+        accept = environ.get('HTTP_ACCEPT')
+        accept_encoding = environ.get('HTTP_ACCEPT_ENCODING')
+        now = time.monotonic()
+
+        with self._lock:
+            cached = self._cached
+            if (cached is not None
+                    and now - self._last_served < self._min_interval
+                    and cached[3] == accept
+                    and cached[4] == accept_encoding):
+                status, headers, body, _, _ = cached
+                start_response(status, headers)
+                return [body]
+
+        captured = {}
+
+        def _capture_start_response(status, headers, exc_info=None):
+            captured['status'] = status
+            captured['headers'] = headers
+            return start_response(status, headers, exc_info)
+
+        body = b''.join(self._app(environ, _capture_start_response))
+
+        with self._lock:
+            self._last_served = now
+            self._cached = (captured['status'], captured['headers'], body, accept, accept_encoding)
+
+        return [body]
+
+
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Thread-per-request HTTP server -- mirrors prometheus_client's own server."""
+    daemon_threads = True
+
+
+class _SilentWSGIRequestHandler(WSGIRequestHandler):
+    """WSGI handler that does not log requests -- mirrors prometheus_client's own handler."""
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _get_best_family(address, port):
+    """Automatically select address family depending on address."""
+    infos = socket.getaddrinfo(address, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+    family, _, _, _, sockaddr = next(iter(infos))
+    return family, sockaddr[0]
+
+
+def start_metrics_server(port: int, min_scrape_interval_seconds: float,
+                          addr: str = '0.0.0.0', registry=REGISTRY):
+    """
+    Starts the Prometheus /metrics WSGI server as a daemon thread.
+
+    Behaves like prometheus_client.start_http_server(), except the app is
+    wrapped in _ScrapeThrottleMiddleware so a scraper polling faster than
+    min_scrape_interval_seconds gets a cached reply rather than triggering
+    a fresh collect() on every request. Pass min_scrape_interval_seconds<=0
+    to disable throttling and serve every request fresh.
+    """
+    app = make_wsgi_app(registry)
+    if min_scrape_interval_seconds > 0:
+        app = _ScrapeThrottleMiddleware(app, min_scrape_interval_seconds)
+
+    class _Server(_ThreadingWSGIServer):
+        """Copy of _ThreadingWSGIServer to update address_family locally."""
+
+    _Server.address_family, addr = _get_best_family(addr, port)
+    httpd = make_server(addr, port, app, _Server, handler_class=_SilentWSGIRequestHandler)
+    t = threading.Thread(target=httpd.serve_forever)
+    t.daemon = True
+    t.start()
+    return httpd
 
 
 class PrometheusMetrics:

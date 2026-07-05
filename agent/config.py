@@ -6,8 +6,6 @@ import threading
 import time
 from typing import Optional
 
-from prometheus_client import start_http_server
-
 from .constants import (
     CERT_ANALYZER_VERSION, TETRAGON_BUILD_VERSION,
     CACHE_MAX_SIZE, CONFIG_FILE_PATH,
@@ -15,6 +13,7 @@ from .constants import (
 from .analyzer import CertificateAnalyzer
 from .health import HealthServer
 from .kafka import KafkaPublisher
+from .metrics import start_metrics_server
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +93,7 @@ def main():
 
     tetragon_addr   = cfg(cp, 'tetragon',  'addr',                        'TETRAGON_ADDR',                   'localhost:54321')
     metrics_port    = int(cfg(cp, 'metrics',  'port',                     'METRICS_PORT',                    '9090'))
+    min_scrape_interval = int(cfg(cp, 'metrics', 'min_scrape_interval_seconds', 'MIN_SCRAPE_INTERVAL_SECONDS', '60'))
     health_port     = int(cfg(cp, 'health',   'port',                     'HEALTH_PORT',                     '8086'))
     alert_threshold = int(cfg(cp, 'alerting', 'threshold_days',           'ALERT_THRESHOLD_DAYS',            '30'))
     log_level       = cfg(cp, 'logging',   'level',                       'LOG_LEVEL',                       'INFO')
@@ -168,6 +168,7 @@ def main():
     logger.info(f"Max concurrent background threads: {max_concurrent_background_threads}")
     logger.info(f"Max processes tracked per cert: {max_processes_per_cert}")
     logger.info(f"Metrics port:      {metrics_port}")
+    logger.info(f"Min scrape interval: {min_scrape_interval}s (too-frequent scrapes get a cached reply)" if min_scrape_interval > 0 else "Min scrape interval: disabled")
     logger.info(f"Health port:       {health_port}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
     logger.info(f"Scan paths:        {scan_paths}")
@@ -193,7 +194,7 @@ def main():
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
     try:
-        start_http_server(metrics_port)
+        start_metrics_server(metrics_port, min_scrape_interval)
     except OSError as e:
         logger.critical(
             f"Cannot bind Prometheus metrics server to port {metrics_port}: {e}. "
