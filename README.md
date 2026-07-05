@@ -36,7 +36,7 @@ An application is not a single binary. It is a tree of executables and shared li
 - Remote server certificates discovered via outbound `tcp_connect` events to common TLS ports (443, 8443, 5671, 6380, 9093, …) — makes remote server expiry visible without any per-service configuration, along with the negotiated TLS protocol version and cipher suite
 - Java certificate operations in both FIPS and non-FIPS environments via our Java JCA instrumentation agent + JNI to eBPF bridge
 - Which process accessed which certificate, when, and from which Kubernetes pod
-- An extensive set of surfaced fields and metrics per certificate access. Refer to our [surfaced fields guide](extras/FIELDS-README.md)
+- An extensive set of surfaced fields and metrics per certificate access. Refer to our [surfaced fields guide](extras/FIELDS-README.md) or our [Kafka schema](https://github.com/bensanmorris/security_observability/blob/main/extras/FIELDS-README.md#kafka-event-schema)
 
 Instructions are below but if you prefer to watch video guides:
 
