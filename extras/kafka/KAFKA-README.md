@@ -109,15 +109,17 @@ new certificate access, or clear cert-analyzer's `known_certs` cache
 
 ### Quick Python viewer
 
-`view_kafka_messages.py` prompts for the broker IP/port and topic, then
-dumps every available message pretty-printed like `jq .` — no `jq`
-install or remembering consumer flags required. Useful for a quick
-verification pass, including against a broker on a different host (e.g.
-if you moved the `[kafka] bootstrap_servers` off `localhost`).
+`view_kafka_messages.py` takes the broker host/port and topic as
+arguments, then dumps every available message pretty-printed like `jq .`
+— no `jq` install or remembering consumer flags required. Useful for a
+quick verification pass, including against a broker on a different host
+(e.g. if you moved the `[kafka] bootstrap_servers` off `localhost`).
 
 ```bash
 pip install kafka-python  # if not already installed
-python3 extras/kafka/view_kafka_messages.py
+
+# All arguments are optional -- default to localhost:9092 / cert-analyzer-events
+python3 extras/kafka/view_kafka_messages.py --host localhost --port 9092 --topic cert-analyzer-events
 ```
 
 It reads whatever's already on the topic and exits after 5s of no new

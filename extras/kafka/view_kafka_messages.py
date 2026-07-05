@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Interactively prompts for a Kafka broker address and topic, then dumps
-every message on that topic pretty-printed like `jq .` -- a quick way to
-eyeball cert-analyzer's published events without the console consumer's
-raw single-line JSON, and without a browser (see Kafdrop in KAFKA-README.md
-for that).
+Dumps every message on a Kafka topic pretty-printed like `jq .` -- a quick
+way to eyeball cert-analyzer's published events without the console
+consumer's raw single-line JSON, and without a browser (see Kafdrop in
+KAFKA-README.md for that).
 
-Usage: python3 view_kafka_messages.py
+Usage: python3 view_kafka_messages.py [--host HOST] [--port PORT] [--topic TOPIC]
 """
+import argparse
 import json
 import sys
 
@@ -22,31 +22,24 @@ except ImportError:
 IDLE_TIMEOUT_MS = 5000
 
 
-def prompt(text: str, default: str) -> str:
-    value = input(f"{text} [{default}]: ").strip()
-    return value or default
-
-
-def prompt_port(default: str) -> str:
-    while True:
-        value = prompt("Kafka broker port", default)
-        if value.isdigit():
-            return value
-        print("Port must be numeric.")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="localhost", help="Kafka broker IP/hostname (default: localhost)")
+    parser.add_argument("--port", type=int, default=9092, help="Kafka broker port (default: 9092)")
+    parser.add_argument("--topic", default="cert-analyzer-events", help="Topic to consume (default: cert-analyzer-events)")
+    return parser.parse_args()
 
 
 def main() -> None:
-    host = prompt("Kafka broker IP/hostname", "localhost")
-    port = prompt_port("9092")
-    topic = prompt("Topic", "cert-analyzer-events")
-    bootstrap_servers = f"{host}:{port}"
+    args = parse_args()
+    bootstrap_servers = f"{args.host}:{args.port}"
 
-    print(f"\nConnecting to {bootstrap_servers}, topic '{topic}'...")
+    print(f"Connecting to {bootstrap_servers}, topic '{args.topic}'...")
     print(f"Reading available messages (stops after {IDLE_TIMEOUT_MS // 1000}s of no new ones, or Ctrl-C).\n")
 
     try:
         consumer = KafkaConsumer(
-            topic,
+            args.topic,
             bootstrap_servers=bootstrap_servers,
             auto_offset_reset='earliest',
             enable_auto_commit=False,
