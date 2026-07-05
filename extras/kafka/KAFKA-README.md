@@ -107,6 +107,22 @@ List topics:
 new certificate access, or clear cert-analyzer's `known_certs` cache
 (restart it) so the next access is treated as a fresh discovery.
 
+### Quick Python viewer
+
+`view_kafka_messages.py` prompts for the broker IP/port and topic, then
+dumps every available message pretty-printed like `jq .` — no `jq`
+install or remembering consumer flags required. Useful for a quick
+verification pass, including against a broker on a different host (e.g.
+if you moved the `[kafka] bootstrap_servers` off `localhost`).
+
+```bash
+pip install kafka-python  # if not already installed
+python3 extras/kafka/view_kafka_messages.py
+```
+
+It reads whatever's already on the topic and exits after 5s of no new
+messages (or Ctrl-C to stop early).
+
 ---
 
 ## View the data in a browser (Kafdrop)
