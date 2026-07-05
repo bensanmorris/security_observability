@@ -24,7 +24,9 @@ verify and view the data it produces.
 This installs a single-node Apache Kafka broker in **KRaft mode** (no
 ZooKeeper) as a native systemd service:
 
-- Downloads Kafka 3.9.0 to `/opt/kafka`
+- Downloads Kafka 3.9.0 to `/opt/kafka` — or reuses `kafka_2.13-3.9.0.tgz`
+  if it's already sitting next to the script in `extras/kafka/`, skipping
+  the download entirely (useful offline, or to avoid re-fetching on repeat runs)
 - Writes a minimal combined broker+controller config to `/etc/kafka/server.properties`
 - Formats KRaft storage under `/var/lib/kafka/data` (once, on first install)
 - Installs and starts `kafka.service`

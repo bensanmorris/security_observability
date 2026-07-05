@@ -18,6 +18,8 @@ DATA_DIR="/var/lib/kafka/data"
 SERVICE_FILE="/etc/systemd/system/kafka.service"
 CERT_ANALYZER_TOPIC="${CERT_ANALYZER_TOPIC:-cert-analyzer-events}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "============================================"
 echo " Apache Kafka ${KAFKA_VERSION} (KRaft) Installer"
 echo " for cert-analyzer testing / RHEL 9"
@@ -56,16 +58,21 @@ if systemctl is-active --quiet kafka 2>/dev/null; then
 fi
 
 if [ "${KAFKA_ALREADY_RUNNING}" = false ]; then
-    # ── Download ──────────────────────────────────────────────────────────────
+    # ── Download (or reuse a local copy) ──────────────────────────────────────
     ARCHIVE="kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
 
     echo ""
-    echo "[1/6] Downloading Kafka ${KAFKA_VERSION}..."
-    curl -fsSL \
-        "https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/${ARCHIVE}" \
-        -o "${TMPDIR}/${ARCHIVE}"
+    if [ -f "${SCRIPT_DIR}/${ARCHIVE}" ]; then
+        echo "[1/6] Using local tarball ${SCRIPT_DIR}/${ARCHIVE}..."
+        cp "${SCRIPT_DIR}/${ARCHIVE}" "${TMPDIR}/${ARCHIVE}"
+    else
+        echo "[1/6] Downloading Kafka ${KAFKA_VERSION}..."
+        curl -fsSL \
+            "https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/${ARCHIVE}" \
+            -o "${TMPDIR}/${ARCHIVE}"
+    fi
 
     # ── Extract and install ───────────────────────────────────────────────────
     echo "[2/6] Installing to ${INSTALL_DIR}..."
