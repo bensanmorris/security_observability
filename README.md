@@ -264,3 +264,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Grafana dashboard](extras/DASHBOARDS.md) - Setup guide and dashboard section reference
 - [Roadmap](extras/ROADMAP.md) - Planned and proposed improvements
 - [Presentation Q&A](extras/PRESENTATION-QA.md) - Questions and answers covering architecture, deployment, Java JCA/JNI hooking, and roadmap
+- [Local Kafka testing](extras/kafka/KAFKA-README.md) - Install a throwaway Kafka broker and view published events
