@@ -55,6 +55,15 @@ class KafkaPublisher:
     its send() was issued from, so a delayed errback for a producer that's
     since been superseded by a reconnect can't nullify the new one.
 
+    The lock is only ever held for pointer reads/writes, never across a
+    blocking producer call (send(), close(), or the KafkaProducer constructor).
+    kafka-python's Sender thread invokes success/error callbacks synchronously
+    from inside its own send/complete path, so holding self._lock across a
+    blocking call here would risk that Sender thread stalling on self._lock
+    inside _on_error while the thread holding the lock is itself blocked
+    waiting on that same Sender thread to make progress (e.g. to free
+    accumulator buffer memory or complete a join() during close()).
+
     Message schema (all fields present, empty string when not applicable):
     {
         "event_type":       "certificate_discovered",
@@ -109,7 +118,31 @@ class KafkaPublisher:
         self._producer_kwargs: dict = {}
         self._last_connect_attempt: float = 0.0
         self._reconnect_cooldown: float = 30.0  # seconds between reconnect attempts
+        # Guards reads/writes of self._producer and self._last_connect_attempt
+        # only. Held only for quick pointer swaps, NEVER across a blocking
+        # producer call (send()/close()/KafkaProducer()) — kafka-python's
+        # Sender thread invokes _on_error synchronously off its own I/O thread,
+        # and _on_error needs this lock, so a blocking call made while holding
+        # it could deadlock against that Sender thread (see class docstring).
+        # No code path currently re-enters this lock from the same thread, but
+        # it's an RLock rather than a plain Lock as a defensive margin: if some
+        # future change did accidentally nest an acquisition, a plain Lock
+        # would hang silently, whereas RLock just works.
+        #
+        # Lock ordering: wherever both locks are held, self._connect_lock is
+        # always acquired first and self._lock nested inside it (see
+        # _connect() and publish()) — never the reverse — so the two locks
+        # can't deadlock against each other.
         self._lock = threading.RLock()
+        # Serializes _connect() attempts so concurrent publish() callers don't
+        # race into constructing multiple producers. Deliberately a separate
+        # lock from self._lock (which _on_error also needs): _connect() holds
+        # this one across the slow, blocking close()/KafkaProducer() calls,
+        # and self._lock must stay free-able by _on_error the whole time.
+        # RLock because publish() holds it across its own re-check-then-connect
+        # sequence and, within that, calls self._connect() — which acquires it
+        # again on the same thread.
+        self._connect_lock = threading.RLock()
 
         if not KAFKA_AVAILABLE:
             logger.warning(
@@ -135,45 +168,55 @@ class KafkaPublisher:
             self._producer_kwargs['sasl_plain_username']    = sasl_username
             self._producer_kwargs['sasl_plain_password']    = sasl_password
 
-        with self._lock:
-            self._connect(bootstrap_servers, topic)
+        self._connect(bootstrap_servers, topic)
 
     def _connect(self, bootstrap_servers: str = '', topic: str = '') -> bool:
         """
         Attempt to create a KafkaProducer. Returns True on success.
         Respects a cooldown period to avoid hammering a down broker.
 
-        Caller must hold self._lock — this reads and writes self._producer
-        and self._last_connect_attempt without its own locking.
+        Manages its own locking — callers must NOT hold self._lock across
+        this call. Closing the old producer and constructing the new one can
+        block on network I/O, and doing that while holding self._lock would
+        risk deadlocking against another producer's Sender thread trying to
+        invoke _on_error (see class docstring). self._connect_lock (held for
+        the full duration, unlike self._lock) serializes concurrent callers
+        so only one reconnect attempt is ever in flight.
         """
-        now = time.time()
-        if now - self._last_connect_attempt < self._reconnect_cooldown:
-            return False
-        self._last_connect_attempt = now
+        with self._connect_lock:
+            with self._lock:
+                now = time.time()
+                if now - self._last_connect_attempt < self._reconnect_cooldown:
+                    return False
+                self._last_connect_attempt = now
+                old_producer = self._producer
+                self._producer = None
 
-        # Close any existing broken producer before reconnecting
-        if self._producer is not None:
+            # Close any existing broken producer before reconnecting
+            if old_producer is not None:
+                try:
+                    old_producer.close(timeout=2)
+                except Exception:
+                    pass
+
             try:
-                self._producer.close(timeout=2)
-            except Exception:
-                pass
-            self._producer = None
+                producer = KafkaProducer(**self._producer_kwargs)
+            except Exception as e:
+                logger.warning(
+                    f"Kafka producer connection failed (will retry in "
+                    f"{int(self._reconnect_cooldown)}s): {e}"
+                )
+                return False
 
-        try:
-            self._producer = KafkaProducer(**self._producer_kwargs)
             label = bootstrap_servers or str(self._producer_kwargs.get('bootstrap_servers', ''))
             label_topic = topic or self._topic
             logger.info(
                 f"Kafka producer connected — "
                 f"brokers: {label}, topic: {label_topic}"
             )
+            with self._lock:
+                self._producer = producer
             return True
-        except Exception as e:
-            logger.warning(
-                f"Kafka producer connection failed (will retry in "
-                f"{int(self._reconnect_cooldown)}s): {e}"
-            )
-            return False
 
     def publish(self, cert_info: CertificateInfo) -> None:
         """
@@ -240,21 +283,47 @@ class KafkaPublisher:
         key = cert_info.unique_key
 
         with self._lock:
-            # Attempt reconnection if producer is absent
-            if self._producer is None:
-                if not self._connect():
-                    return
             producer = self._producer
+            needs_connect = producer is None
 
-            try:
-                producer.send(
-                    self._topic,
-                    key=key,
-                    value=message,
-                ).add_errback(lambda exc, _producer=producer: self._on_error(_producer, exc))
-            except Exception as e:
-                logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
-                # Nullify the producer so the next publish attempt triggers reconnect
+        if needs_connect:
+            # Attempt reconnection if producer is absent. _connect_lock
+            # serializes this whole check-then-connect sequence across
+            # concurrent publish() callers: whichever thread gets here first
+            # does the actual connect; by the time the rest acquire the lock,
+            # self._producer is already set and they just reuse it instead of
+            # each constructing their own producer. Deliberately not
+            # self._lock (see class docstring) — this can block for as long
+            # as the KafkaProducer constructor takes.
+            with self._connect_lock:
+                with self._lock:
+                    producer = self._producer
+                    needs_connect = producer is None
+                if needs_connect:
+                    if not self._connect():
+                        return
+                    with self._lock:
+                        producer = self._producer
+                        if producer is None:
+                            return
+
+        # send() is issued outside self._lock: it can block (e.g. waiting for
+        # accumulator buffer space) on progress from the producer's Sender
+        # thread, and that same Sender thread invokes _on_error synchronously
+        # when completing/failing a batch. Holding self._lock here would risk
+        # that Sender thread stalling on self._lock inside _on_error while
+        # this thread is blocked waiting on the Sender thread — see class
+        # docstring.
+        try:
+            producer.send(
+                self._topic,
+                key=key,
+                value=message,
+            ).add_errback(lambda exc, _producer=producer: self._on_error(_producer, exc))
+        except Exception as e:
+            logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
+            # Nullify the producer so the next publish attempt triggers reconnect
+            with self._lock:
                 if self._producer is producer:
                     self._producer = None
 

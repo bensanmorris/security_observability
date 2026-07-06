@@ -1362,7 +1362,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "tls_certificate_process_info{node_name=~\"$node\"}\n  * on(cert_path, cert_index, serial, node_name) group_left(common_name, issuer)\n  tls_certificate_expiry_days{node_name=~\"$node\"}",
+          "expr": "tls_certificate_process_info{node_name=~\"$node\"}\n  * on(cert_path, cert_index, serial, node_name, checksum) group_left(common_name, issuer)\n  tls_certificate_expiry_days{node_name=~\"$node\"}",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -2458,7 +2458,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "tls_certificate_process_info{node_name=~\"$node\",parent_process!=\"\"}\n  * on(cert_path, cert_index, serial, node_name) group_left(common_name)\n  tls_certificate_expiry_days{node_name=~\"$node\"}",
+          "expr": "tls_certificate_process_info{node_name=~\"$node\",parent_process!=\"\"}\n  * on(cert_path, cert_index, serial, node_name, checksum) group_left(common_name)\n  tls_certificate_expiry_days{node_name=~\"$node\"}",
           "instant": true,
           "format": "table",
           "refId": "A"
