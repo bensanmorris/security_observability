@@ -263,6 +263,74 @@ class TestLargeFileBackgroundProcessing:
 
         assert analyzer._count_pem_certs(bundle_path) == 5
 
+    def test_count_pem_certs_default_byte_cap(self, analyzer):
+        """Default _large_file_byte_cap is 2MB unless overridden"""
+        assert analyzer._large_file_byte_cap == 2 * 1024 * 1024
+
+    def test_count_pem_certs_respects_byte_cap(self, analyzer, temp_dir):
+        """
+        _count_pem_certs only reads/counts the first _large_file_byte_cap
+        bytes -- markers beyond the cap must not be counted, since the whole
+        point of the cap is to bound the read regardless of how many more
+        markers a bigger file might contain past that point.
+        """
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "capped_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        with open(bundle_path, 'rb') as f:
+            data = f.read()
+
+        marker = b'-----BEGIN CERTIFICATE-----'
+        # Offset of the 3rd marker -- capping the read here means only the
+        # first 2 certs' markers are visible.
+        offset = data.index(marker)
+        offset = data.index(marker, offset + 1)
+        offset = data.index(marker, offset + 1)
+
+        analyzer._large_file_byte_cap = offset
+        assert analyzer._count_pem_certs(bundle_path) == 2
+
+        # Sanity check: with a cap covering the whole file, all 5 are counted.
+        analyzer._large_file_byte_cap = len(data)
+        assert analyzer._count_pem_certs(bundle_path) == 5
+
+    def test_byte_cap_can_undercount_and_misroute_large_bundle(self, analyzer, temp_dir):
+        """
+        Documents the accepted tradeoff of the byte-cap approach: if a bundle's
+        markers are spread out past the cap, _count_pem_certs undercounts and
+        the file is routed synchronously even though it actually exceeds
+        _large_file_cert_threshold. Real-world CA bundles are far smaller than
+        the default 2MB cap (see cert-analyzer.conf), so this only matters if
+        the cap is configured too small for the certs actually being scanned.
+        """
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "misrouted_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        with open(bundle_path, 'rb') as f:
+            data = f.read()
+        marker = b'-----BEGIN CERTIFICATE-----'
+        offset = data.index(marker)
+        offset = data.index(marker, offset + 1)
+        offset = data.index(marker, offset + 1)
+
+        # Cap only reveals 2 markers -- under the threshold of 3, even though
+        # the file actually contains 5 certs.
+        analyzer._large_file_byte_cap = offset
+        assert analyzer._count_pem_certs(bundle_path) == 2
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        # Processed synchronously (not routed to the background-thread path)
+        # despite exceeding the threshold, because the byte cap hid the rest.
+        assert bundle_path not in analyzer._large_file_in_flight
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
+
     def test_small_file_processed_synchronously(self, analyzer, temp_dir):
         """A file at or below the threshold is processed inline, no background thread"""
         analyzer._large_file_cert_threshold = 3
