@@ -134,5 +134,15 @@ class LRUCache:
             self._on_evict(key, value)
 
     def clear(self) -> None:
+        """
+        Remove every entry, firing on_evict for each one (same as discard()/
+        __delitem__) so callers maintaining a secondary index or metrics off
+        on_evict don't end up with ghost entries for everything that was
+        cached at the moment of the clear.
+        """
         with self._lock:
+            items = list(self._store.items())
             self._store.clear()
+        if self._on_evict is not None:
+            for key, value in items:
+                self._on_evict(key, value)

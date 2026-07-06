@@ -2242,6 +2242,23 @@ class TestLRUCache:
         cache.clear()
         assert len(cache) == 0
 
+    def test_clear_fires_on_evict_for_every_entry(self):
+        """
+        clear() must fire on_evict for every entry it removes, same as
+        discard()/__delitem__ -- otherwise a caller maintaining a secondary
+        index or metrics off on_evict (e.g. CertificateAnalyzer's
+        _known_paths) is left with ghost entries for everything that was
+        cached at the moment of the clear.
+        """
+        evicted = []
+        cache = LRUCache(maxsize=10_000, on_evict=lambda k, v: evicted.append((k, v)))
+        for i in range(5):
+            cache[str(i)] = i
+
+        cache.clear()
+
+        assert sorted(evicted) == [(str(i), i) for i in range(5)]
+
     def test_get_with_default(self):
         """get() returns default when key is absent."""
         cache = LRUCache(maxsize=10_000)
@@ -2392,6 +2409,28 @@ class TestKnownCertsIndex:
         assert target.unique_key not in analyzer.known_certs
         assert target.path not in analyzer._known_paths, \
             "evicted cert's path must be removed from the index, not left stale"
+
+    def test_index_cleaned_up_on_known_certs_clear(self, analyzer, temp_dir):
+        """
+        known_certs.clear() must also fire _deindex_known_cert for every
+        entry it removes, same as LRU eviction — otherwise _known_paths would
+        retain a ghost entry for every previously-cached cert, making
+        process_event believe those paths are still known (and skip
+        re-parsing them) even though known_certs has forgotten them.
+        """
+        cert, _ = TestCertificateGeneration.generate_certificate("cleared.example.com", 365)
+        path = os.path.join(temp_dir, "cleared.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        assert path in analyzer._known_paths
+
+        analyzer.known_certs.clear()
+
+        assert len(analyzer.known_certs) == 0
+        assert path not in analyzer._known_paths, \
+            "clear() must not leave a ghost _known_paths entry for a cert no longer cached"
 
     def test_index_ignores_entries_without_a_path(self, analyzer):
         """
