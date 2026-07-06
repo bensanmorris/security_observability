@@ -281,10 +281,14 @@ class KafkaPublisher:
     def close(self) -> None:
         """Flush pending messages and close the producer cleanly."""
         with self._lock:
-            if self._producer is not None:
-                try:
-                    self._producer.flush(timeout=5)
-                    self._producer.close()
-                except Exception as e:
-                    logger.warning(f"Error closing Kafka producer: {e}")
-                self._producer = None
+            producer = self._producer
+            self._producer = None
+        # flush()/close() can block for the full timeout — do this outside
+        # self._lock so a concurrent publish()/_on_error() only has to wait
+        # for the quick pointer swap above, not the whole drain.
+        if producer is not None:
+            try:
+                producer.flush(timeout=5)
+                producer.close()
+            except Exception as e:
+                logger.warning(f"Error closing Kafka producer: {e}")
