@@ -1,6 +1,7 @@
 import configparser
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -87,8 +88,22 @@ def cfg(
     return os.getenv(env_var, default)
 
 
+def _raise_keyboard_interrupt(signum, frame):
+    """
+    SIGTERM handler that funnels into the same shutdown path SIGINT already
+    uses. Without this, systemd `stop`/`restart` and every Kubernetes pod
+    termination (rolling update, scale-down, node drain) send SIGTERM, whose
+    default disposition kills the process immediately -- bypassing the
+    `except KeyboardInterrupt` cleanup below entirely and silently dropping
+    whatever's still buffered in the Kafka producer instead of flushing it.
+    """
+    raise KeyboardInterrupt()
+
+
 def main():
     """Main entry point"""
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
     cp = load_config()
 
     tetragon_addr   = cfg(cp, 'tetragon',  'addr',                        'TETRAGON_ADDR',                   'localhost:54321')

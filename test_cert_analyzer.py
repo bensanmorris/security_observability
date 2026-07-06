@@ -8051,3 +8051,38 @@ class TestEventRateMetrics:
         with patch.object(rate_analyzer, 'extract_cert_path_from_event') as mock_extract:
             rate_analyzer.process_event(event)
         mock_extract.assert_not_called()
+
+
+class TestSigtermShutdown:
+    """
+    SIGTERM's default disposition kills the process immediately, bypassing
+    any try/except -- unlike SIGINT, which Python's own default handler
+    turns into a catchable KeyboardInterrupt. Without a custom handler,
+    every systemd `stop`/`restart` and every Kubernetes pod termination
+    (rolling update, scale-down, node drain) sends SIGTERM and skips
+    agent.config.main()'s KeyboardInterrupt cleanup entirely -- silently
+    dropping whatever's still buffered in the Kafka producer instead of
+    flushing it. _raise_keyboard_interrupt closes that gap by funnelling
+    SIGTERM into the same shutdown path SIGINT already uses.
+    """
+
+    def test_sigterm_handler_raises_keyboard_interrupt(self):
+        import signal
+        from agent.config import _raise_keyboard_interrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            _raise_keyboard_interrupt(signal.SIGTERM, None)
+
+    def test_sigterm_signal_delivery_raises_keyboard_interrupt(self):
+        """End-to-end: an actual delivered SIGTERM (not just a direct call)
+        is caught as KeyboardInterrupt once the handler is registered."""
+        import os
+        import signal
+        from agent.config import _raise_keyboard_interrupt
+
+        previous = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGTERM)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
