@@ -1701,9 +1701,16 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
             finally:
+                # discard-from-in-flight and add-to-probed must happen as one
+                # atomic step under the same lock — otherwise there's a window
+                # where endpoint_key is in neither set, and a bind/connect event
+                # for the same endpoint landing in that window would see it as
+                # neither in-flight nor already-probed and spawn a duplicate
+                # probe (and duplicate Kafka publish, since _probe_tls_endpoint
+                # has no de-dupe of its own against known_certs).
                 with self._probe_in_flight_lock:
                     self._probe_in_flight.discard(endpoint_key)
-                self._probed_endpoints.add(endpoint_key)
+                    self._probed_endpoints.add(endpoint_key)
 
         started = self._start_background_thread(_probe, name=f'tls-probe-{host}-{port}')
         if not started:
@@ -1761,9 +1768,16 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
             finally:
+                # discard-from-in-flight and add-to-probed must happen as one
+                # atomic step under the same lock — otherwise there's a window
+                # where endpoint_key is in neither set, and a bind/connect event
+                # for the same endpoint landing in that window would see it as
+                # neither in-flight nor already-probed and spawn a duplicate
+                # probe (and duplicate Kafka publish, since _probe_tls_endpoint
+                # has no de-dupe of its own against known_certs).
                 with self._probe_in_flight_lock:
                     self._probe_in_flight.discard(endpoint_key)
-                self._probed_endpoints.add(endpoint_key)
+                    self._probed_endpoints.add(endpoint_key)
 
         started = self._start_background_thread(_probe, name=f'tls-probe-out-{daddr}-{dport}')
         if not started:
