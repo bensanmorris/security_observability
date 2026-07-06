@@ -70,7 +70,7 @@
       }
     ]
   },
-  "description": "CertSight \u2014 Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
+  "description": "CertSight — Real-time TLS certificate monitoring via eBPF. Tracks expiry, FIPS 140-2/140-3 compliance, self-signed certificates, and Java KeyStore visibility across bare metal and Kubernetes.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -600,6 +600,98 @@
       }
     },
     {
+      "id": 49,
+      "title": "Analyzer Configuration",
+      "type": "table",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "cert_analyzer_config_info{node_name=~\"$node\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true
+            },
+            "indexByName": {
+              "node_name": 0,
+              "checksum_enabled": 1,
+              "demo_mode": 2,
+              "fips_compliance_enabled": 3,
+              "filter_self_events": 4,
+              "event_rate_metrics_enabled": 5,
+              "bind_probe_enabled": 6,
+              "connect_probe_enabled": 7,
+              "port_probe_timeout": 8,
+              "port_probe_connect_delay": 9,
+              "tls_outbound_ports": 10,
+              "large_file_cert_threshold": 11,
+              "large_file_metrics_cap": 12,
+              "large_file_byte_cap": 13,
+              "max_concurrent_background_threads": 14,
+              "max_processes_per_cert": 15,
+              "alert_threshold_days": 16
+            },
+            "renameByName": {
+              "node_name": "Node",
+              "checksum_enabled": "Checksums",
+              "demo_mode": "Demo Mode",
+              "fips_compliance_enabled": "FIPS Checking",
+              "filter_self_events": "Filter Self Events",
+              "event_rate_metrics_enabled": "Event Rate Metrics",
+              "bind_probe_enabled": "Bind Probe",
+              "connect_probe_enabled": "Connect Probe",
+              "port_probe_timeout": "Port Probe Timeout (s)",
+              "port_probe_connect_delay": "Port Probe Connect Delay (s)",
+              "tls_outbound_ports": "TLS Outbound Ports",
+              "large_file_cert_threshold": "Large File Cert Threshold",
+              "large_file_metrics_cap": "Large File Metrics Cap",
+              "large_file_byte_cap": "Large File Byte Cap",
+              "max_concurrent_background_threads": "Max Concurrent Background Threads",
+              "max_processes_per_cert": "Max Processes Per Cert",
+              "alert_threshold_days": "Alert Threshold (days)"
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 34,
       "title": "Certificate Summary",
       "type": "row",
@@ -608,7 +700,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 7
+        "y": 13
       },
       "panels": []
     },
@@ -620,7 +712,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 8
+        "y": 14
       },
       "datasource": {
         "type": "prometheus",
@@ -1047,7 +1139,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 20
       },
       "panels": []
     },
@@ -1059,7 +1151,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -1228,7 +1320,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 31
       },
       "datasource": {
         "type": "prometheus",
@@ -1350,7 +1442,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -1536,7 +1628,7 @@
         "h": 8,
         "w": 7,
         "x": 0,
-        "y": 43
+        "y": 49
       },
       "datasource": {
         "type": "prometheus",
@@ -1708,7 +1800,7 @@
         "h": 8,
         "w": 17,
         "x": 7,
-        "y": 43
+        "y": 49
       },
       "datasource": {
         "type": "prometheus",
@@ -1789,7 +1881,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 57
       },
       "panels": []
     },
@@ -1801,7 +1893,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 52
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -1898,7 +1990,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 52
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -1955,7 +2047,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -2063,7 +2155,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -2123,7 +2215,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 74
       },
       "panels": []
     },
@@ -2135,7 +2227,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 75
       },
       "datasource": {
         "type": "prometheus",
@@ -2219,7 +2311,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 77
+        "y": 83
       },
       "datasource": {
         "type": "prometheus",
@@ -2272,7 +2364,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 87
       },
       "datasource": {
         "type": "prometheus",
@@ -2446,7 +2538,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 95
       },
       "datasource": {
         "type": "prometheus",
@@ -2574,7 +2666,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 97
+        "y": 103
       },
       "panels": []
     },
@@ -2586,7 +2678,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 98
+        "y": 104
       },
       "datasource": {
         "type": "prometheus",
@@ -2638,7 +2730,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 98
+        "y": 104
       },
       "datasource": {
         "type": "prometheus",
@@ -2703,7 +2795,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 106
+        "y": 112
       },
       "datasource": {
         "type": "prometheus",
@@ -2810,7 +2902,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 106
+        "y": 112
       },
       "datasource": {
         "type": "prometheus",
@@ -2905,7 +2997,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 118
       },
       "datasource": {
         "type": "prometheus",
@@ -2959,7 +3051,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 112
+        "y": 118
       },
       "datasource": {
         "type": "prometheus",
@@ -3016,7 +3108,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 124
       },
       "panels": []
     },
@@ -3032,7 +3124,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 125
       },
       "targets": [
         {
@@ -3177,14 +3269,14 @@
     },
     {
       "id": 42,
-      "title": "Network Event Rates (optional \u2014 enable event_rate_metrics_enabled)",
+      "title": "Network Event Rates (optional — enable event_rate_metrics_enabled)",
       "type": "row",
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 127
+        "y": 133
       },
       "panels": [
         {
@@ -3390,7 +3482,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 128
+        "y": 134
       },
       "panels": [
         {

@@ -56,16 +56,26 @@ jobs:
     - name: Install security tools
       run: |
         pip install bandit safety
-    
+
     - name: Run Bandit security scan
+      # No `|| true`: every current finding is either fixed or has a specific,
+      # reasoned `# nosec BXXX` annotation at its call site (see agent/*.py) --
+      # a new, un-annotated finding should fail the build.
       run: |
-        bandit -r cert_analyzer.py agent/ -f json -o bandit-report.json || true
-        bandit -r cert_analyzer.py agent/ || true
-    
+        bandit -r cert_analyzer.py agent/ -f json -o bandit-report.json
+        bandit -r cert_analyzer.py agent/
+
     - name: Check dependencies for vulnerabilities
+      # Scans only requirements.txt (the actual shipped runtime dependencies),
+      # not the ambient environment -- otherwise this also reports on bandit's/
+      # safety's own transitive dependencies (nltk, filelock, requests, ...),
+      # which never ship in the production container and aren't this
+      # project's to fix. .safety-policy.yml documents, with a dated reason
+      # each, the currently-known CVEs in pinned deps that are deferred
+      # pending a tested cryptography/protobuf upgrade -- anything not listed
+      # there fails the build. No `|| true`.
       run: |
-        pip install -r test-requirements.txt
-        safety check || true
+        safety check -r requirements.txt --policy-file .safety-policy.yml
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -91,55 +101,54 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r test-requirements.txt
 
-    - name: Run tests
-      run: |
-        pytest test_cert_analyzer.py test_fips_compliance_checker.py -v --tb=short --strict-markers
-
-    - name: Generate coverage report
+    - name: Run tests with coverage
+      # A single run generates both the verbose pass/fail output and the
+      # coverage numbers -- previously the whole suite ran twice (once
+      # plain, once for coverage), doubling this job's runtime for no
+      # benefit. 80% is a real floor just under current measured coverage
+      # (~84%), so a genuine regression fails the build; it isn't the
+      # stale "35%" placeholder this replaced, which was roughly half of
+      # what the suite already achieved and so never actually caught
+      # anything.
       run: |
         pytest test_cert_analyzer.py test_fips_compliance_checker.py \
+          -v --tb=short --strict-markers \
           --cov=cert_analyzer \
           --cov=agent \
           --cov-report=xml \
           --cov-report=html \
           --cov-report=term-missing \
-          --cov-fail-under=35
-    
+          --cov-fail-under=80
+
     - name: Upload coverage to Codecov
-      if: matrix.python-version == '3.9'
+      if: always() && matrix.python-version == '3.9'
       uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
         flags: unittests
         name: py${{ matrix.python-version }}
-    
+
     - name: Archive coverage HTML report
-      if: matrix.python-version == '3.9'
+      if: always() && matrix.python-version == '3.9'
       uses: actions/upload-artifact@v4
       with:
         name: coverage-report
         path: htmlcov/
         retention-days: 30
-    
+
     - name: Coverage Summary
-      if: matrix.python-version == '3.9'
+      # Generated from this run's own coverage data (not a hardcoded
+      # figure) so it can't silently drift out of date the way the
+      # previous static "~39%, Tetragon/gRPC/metrics untested" summary
+      # did -- all of those areas have since gained extensive test
+      # coverage and that text was long stale.
+      if: always() && matrix.python-version == '3.9'
       run: |
         echo "## 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Current coverage: ~39% (unit tests only)" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Covered:" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ Certificate parsing (PEM, DER, multi-cert bundles)" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ Certificate analysis (expiry detection, validation)" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ CertificateInfo dataclass" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ Path detection logic" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ FIPS compliance checker (algorithm and key validation)" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Not Covered (requires Tetragon integration):" >> $GITHUB_STEP_SUMMARY
-        echo "- ⏭️ Tetragon event stream processing" >> $GITHUB_STEP_SUMMARY
-        echo "- ⏭️ Prometheus metrics updates" >> $GITHUB_STEP_SUMMARY
-        echo "- ⏭️ gRPC communication" >> $GITHUB_STEP_SUMMARY
-        echo "- ⏭️ Periodic scanning" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        coverage report --include="cert_analyzer.py,agent/*" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
 
   build-status:
     name: Build Status

@@ -11,4 +11,4 @@ pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
 # Optional: Kafka event publishing
 # Enable by setting [kafka] enabled = true in cert-analyzer.conf or KAFKA_ENABLED=true.
 # The analyzer degrades gracefully to Prometheus-only if this package is absent.
-kafka-python==2.0.2
+kafka-python==2.0.3

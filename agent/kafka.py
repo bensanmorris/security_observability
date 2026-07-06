@@ -111,7 +111,7 @@ class KafkaPublisher:
         security_protocol: str = 'PLAINTEXT',
         sasl_mechanism: str = '',
         sasl_username: str = '',
-        sasl_password: str = '',
+        sasl_password: str = '',  # nosec B107 - empty-string "not set" placeholder, not a credential
     ):
         self._topic = topic
         self._producer: Optional['KafkaProducer'] = None
@@ -197,7 +197,7 @@ class KafkaPublisher:
                 try:
                     old_producer.close(timeout=2)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort close of an already-broken producer being replaced; a failure here changes nothing
 
             try:
                 producer = KafkaProducer(**self._producer_kwargs)

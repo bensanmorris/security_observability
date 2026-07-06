@@ -133,7 +133,7 @@ def _get_best_family(address, port):
 
 
 def start_metrics_server(port: int, min_scrape_interval_seconds: float,
-                          addr: str = '0.0.0.0', registry=REGISTRY):
+                          addr: str = '0.0.0.0', registry=REGISTRY):  # nosec B104 - Prometheus scrape endpoint must be reachable off-pod; no sensitive data served
     """
     Starts the Prometheus /metrics WSGI server as a daemon thread.
 
@@ -349,6 +349,15 @@ class PrometheusMetrics:
             'version':                CERT_ANALYZER_VERSION,
             'tetragon_build_version': TETRAGON_BUILD_VERSION,
         })
+
+        # Static analyzer config — populated by CertificateAnalyzer.__init__
+        # once it knows its own resolved options, not here, since this class
+        # is constructed before config parsing happens.
+        self.config_info = Info(
+            'cert_analyzer_config',
+            'Static, performance-relevant analyzer configuration options',
+            ['node_name'],
+        )
 
         # Registered directly with the registry rather than stored as a Gauge
         # attribute: its value is computed at scrape time (see collect()

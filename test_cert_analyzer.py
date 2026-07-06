@@ -8051,3 +8051,91 @@ class TestEventRateMetrics:
         with patch.object(rate_analyzer, 'extract_cert_path_from_event') as mock_extract:
             rate_analyzer.process_event(event)
         mock_extract.assert_not_called()
+
+
+class TestSigtermShutdown:
+    """
+    SIGTERM's default disposition kills the process immediately, bypassing
+    any try/except -- unlike SIGINT, which Python's own default handler
+    turns into a catchable KeyboardInterrupt. Without a custom handler,
+    every systemd `stop`/`restart` and every Kubernetes pod termination
+    (rolling update, scale-down, node drain) sends SIGTERM and skips
+    agent.config.main()'s KeyboardInterrupt cleanup entirely -- silently
+    dropping whatever's still buffered in the Kafka producer instead of
+    flushing it. _raise_keyboard_interrupt closes that gap by funnelling
+    SIGTERM into the same shutdown path SIGINT already uses.
+    """
+
+    def test_sigterm_handler_raises_keyboard_interrupt(self):
+        import signal
+        from agent.config import _raise_keyboard_interrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            _raise_keyboard_interrupt(signal.SIGTERM, None)
+
+    def test_sigterm_signal_delivery_raises_keyboard_interrupt(self):
+        """End-to-end: an actual delivered SIGTERM (not just a direct call)
+        is caught as KeyboardInterrupt once the handler is registered."""
+        import os
+        import signal
+        from agent.config import _raise_keyboard_interrupt
+
+        previous = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGTERM)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+
+class TestConfigNumericValidation:
+    """
+    cfg_int()/cfg_float() must degrade to the documented default on a
+    malformed config value instead of raising -- a plain int()/float() cast
+    on operator input (a config file or env var) would otherwise crash the
+    process before it's even started listening for events, from a single
+    typo like HEALTH_PORT=809O.
+    """
+
+    def _empty_cp(self):
+        import configparser
+        return configparser.ConfigParser()
+
+    def test_cfg_int_valid_value_from_env(self, monkeypatch):
+        from agent.config import cfg_int
+        monkeypatch.setenv('SOME_INT', '42')
+        assert cfg_int(self._empty_cp(), 'sect', 'key', 'SOME_INT', '10') == 42
+
+    def test_cfg_int_malformed_env_falls_back_to_default(self, monkeypatch, caplog):
+        from agent.config import cfg_int
+        monkeypatch.setenv('SOME_INT', '809O')  # letter O, not zero
+        with caplog.at_level('ERROR'):
+            result = cfg_int(self._empty_cp(), 'health', 'port', 'SOME_INT', '8086')
+        assert result == 8086
+        assert 'Invalid integer' in caplog.text
+
+    def test_cfg_int_malformed_config_file_value_falls_back_to_default(self, caplog):
+        import configparser
+        from agent.config import cfg_int
+        cp = configparser.ConfigParser()
+        cp.read_dict({'metrics': {'port': 'not-a-number'}})
+        with caplog.at_level('ERROR'):
+            result = cfg_int(cp, 'metrics', 'port', 'METRICS_PORT', '9090')
+        assert result == 9090
+
+    def test_cfg_int_missing_value_uses_default(self):
+        from agent.config import cfg_int
+        assert cfg_int(self._empty_cp(), 'sect', 'key', 'UNSET_INT_VAR', '30') == 30
+
+    def test_cfg_float_valid_value_from_env(self, monkeypatch):
+        from agent.config import cfg_float
+        monkeypatch.setenv('SOME_FLOAT', '2.5')
+        assert cfg_float(self._empty_cp(), 'sect', 'key', 'SOME_FLOAT', '5') == 2.5
+
+    def test_cfg_float_malformed_env_falls_back_to_default(self, monkeypatch, caplog):
+        from agent.config import cfg_float
+        monkeypatch.setenv('SOME_FLOAT', 'five')
+        with caplog.at_level('ERROR'):
+            result = cfg_float(self._empty_cp(), 'port_probe', 'timeout_seconds', 'SOME_FLOAT', '5')
+        assert result == 5.0
+        assert 'Invalid float' in caplog.text

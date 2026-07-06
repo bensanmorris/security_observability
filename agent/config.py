@@ -1,6 +1,7 @@
 import configparser
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -87,57 +88,120 @@ def cfg(
     return os.getenv(env_var, default)
 
 
+def cfg_int(
+    cp: configparser.ConfigParser,
+    section: str,
+    key: str,
+    env_var: str,
+    default: str,
+) -> int:
+    """
+    Same precedence chain as cfg(), parsed as int. Falls back to `default`
+    (logged as an error) on a malformed value instead of raising -- a single
+    typo in a config file or env var must not crash the process before it's
+    even started listening for events. `default` itself is always a valid
+    literal controlled by this module, so casting it is never at risk.
+    """
+    raw = cfg(cp, section, key, env_var, default)
+    try:
+        return int(raw)
+    except ValueError:
+        logger.error(
+            f"Invalid integer for [{section}] {key} (env {env_var}): "
+            f"{raw!r} — using default {default!r}"
+        )
+        return int(default)
+
+
+def cfg_float(
+    cp: configparser.ConfigParser,
+    section: str,
+    key: str,
+    env_var: str,
+    default: str,
+) -> float:
+    """Same as cfg_int(), but for float-valued settings."""
+    raw = cfg(cp, section, key, env_var, default)
+    try:
+        return float(raw)
+    except ValueError:
+        logger.error(
+            f"Invalid float for [{section}] {key} (env {env_var}): "
+            f"{raw!r} — using default {default!r}"
+        )
+        return float(default)
+
+
+def _raise_keyboard_interrupt(signum, frame):
+    """
+    SIGTERM handler that funnels into the same shutdown path SIGINT already
+    uses. Without this, systemd `stop`/`restart` and every Kubernetes pod
+    termination (rolling update, scale-down, node drain) send SIGTERM, whose
+    default disposition kills the process immediately -- bypassing the
+    `except KeyboardInterrupt` cleanup below entirely and silently dropping
+    whatever's still buffered in the Kafka producer instead of flushing it.
+    """
+    raise KeyboardInterrupt()
+
+
 def main():
     """Main entry point"""
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
     cp = load_config()
 
-    tetragon_addr   = cfg(cp, 'tetragon',  'addr',                        'TETRAGON_ADDR',                   'localhost:54321')
-    metrics_port    = int(cfg(cp, 'metrics',  'port',                     'METRICS_PORT',                    '9090'))
-    min_scrape_interval = int(cfg(cp, 'metrics', 'min_scrape_interval_seconds', 'MIN_SCRAPE_INTERVAL_SECONDS', '60'))
-    health_port     = int(cfg(cp, 'health',   'port',                     'HEALTH_PORT',                     '8086'))
-    alert_threshold = int(cfg(cp, 'alerting', 'threshold_days',           'ALERT_THRESHOLD_DAYS',            '30'))
     log_level       = cfg(cp, 'logging',   'level',                       'LOG_LEVEL',                       'INFO')
+    # Configured before any numeric config parsing below so a malformed value
+    # is reported through the real logger/format, not the pre-basicConfig
+    # "handler of last resort".
+    setup_logging(log_level)
+
+    tetragon_addr   = cfg(cp, 'tetragon',  'addr',                        'TETRAGON_ADDR',                   'localhost:54321')
+    metrics_port    = cfg_int(cp, 'metrics',  'port',                     'METRICS_PORT',                    '9090')
+    min_scrape_interval = cfg_int(cp, 'metrics', 'min_scrape_interval_seconds', 'MIN_SCRAPE_INTERVAL_SECONDS', '60')
+    health_port     = cfg_int(cp, 'health',   'port',                     'HEALTH_PORT',                     '8086')
+    alert_threshold = cfg_int(cp, 'alerting', 'threshold_days',           'ALERT_THRESHOLD_DAYS',            '30')
     scan_paths_str  = cfg(cp, 'scanning',  'paths',                       'CERT_SCAN_PATHS',                 '/etc/ssl,/etc/pki')
     scan_paths      = [p.strip() for p in scan_paths_str.split(',') if p.strip()]
-    scan_interval   = int(cfg(cp, 'scanning',  'interval_seconds',        'SCAN_INTERVAL_SECONDS',           '3600'))
-    grace_period    = int(cfg(cp, 'health',    'readiness_grace_period_seconds', 'READINESS_GRACE_PERIOD_SECONDS', '60'))
-    staleness       = int(cfg(cp, 'health',    'readiness_staleness_seconds',    'READINESS_STALENESS_SECONDS',    '300'))
+    scan_interval   = cfg_int(cp, 'scanning',  'interval_seconds',        'SCAN_INTERVAL_SECONDS',           '3600')
+    grace_period    = cfg_int(cp, 'health',    'readiness_grace_period_seconds', 'READINESS_GRACE_PERIOD_SECONDS', '60')
+    staleness       = cfg_int(cp, 'health',    'readiness_staleness_seconds',    'READINESS_STALENESS_SECONDS',    '300')
     filter_self     = cfg(cp, 'certificates', 'filter_self_events',       'FILTER_SELF_EVENTS',              'true').lower() != 'false'
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
     checksum_enabled        = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',        'false').lower() == 'true'
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
-    large_file_cert_threshold = int(cfg(cp, 'certificates', 'large_file_cert_threshold', 'LARGE_FILE_CERT_THRESHOLD', '20'))
+    large_file_cert_threshold = cfg_int(cp, 'certificates', 'large_file_cert_threshold', 'LARGE_FILE_CERT_THRESHOLD', '20')
     # Deliberately separate from large_file_cert_threshold above: that one only
     # decides whether a file's parsing is deferred to a background thread, this
     # one caps how many certs in a bundle get full Prometheus metrics/logging.
     # Conflating them meant raising the metrics cap to cover a realistic CA
     # bundle (~130-150 certs) also disabled background-thread parsing for it.
-    large_file_metrics_cap = int(cfg(cp, 'certificates', 'large_file_metrics_cap', 'LARGE_FILE_METRICS_CAP', '300'))
+    large_file_metrics_cap = cfg_int(cp, 'certificates', 'large_file_metrics_cap', 'LARGE_FILE_METRICS_CAP', '300')
     # Caps how many bytes _count_pem_certs reads to decide whether a file is
     # "large" -- without this, that check reads the whole file up front, on
     # the Tetragon event-consumer thread, before any background-thread
     # dispatch decision is even made. 2MB comfortably covers real-world CA
     # trust bundles (a few hundred KB in practice) while bounding the
     # worst-case read for an oversized/degenerate file.
-    large_file_byte_cap = int(cfg(cp, 'certificates', 'large_file_byte_cap', 'LARGE_FILE_BYTE_CAP', str(2 * 1024 * 1024)))
+    large_file_byte_cap = cfg_int(cp, 'certificates', 'large_file_byte_cap', 'LARGE_FILE_BYTE_CAP', str(2 * 1024 * 1024))
     # Caps concurrent TLS-probe / large-file-parse threads so a burst of events
     # (e.g. many pods reconnecting to dependencies at once) can't spawn
     # unbounded OS threads.
-    max_concurrent_background_threads = int(cfg(cp, 'certificates', 'max_concurrent_background_threads', 'MAX_CONCURRENT_BACKGROUND_THREADS', '20'))
+    max_concurrent_background_threads = cfg_int(cp, 'certificates', 'max_concurrent_background_threads', 'MAX_CONCURRENT_BACKGROUND_THREADS', '20')
     # Caps how many distinct (process, parent_process) pairs get their own
     # tls_certificate_process_info series per cert -- otherwise a file opened
     # by many unrelated binaries over the process's lifetime (e.g. the system
     # CA trust bundle) accumulates one permanent series per distinct process,
     # forever, regardless of known_certs cache size.
-    max_processes_per_cert = int(cfg(cp, 'certificates', 'max_processes_per_cert', 'MAX_PROCESSES_PER_CERT', '20'))
+    max_processes_per_cert = cfg_int(cp, 'certificates', 'max_processes_per_cert', 'MAX_PROCESSES_PER_CERT', '20')
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
     bind_probe_enabled    = cfg(cp, 'port_probe', 'bind_probe_enabled',    'BIND_PROBE_ENABLED',    'false').lower() == 'true'
     connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
-    port_probe_timeout       = float(cfg(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5'))
-    port_probe_connect_delay = float(cfg(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2'))
+    port_probe_timeout       = cfg_float(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5')
+    port_probe_connect_delay = cfg_float(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2')
     _tls_ports_raw = cfg(cp, 'port_probe', 'tls_outbound_ports', 'TLS_OUTBOUND_PORTS', '')
     if _tls_ports_raw.strip():
         try:
@@ -157,8 +221,6 @@ def main():
     kafka_sasl_mechanism   = cfg(cp, 'kafka', 'sasl_mechanism',    'KAFKA_SASL_MECHANISM',    '')
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
     kafka_sasl_password    = cfg(cp, 'kafka', 'sasl_password',     'KAFKA_SASL_PASSWORD',     '')
-
-    setup_logging(log_level)
 
     logger.info("="*60)
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")

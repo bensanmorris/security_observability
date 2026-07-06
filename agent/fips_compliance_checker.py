@@ -80,7 +80,7 @@ def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsCompliance
         if hash_alg is not None:
             hash_name = hash_alg.name.lower()
     except Exception:
-        pass
+        pass  # nosec B110 - hash_name stays 'unknown', flagged as a violation below, not swallowed
 
     if hash_name == 'unknown':
         violations.append("Could not determine signature hash algorithm")

@@ -1,0 +1,95 @@
+# Safety CLI policy file for cert-analyzer.
+#
+# Used by `safety check -r requirements.txt --policy-file .safety-policy.yml`
+# in .github/workflows/ci.yml. Any vulnerability NOT listed below fails CI —
+# this file only documents vulnerabilities that are currently known, reviewed,
+# and deliberately deferred rather than upgraded immediately. It is not a
+# blanket exemption: each entry has a specific, checked reason, and an expiry
+# date that forces a re-review rather than letting an ignore go stale forever.
+#
+# cryptography==41.0.7 and protobuf==4.25.3 are both several versions behind
+# their patched releases (cryptography needs 42.0-46.x depending on the CVE;
+# protobuf needs 4.25.8+ or 5.29.6+). Upgrading is the real fix and is tracked
+# as separate follow-up work, since protobuf 5.x has known generated-code
+# breaking changes and both are security-sensitive parsing libraries that
+# deserve a dedicated, tested upgrade rather than a drive-by version bump here.
+security:
+    ignore-unpinned-requirements: True  # psutil and kubernetes are deliberately unpinned
+    ignore-cvss-severity-below: 0
+    ignore-cvss-unknown-severity: False
+    ignore-vulnerabilities:
+        # -- cryptography 41.0.7 --------------------------------------------
+        65647: # CVE PVE-2024-65647 -- DoS via unbounded name-constraint checks during X.509 path validation
+            reason: >-
+                Real exposure: the analyzer does perform self-signed/chain checks
+                (verify_directly_issued_by, chain-length/missing-intermediate
+                detection) against certs read from arbitrary host paths. Prioritize
+                the cryptography upgrade over other entries in this list.
+            expires: '2026-10-04'
+        65212: # CVE-2023-6129 -- POLY1305 MAC flaw on PowerPC CPUs
+            reason: "Not applicable: x86_64 target only, and this app performs no MAC operations."
+            expires: '2026-10-04'
+        71681: # CVE-2024-4603 -- DSA key-check DoS via direct EVP_PKEY_param_check/EVP_PKEY_public_check calls
+            reason: "Not applicable: this app never calls these DSA check functions directly."
+            expires: '2026-10-04'
+        65510: # CVE-2023-5678 -- DH key generation/verification DoS with overly long parameters
+            reason: "Not applicable: this app never generates or verifies DH keys."
+            expires: '2026-10-04'
+        SFTY-20240205-03700: # CVE-2023-50782 -- RSA decrypt timing oracle (Marvin attack) in TLS servers
+            reason: "Not applicable: this app is not a TLS server and never performs RSA decryption."
+            expires: '2026-10-04'
+        71684: # CVE-2024-2511 -- unbounded memory growth in TLSv1.3 sessions on TLS servers
+            reason: "Not applicable: advisory explicitly states TLS clients are not affected, and this app never runs as a TLS server."
+            expires: '2026-10-04'
+        66777: # CVE-2023-6237 -- slow validation of excessively long RSA public keys (DoS)
+            reason: >-
+                Low relevance: this app does parse RSA keys from untrusted host
+                files/probed endpoints, so an oversized key could cause a slow
+                validation, but this is a much smaller-scale DoS surface (bounded
+                by per-file/per-endpoint processing) than the cryptography-upgrade
+                work already tracked via #65647 above.
+            expires: '2026-10-04'
+        SFTY-20260327-04621: # CVE-2026-34073 -- incomplete DNS name-constraint enforcement on peer names
+            reason: >-
+                Not applicable: this app never uses hostname/name-constraint
+                verification for access-control decisions -- TLS probes run with
+                check_hostname=False (inventory only, not authentication), and
+                file-based cert inventory doesn't gate access on hostname matching.
+            expires: '2026-10-04'
+        86217: # CVE-2026-26007 -- missing prime-order subgroup validation for SECT elliptic-curve public keys
+            reason: >-
+                Real exposure: the analyzer does call load_der_x509_certificate/
+                load_pem_x509_certificate on arbitrary, potentially attacker-
+                influenced certs (host filesystem, TLS probes). Prioritize the
+                cryptography upgrade over other entries in this list.
+            expires: '2026-10-04'
+        66704: # CVE-2024-26130 -- NULL pointer deref in pkcs12.serialize_key_and_certificates
+            reason: "Not applicable: this app only ever loads/reads PKCS12 files, never serializes/writes them."
+            expires: '2026-10-04'
+        73711: # PVE-2024-73711 -- generic advisory covering cryptography's vendored OpenSSL CVEs
+            reason: >-
+                Broad/generic catch-all advisory rather than a specific exploit
+                path against this app's usage; tracked as part of the same
+                cryptography upgrade as the other entries in this list.
+            expires: '2026-10-04'
+        71680: # CVE-2024-0727 -- NULL pointer dereference (process crash) loading a malformed PKCS12 file
+            reason: >-
+                Real exposure -- the highest-priority entry in this list. The
+                analyzer calls load_pkcs12() directly on untrusted PKCS12/.p12/.pfx
+                files found on the host filesystem, and a NULL pointer
+                dereference is a native crash that no Python try/except can catch.
+                Prioritize the cryptography upgrade.
+            expires: '2026-10-04'
+        # -- protobuf 4.25.3 --------------------------------------------------
+        85151: # CVE-2026-0994 -- DoS via missing recursion-depth accounting when parsing protobuf messages
+            reason: >-
+                Moderate relevance: Tetragon's gRPC event stream is the only
+                protobuf message source, and Tetragon is a trusted, privileged
+                local co-process -- exploitation requires Tetragon itself to
+                already be compromised. Defense-in-depth gap, not directly
+                attacker-reachable from outside the node.
+            expires: '2026-10-04'
+        77740: # CVE-2025-4565 -- DoS via unbounded recursion parsing protobuf messages
+            reason: "Same reasoning as CVE-2026-0994 (85151) above -- same recursion-DoS class, same trust boundary."
+            expires: '2026-10-04'
+    continue-on-vulnerability-error: False
