@@ -125,6 +125,40 @@ python3 extras/kafka/view_kafka_messages.py --host localhost --port 9092 --topic
 It reads whatever's already on the topic and exits after 5s of no new
 messages (or Ctrl-C to stop early).
 
+### Certificate chain lengths
+
+`list_cert_chains.py` groups discovery events by `path` and reports how
+many certificates were found at each path (leaf, intermediates, root),
+ordered by `cert_index`:
+
+```bash
+python3 extras/kafka/list_cert_chains.py --host localhost --port 9092 --topic cert-analyzer-events
+```
+
+Since Kafka only receives *first-time* discoveries, a chain whose
+intermediates were already known before Kafka was enabled will show up as
+incomplete — the script flags this with a gap note rather than guessing.
+
+Separately, the script also flags a real chain-of-trust problem: any
+non-root cert in a bundle whose issuer doesn't match any other cert's
+subject in that same bundle, i.e. the file itself — not just the Kafka
+topic — is missing an intermediate. This is the "server forgot to include
+its intermediate CA" misconfiguration, and shows up per-path as a `⚠
+missing intermediate` line plus a summary at the end.
+
+To generate a test case for it:
+
+```bash
+python3 extras/test_analyzer.py   # also (re)generates broken-chain-missing-intermediate.crt
+sudo cp test-certs/broken-chain-missing-intermediate.crt /etc/pki/tls/certs/
+cat /etc/pki/tls/certs/broken-chain-missing-intermediate.crt > /dev/null  # trigger detection
+```
+
+`generate_broken_chain()` in `test_analyzer.py` builds a real root ->
+intermediate -> leaf chain, signs the leaf with the intermediate, then
+writes out only the leaf and root — discarding the intermediate — so the
+bundle looks like a server that forgot to ship it.
+
 ---
 
 ## View the data in a browser (Kafdrop)

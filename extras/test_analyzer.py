@@ -208,6 +208,80 @@ def generate_test_pkcs12(days_valid: int, output_path: str, cn: str = None, pass
     print(f"           Password: {password}")
 
 
+def generate_broken_chain(output_path: str, cn: str = None, root_cn: str = None, intermediate_cn: str = None):
+    """
+    Builds a 3-tier chain (root CA -> intermediate CA -> leaf) but writes only
+    the leaf and root certificates to output_path -- the intermediate signs
+    the leaf and is then discarded rather than written out. Simulates a
+    server misconfigured to serve an incomplete chain, for testing
+    cert-analyzer's/list_cert_chains.py's missing-intermediate detection.
+    """
+    if cn is None:
+        cn = "broken-chain.example.com"
+    if root_cn is None:
+        root_cn = "Test Root CA"
+    if intermediate_cn is None:
+        intermediate_cn = "Test Intermediate CA"
+
+    root_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    root_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, root_cn)])
+    root_cert = (
+        x509.CertificateBuilder()
+        .subject_name(root_subject).issuer_name(root_subject)
+        .public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.utcnow())
+        .not_valid_after(datetime.utcnow() + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(root_key, hashes.SHA256())
+    )
+
+    intermediate_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    intermediate_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, intermediate_cn)])
+    intermediate_cert = (
+        x509.CertificateBuilder()
+        .subject_name(intermediate_subject).issuer_name(root_subject)
+        .public_key(intermediate_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.utcnow())
+        .not_valid_after(datetime.utcnow() + timedelta(days=1825))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(root_key, hashes.SHA256())
+    )
+
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_subject).issuer_name(intermediate_subject)  # signed by the omitted intermediate
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.utcnow())
+        .not_valid_after(datetime.utcnow() + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+        .sign(intermediate_key, hashes.SHA256())
+    )
+
+    # Intentionally omit the intermediate cert from the bundle -- that's the
+    # scenario under test. Order matches how a real misconfigured server
+    # would present it: leaf first, then whatever's left of the chain.
+    with open(output_path, "wb") as f:
+        f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+        f.write(root_cert.public_bytes(serialization.Encoding.PEM))
+
+    key_path = output_path.replace('.crt', '.key')
+    with open(key_path, "wb") as f:
+        f.write(leaf_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+
+    print(f"Generated: {output_path}")
+    print(f"           Leaf CN={cn}, issuer='{intermediate_cn}' (omitted), root='{root_cn}' (included)")
+    print(f"           Intermediate '{intermediate_cn}' deliberately left out of the bundle")
+
+
 if __name__ == '__main__':
     # Create test-certs directory in current repo
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -264,6 +338,12 @@ if __name__ == '__main__':
     for filename, days, cn in pkcs12_cases:
         generate_test_pkcs12(days, os.path.join(test_dir, filename), cn)
         print()
+
+    print("="*60)
+    print("Generating a chain with a missing intermediate...")
+    print("="*60)
+    generate_broken_chain(os.path.join(test_dir, "broken-chain-missing-intermediate.crt"))
+    print()
 
     print("="*60)
     print("\nTo test the analyzer:")
