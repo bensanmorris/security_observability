@@ -133,7 +133,7 @@ def _get_best_family(address, port):
 
 
 def start_metrics_server(port: int, min_scrape_interval_seconds: float,
-                          addr: str = '0.0.0.0', registry=REGISTRY):
+                          addr: str = '0.0.0.0', registry=REGISTRY):  # nosec B104 - Prometheus scrape endpoint must be reachable off-pod; no sensitive data served
     """
     Starts the Prometheus /metrics WSGI server as a daemon thread.
 

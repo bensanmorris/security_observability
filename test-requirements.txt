@@ -16,4 +16,4 @@ psutil>=5.9.0
 # Optional: Kafka event publishing — included here so Kafka tests run in CI
 # without needing to install it separately. The analyzer itself degrades
 # gracefully if this package is absent at runtime.
-kafka-python==2.0.2
+kafka-python==2.0.3

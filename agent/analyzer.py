@@ -352,7 +352,7 @@ class CertificateAnalyzer:
                 logger.debug(f"Not a valid JKS keystore: {cert_path}")
                 return []
             except Exception:
-                continue
+                continue  # nosec B112 - trying the next candidate password, not swallowing a real error
 
         if ks is None:
             logger.warning(
@@ -439,7 +439,7 @@ class CertificateAnalyzer:
                 )
                 break
             except Exception:
-                continue
+                continue  # nosec B112 - trying the next candidate password, not swallowing a real error
 
         if p12 is None:
             logger.warning(
@@ -529,7 +529,7 @@ class CertificateAnalyzer:
                 cert = x509.load_der_x509_certificate(cert_data, default_backend())
                 return [cert]
             except Exception:
-                pass
+                pass  # nosec B110 - neither PEM (logged above) nor DER matched; return [] below, not a hidden error
 
             return []
 
@@ -683,6 +683,9 @@ class CertificateAnalyzer:
             # cryptography < 40: Name.__eq__ does proper attribute-set comparison.
             is_self_signed = cert.subject == cert.issuer
         except Exception:
+            # nosec B110 - verify_directly_issued_by() raises whenever the cert
+            # isn't (directly) self-signed; that's the expected negative case,
+            # not an error, so is_self_signed correctly stays False.
             pass
 
         # Compute SHA-256 of DER-encoded certificate when enabled.
@@ -1551,7 +1554,7 @@ class CertificateAnalyzer:
                     m = ip_pat.search(lines[j])
                     if m:
                         ip = m.group(1)
-                        if not ip.startswith('127.') and ip != '0.0.0.0':
+                        if not ip.startswith('127.') and ip != '0.0.0.0':  # nosec B104 - comparing an observed process's bind address, not binding our own socket
                             return ip
         return None
 
@@ -1564,7 +1567,7 @@ class CertificateAnalyzer:
         back to 127.0.0.1 for bare-metal deployments where the process
         is in the host network namespace.
         """
-        if bind_addr and bind_addr not in ('0.0.0.0', '::', ''):
+        if bind_addr and bind_addr not in ('0.0.0.0', '::', ''):  # nosec B104 - comparing an observed process's bind address, not binding our own socket
             return bind_addr
         ip = None
         try:
@@ -1674,14 +1677,14 @@ class CertificateAnalyzer:
         node_name = event.node_name
 
         port = 0
-        bind_addr = '0.0.0.0'
+        bind_addr = '0.0.0.0'  # nosec B104 - default for an observed process's bind event, not binding our own socket
 
         if fn == 'security_socket_bind':
             # arg[0]=sock (socket struct), arg[1]=sockaddr_arg (address being bound)
             for arg in kprobe.args:
                 if arg.HasField('sockaddr_arg') and arg.sockaddr_arg.port:
                     port = arg.sockaddr_arg.port
-                    bind_addr = arg.sockaddr_arg.addr or '0.0.0.0'
+                    bind_addr = arg.sockaddr_arg.addr or '0.0.0.0'  # nosec B104 - observed process's bind address, not binding our own socket
                     break
 
         elif fn == 'sys_bind':

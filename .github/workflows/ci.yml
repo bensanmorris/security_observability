@@ -56,16 +56,26 @@ jobs:
     - name: Install security tools
       run: |
         pip install bandit safety
-    
+
     - name: Run Bandit security scan
+      # No `|| true`: every current finding is either fixed or has a specific,
+      # reasoned `# nosec BXXX` annotation at its call site (see agent/*.py) --
+      # a new, un-annotated finding should fail the build.
       run: |
-        bandit -r cert_analyzer.py agent/ -f json -o bandit-report.json || true
-        bandit -r cert_analyzer.py agent/ || true
-    
+        bandit -r cert_analyzer.py agent/ -f json -o bandit-report.json
+        bandit -r cert_analyzer.py agent/
+
     - name: Check dependencies for vulnerabilities
+      # Scans only requirements.txt (the actual shipped runtime dependencies),
+      # not the ambient environment -- otherwise this also reports on bandit's/
+      # safety's own transitive dependencies (nltk, filelock, requests, ...),
+      # which never ship in the production container and aren't this
+      # project's to fix. .safety-policy.yml documents, with a dated reason
+      # each, the currently-known CVEs in pinned deps that are deferred
+      # pending a tested cryptography/protobuf upgrade -- anything not listed
+      # there fails the build. No `|| true`.
       run: |
-        pip install -r test-requirements.txt
-        safety check || true
+        safety check -r requirements.txt --policy-file .safety-policy.yml
 
   test:
     name: Test (Python ${{ matrix.python-version }})
