@@ -79,7 +79,15 @@ class LRUCache:
                     evicted = (evicted_key, evicted_value)
                 self._store[key] = value
         if evicted is not None and self._on_evict is not None:
-            self._on_evict(*evicted)
+            try:
+                self._on_evict(*evicted)
+            except Exception:
+                # The store mutation above already committed, so on_set below
+                # must still run regardless -- otherwise a broken on_evict
+                # silently skips on_set, leaving a caller's secondary index
+                # (e.g. CertificateAnalyzer._known_paths) unaware of a key
+                # that's actually present in the store.
+                logger.error(f"on_evict callback failed for {evicted[0]!r}", exc_info=True)
         if self._on_set is not None:
             self._on_set(key, value)
 
