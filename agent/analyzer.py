@@ -443,8 +443,25 @@ class CertificateAnalyzer:
         return certificates
 
     def parse_certificates(self, cert_path: str) -> List[x509.Certificate]:
-        """Parse ALL X.509 certificates from a file (supports PEM, DER, JKS, and PKCS12)"""
+        """
+        Parse ALL X.509 certificates from a file (supports PEM, DER, JKS, and PKCS12)
+
+        cert_path comes straight from a Tetragon-reported file path, filtered
+        only by extension — nothing upstream checks the actual filesystem
+        entry type. This is the single entry point all three format branches
+        below go through before opening the file (JKS via jks.KeyStore.load,
+        PKCS12 and PEM/DER via plain open()), so one is_file() guard here
+        protects all of them from blocking on a FIFO with no writer (open()
+        on a FIFO blocks indefinitely per POSIX named-pipe semantics) — this
+        runs on the single-threaded event-consumer loop for every new small
+        file, so a block here hangs cert event processing entirely. See
+        _count_pem_certs for the same guard on the large-file routing check.
+        """
         suffix = Path(cert_path).suffix.lower()
+
+        if not Path(cert_path).is_file():
+            logger.debug(f"Skipping non-regular-file cert path: {cert_path}")
+            return []
 
         if suffix in self.JKS_EXTENSIONS:
             return self.parse_jks_certificates(cert_path)
@@ -719,9 +736,22 @@ class CertificateAnalyzer:
         JKS/PKCS12 keystores go through a dedicated decoder either way and
         aren't pre-counted here — always treated as small enough to process
         inline, since large multi-cert files in practice are PEM bundles.
+
+        cert_path comes straight from a Tetragon-reported file path, filtered
+        only by extension (is_cert_path) — nothing upstream checks the actual
+        filesystem entry type. open() on a FIFO with no writer blocks
+        indefinitely (standard POSIX named-pipe semantics), and this runs on
+        the single-threaded event-consumer loop, so any unprivileged process
+        on the node creating e.g. `mkfifo x.pem` would otherwise hang cert
+        event processing forever. is_file() safely returns False for FIFOs/
+        sockets/devices (even through a symlink) via a non-blocking stat()
+        call, and swallows OSError, so it's the same guard periodic_scan
+        already applies before ever reaching a background-thread path.
         """
         suffix = Path(cert_path).suffix.lower()
         if suffix in self.JKS_EXTENSIONS or suffix in self.PKCS12_EXTENSIONS:
+            return 0
+        if not Path(cert_path).is_file():
             return 0
         try:
             with open(cert_path, 'rb') as f:

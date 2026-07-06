@@ -219,10 +219,35 @@ class TestMultiCertificateParsing:
         bundle_path = os.path.join(temp_dir, "empty.pem")
         with open(bundle_path, 'w') as f:
             f.write("")
-        
+
         certs = analyzer.parse_certificates(bundle_path)
 
         assert len(certs) == 0
+
+    def test_parse_certificates_skips_fifo(self, analyzer, temp_dir):
+        """
+        parse_certificates must not block on a FIFO with no writer -- open()
+        on a named pipe blocks indefinitely per POSIX semantics, and
+        cert_path here comes straight from a Tetragon-reported path filtered
+        only by extension, so any unprivileged process creating e.g.
+        `mkfifo x.pem` would otherwise hang the single-threaded event
+        consumer forever. Runs the call on a background thread with a
+        timeout so a regression fails fast instead of hanging the test run.
+        """
+        fifo_path = os.path.join(temp_dir, "pipe.pem")
+        os.mkfifo(fifo_path)
+
+        result = {}
+
+        def _call():
+            result['certs'] = analyzer.parse_certificates(fifo_path)
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+
+        assert not t.is_alive(), "parse_certificates blocked on a FIFO with no writer"
+        assert result.get('certs') == []
 
 
 class TestLargeFileBackgroundProcessing:
@@ -262,6 +287,31 @@ class TestLargeFileBackgroundProcessing:
         TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
 
         assert analyzer._count_pem_certs(bundle_path) == 5
+
+    def test_count_pem_certs_skips_fifo(self, analyzer, temp_dir):
+        """
+        _count_pem_certs must not block on a FIFO with no writer -- open()
+        on a named pipe blocks indefinitely per POSIX semantics, and this
+        runs on the single-threaded event-consumer loop, so any unprivileged
+        process on the node creating e.g. `mkfifo x.pem` would otherwise
+        hang cert event processing forever. Runs the call on a background
+        thread with a timeout so a regression fails fast instead of hanging
+        the test run.
+        """
+        fifo_path = os.path.join(temp_dir, "pipe.pem")
+        os.mkfifo(fifo_path)
+
+        result = {}
+
+        def _call():
+            result['count'] = analyzer._count_pem_certs(fifo_path)
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+
+        assert not t.is_alive(), "_count_pem_certs blocked on a FIFO with no writer"
+        assert result.get('count') == 0
 
     def test_count_pem_certs_default_byte_cap(self, analyzer):
         """Default _large_file_byte_cap is 2MB unless overridden"""
