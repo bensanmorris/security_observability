@@ -127,6 +127,24 @@ class CertificateAnalyzer:
         # cert entry itself may never be evicted. See _record_cert_process_access.
         self._max_processes_per_cert = max_processes_per_cert
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
+        self.metrics.config_info.labels(node_name=_NODE_NAME).info({
+            'checksum_enabled':                  str(checksum_enabled).lower(),
+            'demo_mode':                         str(demo_mode).lower(),
+            'fips_compliance_enabled':            str(fips_compliance_enabled).lower(),
+            'filter_self_events':                str(filter_self_events).lower(),
+            'event_rate_metrics_enabled':         str(event_rate_metrics_enabled).lower(),
+            'bind_probe_enabled':                 str(bind_probe_enabled).lower(),
+            'connect_probe_enabled':              str(connect_probe_enabled).lower(),
+            'port_probe_timeout':                 str(port_probe_timeout),
+            'port_probe_connect_delay':            str(port_probe_connect_delay),
+            'tls_outbound_ports':                  ','.join(str(p) for p in sorted(self._tls_outbound_ports)),
+            'large_file_cert_threshold':           str(large_file_cert_threshold),
+            'large_file_metrics_cap':              str(large_file_metrics_cap),
+            'large_file_byte_cap':                 str(large_file_byte_cap),
+            'max_concurrent_background_threads':   str(max_concurrent_background_threads),
+            'max_processes_per_cert':              str(max_processes_per_cert),
+            'alert_threshold_days':                str(alert_threshold_days),
+        })
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
         # entry in known_certs (which used to cost real, sustained CPU once the

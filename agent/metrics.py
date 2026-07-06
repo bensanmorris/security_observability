@@ -350,6 +350,15 @@ class PrometheusMetrics:
             'tetragon_build_version': TETRAGON_BUILD_VERSION,
         })
 
+        # Static analyzer config — populated by CertificateAnalyzer.__init__
+        # once it knows its own resolved options, not here, since this class
+        # is constructed before config parsing happens.
+        self.config_info = Info(
+            'cert_analyzer_config',
+            'Static, performance-relevant analyzer configuration options',
+            ['node_name'],
+        )
+
         # Registered directly with the registry rather than stored as a Gauge
         # attribute: its value is computed at scrape time (see collect()
         # above), not set imperatively like the other metrics here.
