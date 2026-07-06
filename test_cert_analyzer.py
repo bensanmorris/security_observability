@@ -219,10 +219,35 @@ class TestMultiCertificateParsing:
         bundle_path = os.path.join(temp_dir, "empty.pem")
         with open(bundle_path, 'w') as f:
             f.write("")
-        
+
         certs = analyzer.parse_certificates(bundle_path)
 
         assert len(certs) == 0
+
+    def test_parse_certificates_skips_fifo(self, analyzer, temp_dir):
+        """
+        parse_certificates must not block on a FIFO with no writer -- open()
+        on a named pipe blocks indefinitely per POSIX semantics, and
+        cert_path here comes straight from a Tetragon-reported path filtered
+        only by extension, so any unprivileged process creating e.g.
+        `mkfifo x.pem` would otherwise hang the single-threaded event
+        consumer forever. Runs the call on a background thread with a
+        timeout so a regression fails fast instead of hanging the test run.
+        """
+        fifo_path = os.path.join(temp_dir, "pipe.pem")
+        os.mkfifo(fifo_path)
+
+        result = {}
+
+        def _call():
+            result['certs'] = analyzer.parse_certificates(fifo_path)
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+
+        assert not t.is_alive(), "parse_certificates blocked on a FIFO with no writer"
+        assert result.get('certs') == []
 
 
 class TestLargeFileBackgroundProcessing:
@@ -262,6 +287,99 @@ class TestLargeFileBackgroundProcessing:
         TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
 
         assert analyzer._count_pem_certs(bundle_path) == 5
+
+    def test_count_pem_certs_skips_fifo(self, analyzer, temp_dir):
+        """
+        _count_pem_certs must not block on a FIFO with no writer -- open()
+        on a named pipe blocks indefinitely per POSIX semantics, and this
+        runs on the single-threaded event-consumer loop, so any unprivileged
+        process on the node creating e.g. `mkfifo x.pem` would otherwise
+        hang cert event processing forever. Runs the call on a background
+        thread with a timeout so a regression fails fast instead of hanging
+        the test run.
+        """
+        fifo_path = os.path.join(temp_dir, "pipe.pem")
+        os.mkfifo(fifo_path)
+
+        result = {}
+
+        def _call():
+            result['count'] = analyzer._count_pem_certs(fifo_path)
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+
+        assert not t.is_alive(), "_count_pem_certs blocked on a FIFO with no writer"
+        assert result.get('count') == 0
+
+    def test_count_pem_certs_default_byte_cap(self, analyzer):
+        """Default _large_file_byte_cap is 2MB unless overridden"""
+        assert analyzer._large_file_byte_cap == 2 * 1024 * 1024
+
+    def test_count_pem_certs_respects_byte_cap(self, analyzer, temp_dir):
+        """
+        _count_pem_certs only reads/counts the first _large_file_byte_cap
+        bytes -- markers beyond the cap must not be counted, since the whole
+        point of the cap is to bound the read regardless of how many more
+        markers a bigger file might contain past that point.
+        """
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "capped_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        with open(bundle_path, 'rb') as f:
+            data = f.read()
+
+        marker = b'-----BEGIN CERTIFICATE-----'
+        # Offset of the 3rd marker -- capping the read here means only the
+        # first 2 certs' markers are visible.
+        offset = data.index(marker)
+        offset = data.index(marker, offset + 1)
+        offset = data.index(marker, offset + 1)
+
+        analyzer._large_file_byte_cap = offset
+        assert analyzer._count_pem_certs(bundle_path) == 2
+
+        # Sanity check: with a cap covering the whole file, all 5 are counted.
+        analyzer._large_file_byte_cap = len(data)
+        assert analyzer._count_pem_certs(bundle_path) == 5
+
+    def test_byte_cap_can_undercount_and_misroute_large_bundle(self, analyzer, temp_dir):
+        """
+        Documents the accepted tradeoff of the byte-cap approach: if a bundle's
+        markers are spread out past the cap, _count_pem_certs undercounts and
+        the file is routed synchronously even though it actually exceeds
+        _large_file_cert_threshold. Real-world CA bundles are far smaller than
+        the default 2MB cap (see cert-analyzer.conf), so this only matters if
+        the cap is configured too small for the certs actually being scanned.
+        """
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "misrouted_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        with open(bundle_path, 'rb') as f:
+            data = f.read()
+        marker = b'-----BEGIN CERTIFICATE-----'
+        offset = data.index(marker)
+        offset = data.index(marker, offset + 1)
+        offset = data.index(marker, offset + 1)
+
+        # Cap only reveals 2 markers -- under the threshold of 3, even though
+        # the file actually contains 5 certs.
+        analyzer._large_file_byte_cap = offset
+        assert analyzer._count_pem_certs(bundle_path) == 2
+
+        analyzer.process_event(self._make_event(bundle_path))
+
+        # Processed synchronously (not routed to the background-thread path)
+        # despite exceeding the threshold, because the byte cap hid the rest.
+        assert bundle_path not in analyzer._large_file_in_flight
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
 
     def test_small_file_processed_synchronously(self, analyzer, temp_dir):
         """A file at or below the threshold is processed inline, no background thread"""
@@ -665,6 +783,58 @@ class TestPeriodicScan:
 
         assert analyze_calls == [], "a path already claimed by another thread must not be re-parsed"
         analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_large_file_in_flight_prevents_event_path_reparsing_file_claimed_by_async_path(
+        self, analyzer, temp_dir
+    ):
+        """
+        Cross-mechanism race: if the background-thread path has already claimed
+        a brand-new path (_large_file_in_flight), a concurrent Tetragon event
+        for the same path -- even one whose _count_pem_certs verdict would
+        route it synchronously -- must not also parse/publish it. Without
+        checking both in-flight sets under one shared lock, both mechanisms
+        would independently write known_certs[same_key] = <a different
+        CertificateInfo instance each>, and LRUCache.__setitem__ never fires
+        on_evict for a same-key overwrite, so the first write's Prometheus
+        series would never get cleaned up.
+        """
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy3.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy3.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer._large_file_in_flight.add(cert_path)  # simulate the async path already claiming it
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.process_event(self._make_event(cert_path))
+
+        assert analyze_calls == [], "a path claimed by the async path must not also be parsed synchronously"
+        analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_new_file_in_flight_prevents_async_path_reparsing_file_claimed_by_event_path(
+        self, analyzer, temp_dir
+    ):
+        """Mirrored: a path already claimed by the synchronous path must block the background-thread path too."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy4.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy4.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer._new_file_in_flight.add(cert_path)  # simulate the sync path already claiming it
+        analyzer._start_background_thread = Mock(return_value=True)
+
+        analyzer._process_certificate_file_async(cert_path, "test", 1, "", None, "", 0, "")
+
+        analyzer._start_background_thread.assert_not_called()
 
     def test_new_file_in_flight_cleared_after_periodic_scan_completes(self, analyzer, temp_dir):
         """_new_file_in_flight must not leak an entry once periodic_scan finishes with a path."""
@@ -2072,6 +2242,23 @@ class TestLRUCache:
         cache.clear()
         assert len(cache) == 0
 
+    def test_clear_fires_on_evict_for_every_entry(self):
+        """
+        clear() must fire on_evict for every entry it removes, same as
+        discard()/__delitem__ -- otherwise a caller maintaining a secondary
+        index or metrics off on_evict (e.g. CertificateAnalyzer's
+        _known_paths) is left with ghost entries for everything that was
+        cached at the moment of the clear.
+        """
+        evicted = []
+        cache = LRUCache(maxsize=10_000, on_evict=lambda k, v: evicted.append((k, v)))
+        for i in range(5):
+            cache[str(i)] = i
+
+        cache.clear()
+
+        assert sorted(evicted) == [(str(i), i) for i in range(5)]
+
     def test_get_with_default(self):
         """get() returns default when key is absent."""
         cache = LRUCache(maxsize=10_000)
@@ -2222,6 +2409,28 @@ class TestKnownCertsIndex:
         assert target.unique_key not in analyzer.known_certs
         assert target.path not in analyzer._known_paths, \
             "evicted cert's path must be removed from the index, not left stale"
+
+    def test_index_cleaned_up_on_known_certs_clear(self, analyzer, temp_dir):
+        """
+        known_certs.clear() must also fire _deindex_known_cert for every
+        entry it removes, same as LRU eviction — otherwise _known_paths would
+        retain a ghost entry for every previously-cached cert, making
+        process_event believe those paths are still known (and skip
+        re-parsing them) even though known_certs has forgotten them.
+        """
+        cert, _ = TestCertificateGeneration.generate_certificate("cleared.example.com", 365)
+        path = os.path.join(temp_dir, "cleared.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+        assert path in analyzer._known_paths
+
+        analyzer.known_certs.clear()
+
+        assert len(analyzer.known_certs) == 0
+        assert path not in analyzer._known_paths, \
+            "clear() must not leave a ghost _known_paths entry for a cert no longer cached"
 
     def test_index_ignores_entries_without_a_path(self, analyzer):
         """
@@ -3774,6 +3983,104 @@ import grpc
 from tetragon import sensors_pb2_grpc
 
 
+def _starve_side_monitor_intervals(monkeypatch):
+    """
+    start() unconditionally spawns three sub-monitor threads (version,
+    policy, process-metrics) as a side effect, in addition to its own main
+    reconnect loop -- regardless of how quickly that main loop itself exits.
+    Each defaults to a real, non-zero interval (300s/60s/15s), so once
+    spawned it's already blocked in a genuine time.sleep() call almost
+    immediately -- unlike the zero-interval cases _stop_daemon_loop_thread
+    handles, patching time.sleep afterward can't preempt a sleep call
+    that's already in progress, so these threads can't be stopped once
+    started.
+
+    The 15s process-metrics-monitor default is short enough to plausibly
+    fire again during a longer suite run. Call this *before* starting
+    analyzer.start() to push all three defaults out to a value they'll
+    never actually reach again during a test, so any leaked sub-monitor
+    thread stays harmlessly parked in its first sleep call instead of
+    periodically calling real, psutil-backed code that can race with a
+    later test's mock.patch('builtins.open', ...) -- the same accepted
+    pattern already used by test_version_monitor_thread_is_daemon /
+    test_process_metrics_monitor_thread_is_daemon.
+    """
+    monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '9999')
+    monkeypatch.setenv('TETRAGON_POLICY_CHECK_INTERVAL', '9999')
+    monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '9999')
+
+
+def _stop_daemon_loop_thread(thread, monkeypatch, timeout=2.0):
+    """
+    Force a background monitor/reconnect-loop thread to exit, then join it
+    with a timeout so it's guaranteed dead before the test returns.
+
+    _start_version_monitor, _start_process_metrics_monitor, and start()'s own
+    reconnect loop are all `while True: time.sleep(interval); try: ... except
+    Exception: ...` -- time.sleep() sits outside the try/except in every one
+    of them, so making it raise KeyboardInterrupt escapes uncaught (it isn't
+    an Exception subclass) and ends the thread; start()'s reconnect loop
+    already treats KeyboardInterrupt as its own intended shutdown signal.
+
+    Without this, these zero-interval / no-op-sleep test threads are left
+    spinning as daemons for the rest of the pytest process: once monkeypatch
+    reverts this test's own mocks at teardown, they fall back to calling the
+    *real* underlying method (e.g. psutil-backed update_process_metrics,
+    which reads /proc via plain open() calls) in a tight loop -- which can
+    race with any later test's mock.patch('builtins.open', ...) and cause
+    intermittent, hard-to-reproduce failures there (observed in
+    TestPortProbe::test_fib_trie_returns_container_ip).
+
+    threading.excepthook is temporarily quieted for this specific,
+    expected KeyboardInterrupt so it doesn't print a traceback that looks
+    like a real failure in test output.
+    """
+    original_hook = _threading.excepthook
+
+    def _quiet_hook(args):
+        if args.exc_type is KeyboardInterrupt:
+            return
+        original_hook(args)
+
+    monkeypatch.setattr(_threading, 'excepthook', _quiet_hook)
+
+    def _raise(*_args, **_kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(_time, 'sleep', _raise)
+    thread.join(timeout=timeout)
+    assert not thread.is_alive(), f"{thread.name or thread} did not stop within {timeout}s"
+
+
+def _capture_started_thread(monkeypatch, start_fn, thread_name):
+    """
+    Call start_fn() (e.g. lambda: analyzer._start_version_monitor(stub)) with
+    threading.Thread patched to record every thread it constructs, and
+    return the one matching thread_name.
+
+    Searching for the thread by name *after* calling start_fn via
+    threading.enumerate() risks grabbing a stale same-named thread left over
+    from an earlier test that can never actually be stopped this way (e.g.
+    one still parked in a real multi-thousand-second time.sleep because its
+    interval was never 0) instead of the one this call just created --
+    _stop_daemon_loop_thread's join would then time out and fail on a
+    thread that was never the one under test.
+    """
+    original_thread = _threading.Thread
+    captured = []
+
+    def _capture(*args, **kwargs):
+        t = original_thread(*args, **kwargs)
+        captured.append(t)
+        return t
+
+    monkeypatch.setattr(_threading, 'Thread', _capture)
+    start_fn()
+    matches = [t for t in captured if t.name == thread_name]
+    assert matches, f"no thread named {thread_name!r} was started"
+    return matches[-1]
+
+
 class _StreamingStub:
     """
     Mock stub that simulates the full GetEvents streaming lifecycle.
@@ -3868,24 +4175,33 @@ class TestReconnection:
 
         stub = _ConnectingStub()
 
-        # Patch channel creation to return our stub
-        import cert_analyzer as _ca
+        # Patch channel creation to return our stub. Returns a Mock rather
+        # than None so start()'s `finally: channel.close()` (now actually
+        # exercised once _stop_daemon_loop_thread below drives a real
+        # shutdown) doesn't raise AttributeError.
+        from unittest.mock import Mock
 
         def _mock_insecure_channel(*a, **kw):
-            return None
+            return Mock()
 
         monkeypatch.setattr(grpc, 'insecure_channel', _mock_insecure_channel)
         monkeypatch.setattr(
             sensors_pb2_grpc, 'FineGuidanceSensorsStub',
             lambda ch: stub,
         )
+        _starve_side_monitor_intervals(monkeypatch)
 
         t = _threading.Thread(target=analyzer.start, daemon=True)
         t.start()
         connected.wait(timeout=2.0)
 
         assert analyzer.metrics.analyzer_healthy.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
-        stopped.set()
+
+        # Patch time.sleep to raise before GetEvents can even be released --
+        # stopped.wait()'s own 1.0s timeout lets it proceed to raise
+        # regardless, so there's no window where a real time.sleep(5) retry
+        # backoff could run before the patched version takes effect.
+        _stop_daemon_loop_thread(t, monkeypatch)
 
     def test_healthy_metric_set_to_0_on_disconnect(self, analyzer, monkeypatch):
         """
@@ -3909,12 +4225,17 @@ class TestReconnection:
             def GetVersion(self_, request, timeout=None):
                 return _MockGetVersionResponse('v1.1.0')
 
-        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: None)
+        # Mock rather than None so start()'s `finally: channel.close()` (now
+        # actually exercised once _stop_daemon_loop_thread below drives a
+        # real shutdown) doesn't raise AttributeError.
+        from unittest.mock import Mock
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: Mock())
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
                             lambda ch: _DisconnectingStub())
         # Patch sleep on the cert_analyzer module so the retry backoff is instant
         import cert_analyzer as _ca
         monkeypatch.setattr(_ca.time, 'sleep', lambda s: None)
+        _starve_side_monitor_intervals(monkeypatch)
 
         t = _threading.Thread(target=analyzer.start, daemon=True)
         t.start()
@@ -3922,6 +4243,11 @@ class TestReconnection:
         assert metric_set_to_zero.wait(timeout=3.0), \
             "analyzer_healthy was never set to 0 after disconnect"
         assert analyzer.metrics.analyzer_healthy.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
+
+        # Without this, the no-op'd time.sleep above leaves the reconnect
+        # loop spinning as fast as possible forever (raise -> except -> noop
+        # sleep -> raise -> ...) as a zombie daemon thread.
+        _stop_daemon_loop_thread(t, monkeypatch)
 
     def test_reconnect_reissues_get_events(self, analyzer, monkeypatch):
         """
@@ -3941,16 +4267,25 @@ class TestReconnection:
             def GetVersion(self_, request, timeout=None):
                 return _MockGetVersionResponse('v1.1.0')
 
-        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: None)
+        # Mock rather than None so start()'s `finally: channel.close()` (now
+        # actually exercised once _stop_daemon_loop_thread below drives a
+        # real shutdown) doesn't raise AttributeError.
+        from unittest.mock import Mock
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: Mock())
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
                             lambda ch: _ReconnectingStub())
         monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _starve_side_monitor_intervals(monkeypatch)
 
         t = _threading.Thread(target=analyzer.start, daemon=True)
         t.start()
 
         assert second_call.wait(timeout=3.0), "GetEvents was not called a second time"
         assert call_count[0] >= 2
+
+        # Without this, the no-op'd time.sleep above leaves the reconnect
+        # loop spinning as fast as possible forever as a zombie daemon thread.
+        _stop_daemon_loop_thread(t, monkeypatch)
 
     def test_keyboard_interrupt_propagates_after_cleanup(self, analyzer, monkeypatch):
         """
@@ -3979,6 +4314,10 @@ class TestReconnection:
         monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: fake_channel)
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
                             lambda ch: _InterruptingStub())
+        # start() spawns its 3 sub-monitor threads (version/policy/process-
+        # metrics) before the main loop even runs, so they leak regardless of
+        # how quickly GetEvents raises -- see _starve_side_monitor_intervals.
+        _starve_side_monitor_intervals(monkeypatch)
 
         with pytest.raises(KeyboardInterrupt):
             analyzer.start()
@@ -4025,10 +4364,18 @@ class TestVersionMonitor:
         monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '0')
 
         stub = _MockVersionStub(version='v1.1.0')
-        analyzer._start_version_monitor(stub)
+        thread = _capture_started_thread(
+            monkeypatch, lambda: analyzer._start_version_monitor(stub), 'tetragon-version-monitor'
+        )
 
         assert second_check.wait(timeout=2.0), \
             "check_tetragon_version was not called a second time within 2s"
+
+        # Without this, the zero-interval loop keeps spinning as a zombie
+        # daemon thread for the rest of the test run -- once monkeypatch
+        # reverts check_tetragon_version above, it starts calling the real
+        # method instead of _mock_check.
+        _stop_daemon_loop_thread(thread, monkeypatch)
 
     def test_version_monitor_survives_check_exception(self, analyzer, monkeypatch):
         """An exception in check_tetragon_version must not kill the monitor thread."""
@@ -4046,10 +4393,14 @@ class TestVersionMonitor:
         monkeypatch.setenv('TETRAGON_VERSION_CHECK_INTERVAL', '0')
 
         stub = _MockVersionStub(version='v1.1.0')
-        analyzer._start_version_monitor(stub)
+        thread = _capture_started_thread(
+            monkeypatch, lambda: analyzer._start_version_monitor(stub), 'tetragon-version-monitor'
+        )
 
         assert second_check.wait(timeout=2.0), \
             "Monitor thread did not survive the exception"
+
+        _stop_daemon_loop_thread(thread, monkeypatch)
 
     def test_version_monitor_detects_upgrade(self, analyzer, monkeypatch):
         """
@@ -4077,10 +4428,14 @@ class TestVersionMonitor:
         monkeypatch.setattr(analyzer, 'check_tetragon_version', _mock_check)
 
         stub = _MockVersionStub(version='v1.1.0')
-        analyzer._start_version_monitor(stub)
+        thread = _capture_started_thread(
+            monkeypatch, lambda: analyzer._start_version_monitor(stub), 'tetragon-version-monitor'
+        )
 
         assert mismatch_detected.wait(timeout=3.0), \
             "Mismatch metric was not set after simulated Tetragon upgrade"
+
+        _stop_daemon_loop_thread(thread, monkeypatch)
 
 
 class TestProcessMetricsMonitor:
@@ -4126,10 +4481,20 @@ class TestProcessMetricsMonitor:
         monkeypatch.setattr(analyzer.metrics, 'update_process_metrics', _mock_update)
         monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '0')
 
-        analyzer._start_process_metrics_monitor()
+        thread = _capture_started_thread(
+            monkeypatch, analyzer._start_process_metrics_monitor, 'process-metrics-monitor'
+        )
 
         assert second_call.wait(timeout=2.0), \
             "update_process_metrics was not called a second time within 2s"
+
+        # Without this, the zero-interval loop keeps spinning as a zombie
+        # daemon thread for the rest of the test run -- once monkeypatch
+        # reverts update_process_metrics above, it starts calling the real,
+        # psutil-backed method (which reads /proc via plain open() calls)
+        # in a tight loop, which can race with any later test's
+        # mock.patch('builtins.open', ...).
+        _stop_daemon_loop_thread(thread, monkeypatch)
 
     def test_process_metrics_monitor_survives_update_exception(self, analyzer, monkeypatch):
         """An exception in update_process_metrics must not kill the monitor thread."""
@@ -4146,10 +4511,14 @@ class TestProcessMetricsMonitor:
                              _failing_then_succeeding_update)
         monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '0')
 
-        analyzer._start_process_metrics_monitor()
+        thread = _capture_started_thread(
+            monkeypatch, analyzer._start_process_metrics_monitor, 'process-metrics-monitor'
+        )
 
         assert second_call.wait(timeout=2.0), \
             "Monitor thread did not survive the exception"
+
+        _stop_daemon_loop_thread(thread, monkeypatch)
 
     def test_process_metrics_monitor_does_not_require_tetragon_stub(self, analyzer, monkeypatch):
         """Unlike the version/policy monitors, this one takes no stub argument."""

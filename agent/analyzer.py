@@ -89,6 +89,7 @@ class CertificateAnalyzer:
                  tls_outbound_ports: Optional[frozenset] = None,
                  large_file_cert_threshold: int = 20,
                  large_file_metrics_cap: int = 300,
+                 large_file_byte_cap: int = 2 * 1024 * 1024,
                  max_concurrent_background_threads: int = 20,
                  max_processes_per_cert: int = 20):
         self.tetragon_address = tetragon_address
@@ -107,6 +108,7 @@ class CertificateAnalyzer:
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self._large_file_cert_threshold = large_file_cert_threshold
         self._large_file_metrics_cap = large_file_metrics_cap
+        self._large_file_byte_cap = large_file_byte_cap
         # Bounds how many TLS-probe / large-file-parse threads can run at once.
         # Without this, a burst of events (e.g. every pod on a node reconnecting
         # to its dependencies after a restart, each opening a distinct host:port
@@ -162,14 +164,7 @@ class CertificateAnalyzer:
         # Paths whose large multi-cert file (see _count_pem_certs) is currently
         # being parsed on a background thread — de-dupes repeat Tetragon events
         # for the same path that arrive before the worker populates known_certs.
-        # Individual set ops (in/add/discard) are GIL-atomic, but the check-then-add
-        # in _process_certificate_file_async is a *pair* of ops, and its discard()
-        # runs on a different thread (the background worker) than its check+add
-        # (the main event-consumer thread) — the GIL can switch between the check
-        # and the add, racing against a same-path discard() completing in between,
-        # letting two workers get spawned for one file. Needs its own lock.
         self._large_file_in_flight: Set[str] = set()
-        self._large_file_in_flight_lock = threading.Lock()
         # Paths below _large_file_cert_threshold (so parsed synchronously rather
         # than via _process_certificate_file_async) that are currently being
         # analyzed for the first time. process_event() runs on a single thread
@@ -178,10 +173,25 @@ class CertificateAnalyzer:
         # file first seen at almost the same moment by both a Tetragon event and
         # a periodic scan tick (most likely right after agent startup) would get
         # parsed and _finish_new_certificate_file'd twice, double-publishing it
-        # to Kafka as two separate "new discovery" events. Same check-then-add
-        # race shape as _probe_in_flight/_large_file_in_flight above.
+        # to Kafka as two separate "new discovery" events.
         self._new_file_in_flight: Set[str] = set()
-        self._new_file_in_flight_lock = threading.Lock()
+        # Both sets above share this one lock rather than a lock each. A brand
+        # new path's _count_pem_certs verdict (sync vs background-thread
+        # routing) is only stable for a static file — if the file is actively
+        # growing, two near-simultaneous events for the same never-before-seen
+        # path can get different verdicts and race into *different* in-flight
+        # sets, so neither set alone would catch the duplicate. Every
+        # check-then-claim below checks both sets before adding to either,
+        # which only works if that check-and-add is atomic across both sets —
+        # hence one shared lock instead of two independent ones. Without this,
+        # both mechanisms would independently analyze_certificate() the same
+        # path and both write known_certs[key] = <their own CertificateInfo
+        # instance> for the same resulting key(s); LRUCache.__setitem__ only
+        # invokes on_evict for its own LRU-pop eviction, never for a same-key
+        # overwrite, so whichever write lands second would silently replace
+        # the first with no Prometheus series cleanup for the value it
+        # replaced.
+        self._new_path_lock = threading.Lock()
         self.last_event_time: float = 0.0
 
     def _index_known_cert(self, key: str, value) -> None:
@@ -441,8 +451,25 @@ class CertificateAnalyzer:
         return certificates
 
     def parse_certificates(self, cert_path: str) -> List[x509.Certificate]:
-        """Parse ALL X.509 certificates from a file (supports PEM, DER, JKS, and PKCS12)"""
+        """
+        Parse ALL X.509 certificates from a file (supports PEM, DER, JKS, and PKCS12)
+
+        cert_path comes straight from a Tetragon-reported file path, filtered
+        only by extension — nothing upstream checks the actual filesystem
+        entry type. This is the single entry point all three format branches
+        below go through before opening the file (JKS via jks.KeyStore.load,
+        PKCS12 and PEM/DER via plain open()), so one is_file() guard here
+        protects all of them from blocking on a FIFO with no writer (open()
+        on a FIFO blocks indefinitely per POSIX named-pipe semantics) — this
+        runs on the single-threaded event-consumer loop for every new small
+        file, so a block here hangs cert event processing entirely. See
+        _count_pem_certs for the same guard on the large-file routing check.
+        """
         suffix = Path(cert_path).suffix.lower()
+
+        if not Path(cert_path).is_file():
+            logger.debug(f"Skipping non-regular-file cert path: {cert_path}")
+            return []
 
         if suffix in self.JKS_EXTENSIONS:
             return self.parse_jks_certificates(cert_path)
@@ -703,16 +730,40 @@ class CertificateAnalyzer:
         parsing, which is orders of magnitude cheaper than parse_certificates()
         for files with hundreds of certs (e.g. a system CA trust bundle).
 
+        Only reads the first _large_file_byte_cap bytes rather than the whole
+        file — this runs on the Tetragon event-consumer thread (or the
+        periodic-scan thread), and an unbounded full-file read here would
+        block on, and allocate memory for, any file that merely matches a
+        cert extension regardless of its actual size. _large_file_byte_cap
+        (default 2MB) comfortably covers real-world bundles: even a generous
+        system CA trust store (Mozilla/NSS roots plus enterprise-added ones,
+        a few hundred certs) runs a few hundred KB in practice, well under
+        the cap, so this doesn't undercount real bundles in the cases that
+        matter for the threshold check below.
+
         JKS/PKCS12 keystores go through a dedicated decoder either way and
         aren't pre-counted here — always treated as small enough to process
         inline, since large multi-cert files in practice are PEM bundles.
+
+        cert_path comes straight from a Tetragon-reported file path, filtered
+        only by extension (is_cert_path) — nothing upstream checks the actual
+        filesystem entry type. open() on a FIFO with no writer blocks
+        indefinitely (standard POSIX named-pipe semantics), and this runs on
+        the single-threaded event-consumer loop, so any unprivileged process
+        on the node creating e.g. `mkfifo x.pem` would otherwise hang cert
+        event processing forever. is_file() safely returns False for FIFOs/
+        sockets/devices (even through a symlink) via a non-blocking stat()
+        call, and swallows OSError, so it's the same guard periodic_scan
+        already applies before ever reaching a background-thread path.
         """
         suffix = Path(cert_path).suffix.lower()
         if suffix in self.JKS_EXTENSIONS or suffix in self.PKCS12_EXTENSIONS:
             return 0
+        if not Path(cert_path).is_file():
+            return 0
         try:
             with open(cert_path, 'rb') as f:
-                return f.read().count(b'-----BEGIN CERTIFICATE-----')
+                return f.read(self._large_file_byte_cap).count(b'-----BEGIN CERTIFICATE-----')
         except OSError:
             return 0
 
@@ -874,13 +925,15 @@ class CertificateAnalyzer:
         gRPC stream while hundreds of certs (e.g. a system CA bundle) get
         parsed, instead of blocking it for the whole burst. _large_file_in_flight
         de-dupes repeat Tetragon events for the same path that arrive before the
-        worker finishes and populates known_certs.
+        worker finishes and populates known_certs. Also checks _new_file_in_flight
+        (the synchronous-path equivalent) — see the comment on _new_path_lock in
+        __init__ for why a brand-new path can otherwise race into both.
         """
-        with self._large_file_in_flight_lock:
-            if cert_path in self._large_file_in_flight:
+        with self._new_path_lock:
+            if cert_path in self._large_file_in_flight or cert_path in self._new_file_in_flight:
                 logger.debug(
                     f"Large certificate file {cert_path} already being processed "
-                    f"in the background — skipping duplicate event"
+                    f"(background or synchronous path) — skipping duplicate event"
                 )
                 return
             self._large_file_in_flight.add(cert_path)
@@ -907,14 +960,14 @@ class CertificateAnalyzer:
                         event_type='processing', status='error'
                     ).inc()
             finally:
-                with self._large_file_in_flight_lock:
+                with self._new_path_lock:
                     self._large_file_in_flight.discard(cert_path)
 
         started = self._start_background_thread(_worker, name=f'cert-parse-{Path(cert_path).name}')
         if not started:
             # _worker's finally never ran, so undo the in-flight marker here —
             # the file will be retried on its next qualifying event.
-            with self._large_file_in_flight_lock:
+            with self._new_path_lock:
                 self._large_file_in_flight.discard(cert_path)
             self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached').inc()
 
@@ -1851,11 +1904,12 @@ class CertificateAnalyzer:
             return
 
         # Analyze new certificate file (may contain multiple certs). Guarded by
-        # _new_file_in_flight so a periodic_scan tick landing on this same
-        # never-before-seen path at the same moment doesn't double-parse and
-        # double-publish it — see the comment on _new_file_in_flight in __init__.
-        with self._new_file_in_flight_lock:
-            if cert_path in self._new_file_in_flight:
+        # _new_file_in_flight so a periodic_scan tick (or the background-thread
+        # path above) landing on this same never-before-seen path at the same
+        # moment doesn't double-parse and double-publish it — see the comment
+        # on _new_path_lock in __init__.
+        with self._new_path_lock:
+            if cert_path in self._new_file_in_flight or cert_path in self._large_file_in_flight:
                 logger.debug(f"New-file parse for {cert_path} already in flight, skipping duplicate")
                 return
             self._new_file_in_flight.add(cert_path)
@@ -1869,7 +1923,7 @@ class CertificateAnalyzer:
                 cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
             )
         finally:
-            with self._new_file_in_flight_lock:
+            with self._new_path_lock:
                 self._new_file_in_flight.discard(cert_path)
 
     def get_runtime_tetragon_version(self, stub) -> str:
@@ -2220,12 +2274,12 @@ class CertificateAnalyzer:
                         )
                         continue
 
-                    # Guarded by _new_file_in_flight so a Tetragon event landing on
-                    # this same never-before-seen path at the same moment doesn't
-                    # double-parse and double-publish it — see the comment on
-                    # _new_file_in_flight in __init__.
-                    with self._new_file_in_flight_lock:
-                        if cert_path in self._new_file_in_flight:
+                    # Guarded by _new_file_in_flight so a Tetragon event (either
+                    # routing) landing on this same never-before-seen path at the
+                    # same moment doesn't double-parse and double-publish it —
+                    # see the comment on _new_path_lock in __init__.
+                    with self._new_path_lock:
+                        if cert_path in self._new_file_in_flight or cert_path in self._large_file_in_flight:
                             continue
                         self._new_file_in_flight.add(cert_path)
                     try:
@@ -2237,7 +2291,7 @@ class CertificateAnalyzer:
                             )
                             cert_count += len(cert_infos)
                     finally:
-                        with self._new_file_in_flight_lock:
+                        with self._new_path_lock:
                             self._new_file_in_flight.discard(cert_path)
 
                 logger.info(f"Scanned {cert_count} new certificate(s) in {base_path}")
