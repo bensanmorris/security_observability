@@ -784,6 +784,58 @@ class TestPeriodicScan:
         assert analyze_calls == [], "a path already claimed by another thread must not be re-parsed"
         analyzer.kafka_publisher.publish.assert_not_called()
 
+    def test_large_file_in_flight_prevents_event_path_reparsing_file_claimed_by_async_path(
+        self, analyzer, temp_dir
+    ):
+        """
+        Cross-mechanism race: if the background-thread path has already claimed
+        a brand-new path (_large_file_in_flight), a concurrent Tetragon event
+        for the same path -- even one whose _count_pem_certs verdict would
+        route it synchronously -- must not also parse/publish it. Without
+        checking both in-flight sets under one shared lock, both mechanisms
+        would independently write known_certs[same_key] = <a different
+        CertificateInfo instance each>, and LRUCache.__setitem__ never fires
+        on_evict for a same-key overwrite, so the first write's Prometheus
+        series would never get cleaned up.
+        """
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy3.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy3.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer._large_file_in_flight.add(cert_path)  # simulate the async path already claiming it
+        real_analyze = analyzer.analyze_certificate
+        analyze_calls = []
+
+        def spy(path, *args, **kwargs):
+            analyze_calls.append(path)
+            return real_analyze(path, *args, **kwargs)
+
+        analyzer.analyze_certificate = spy
+        analyzer.process_event(self._make_event(cert_path))
+
+        assert analyze_calls == [], "a path claimed by the async path must not also be parsed synchronously"
+        analyzer.kafka_publisher.publish.assert_not_called()
+
+    def test_new_file_in_flight_prevents_async_path_reparsing_file_claimed_by_event_path(
+        self, analyzer, temp_dir
+    ):
+        """Mirrored: a path already claimed by the synchronous path must block the background-thread path too."""
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("racy4.example.com", 365)
+        cert_path = os.path.join(temp_dir, "racy4.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer._new_file_in_flight.add(cert_path)  # simulate the sync path already claiming it
+        analyzer._start_background_thread = Mock(return_value=True)
+
+        analyzer._process_certificate_file_async(cert_path, "test", 1, "", None, "", 0, "")
+
+        analyzer._start_background_thread.assert_not_called()
+
     def test_new_file_in_flight_cleared_after_periodic_scan_completes(self, analyzer, temp_dir):
         """_new_file_in_flight must not leak an entry once periodic_scan finishes with a path."""
         cert, _ = TestCertificateGeneration.generate_certificate("cleanup.example.com", 365)
