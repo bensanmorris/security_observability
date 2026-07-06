@@ -89,6 +89,7 @@ class CertificateAnalyzer:
                  tls_outbound_ports: Optional[frozenset] = None,
                  large_file_cert_threshold: int = 20,
                  large_file_metrics_cap: int = 300,
+                 large_file_byte_cap: int = 2 * 1024 * 1024,
                  max_concurrent_background_threads: int = 20,
                  max_processes_per_cert: int = 20):
         self.tetragon_address = tetragon_address
@@ -107,6 +108,7 @@ class CertificateAnalyzer:
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
         self._large_file_cert_threshold = large_file_cert_threshold
         self._large_file_metrics_cap = large_file_metrics_cap
+        self._large_file_byte_cap = large_file_byte_cap
         # Bounds how many TLS-probe / large-file-parse threads can run at once.
         # Without this, a burst of events (e.g. every pod on a node reconnecting
         # to its dependencies after a restart, each opening a distinct host:port
@@ -703,6 +705,17 @@ class CertificateAnalyzer:
         parsing, which is orders of magnitude cheaper than parse_certificates()
         for files with hundreds of certs (e.g. a system CA trust bundle).
 
+        Only reads the first _large_file_byte_cap bytes rather than the whole
+        file — this runs on the Tetragon event-consumer thread (or the
+        periodic-scan thread), and an unbounded full-file read here would
+        block on, and allocate memory for, any file that merely matches a
+        cert extension regardless of its actual size. _large_file_byte_cap
+        (default 2MB) comfortably covers real-world bundles: even a generous
+        system CA trust store (Mozilla/NSS roots plus enterprise-added ones,
+        a few hundred certs) runs a few hundred KB in practice, well under
+        the cap, so this doesn't undercount real bundles in the cases that
+        matter for the threshold check below.
+
         JKS/PKCS12 keystores go through a dedicated decoder either way and
         aren't pre-counted here — always treated as small enough to process
         inline, since large multi-cert files in practice are PEM bundles.
@@ -712,7 +725,7 @@ class CertificateAnalyzer:
             return 0
         try:
             with open(cert_path, 'rb') as f:
-                return f.read().count(b'-----BEGIN CERTIFICATE-----')
+                return f.read(self._large_file_byte_cap).count(b'-----BEGIN CERTIFICATE-----')
         except OSError:
             return 0
 

@@ -114,6 +114,13 @@ def main():
     # Conflating them meant raising the metrics cap to cover a realistic CA
     # bundle (~130-150 certs) also disabled background-thread parsing for it.
     large_file_metrics_cap = int(cfg(cp, 'certificates', 'large_file_metrics_cap', 'LARGE_FILE_METRICS_CAP', '300'))
+    # Caps how many bytes _count_pem_certs reads to decide whether a file is
+    # "large" -- without this, that check reads the whole file up front, on
+    # the Tetragon event-consumer thread, before any background-thread
+    # dispatch decision is even made. 2MB comfortably covers real-world CA
+    # trust bundles (a few hundred KB in practice) while bounding the
+    # worst-case read for an oversized/degenerate file.
+    large_file_byte_cap = int(cfg(cp, 'certificates', 'large_file_byte_cap', 'LARGE_FILE_BYTE_CAP', str(2 * 1024 * 1024)))
     # Caps concurrent TLS-probe / large-file-parse threads so a burst of events
     # (e.g. many pods reconnecting to dependencies at once) can't spawn
     # unbounded OS threads.
@@ -165,6 +172,7 @@ def main():
     logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
     logger.info(f"Large file threshold: >{large_file_cert_threshold} certs parsed in background")
     logger.info(f"Large file metrics cap: {large_file_metrics_cap} certs get full Prometheus tracking per bundle")
+    logger.info(f"Large file byte cap: {large_file_byte_cap} bytes read to classify a file as large")
     logger.info(f"Max concurrent background threads: {max_concurrent_background_threads}")
     logger.info(f"Max processes tracked per cert: {max_processes_per_cert}")
     logger.info(f"Metrics port:      {metrics_port}")
@@ -228,6 +236,7 @@ def main():
                                    tls_outbound_ports=tls_outbound_ports,
                                    large_file_cert_threshold=large_file_cert_threshold,
                                    large_file_metrics_cap=large_file_metrics_cap,
+                                   large_file_byte_cap=large_file_byte_cap,
                                    max_concurrent_background_threads=max_concurrent_background_threads,
                                    max_processes_per_cert=max_processes_per_cert)
 
