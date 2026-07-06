@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 import psutil
-from datetime import datetime
+from datetime import datetime, timezone
 from socketserver import ThreadingMixIn
 from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
 
@@ -449,7 +449,12 @@ class PrometheusMetrics:
         # days_until_expiry property (each call does its own datetime.utcnow())
         # once per Gauge that needs it -- cheap for a single cert, but this runs
         # per-cert across a whole bundle (up to large_file_metrics_cap certs).
-        now = datetime.utcnow()
+        # Timezone-aware (not the naive datetime.utcnow() used elsewhere for
+        # arithmetic against other naive UTC values) because this one feeds
+        # .timestamp() directly below -- .timestamp() on a naive datetime
+        # assumes the *local* timezone, silently shifting the Gauge value by
+        # the local UTC offset.
+        now = datetime.now(timezone.utc)
         days_left = info.days_until_expiry
         labels = {
             'cert_path':        info.path,
@@ -488,8 +493,11 @@ class PrometheusMetrics:
         info._seen_processes.add((info.process, info.parent_process))
 
         self.cert_expiry_days.labels(**labels).set(days_left)
-        self.cert_expiry_timestamp.labels(**labels).set(info.not_after.timestamp())
-        self.cert_valid_from.labels(**labels).set(info.not_before.timestamp())
+        # not_after/not_before are naive datetimes that represent UTC wall-clock
+        # time (see agent/analyzer.py's extraction code) -- attach UTC tzinfo
+        # before .timestamp() so it isn't misinterpreted as local time.
+        self.cert_expiry_timestamp.labels(**labels).set(info.not_after.replace(tzinfo=timezone.utc).timestamp())
+        self.cert_valid_from.labels(**labels).set(info.not_before.replace(tzinfo=timezone.utc).timestamp())
         self.cert_last_accessed.labels(**labels).set(now.timestamp())
 
         self.cert_expired.labels(
@@ -656,7 +664,10 @@ class PrometheusMetrics:
             checksum=info.checksum,
             key_usage=','.join(info.key_usage) if info.key_usage else '',
             extended_key_usage=','.join(info.extended_key_usage) if info.extended_key_usage else '',
-        ).set(datetime.utcnow().timestamp())
+        # datetime.now(timezone.utc), not datetime.utcnow() -- .timestamp() on
+        # a naive datetime assumes the local timezone, silently shifting this
+        # by the local UTC offset (see update_certificate_metrics above).
+        ).set(datetime.now(timezone.utc).timestamp())
 
     def record_cert_process_access(self, info: CertificateInfo, process: str, parent_process: str) -> None:
         """
