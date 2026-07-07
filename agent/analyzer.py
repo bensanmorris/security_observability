@@ -2350,7 +2350,7 @@ class CertificateAnalyzer:
                     if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
                         self._process_certificate_file_async(
                             cert_path, "periodic_scan", 0, "",
-                            None, "", 0, "",
+                            None, "", 0, _NODE_NAME,
                         )
                         continue
 
@@ -2367,7 +2367,7 @@ class CertificateAnalyzer:
                         if cert_infos:
                             self._finish_new_certificate_file(
                                 cert_infos, tetragon_pod=None, parent_process="",
-                                parent_pid=0, node_name="",
+                                parent_pid=0, node_name=_NODE_NAME,
                             )
                             cert_count += len(cert_infos)
                     finally:

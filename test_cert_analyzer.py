@@ -707,6 +707,54 @@ class TestPeriodicScan:
         assert len(matching) == 1
         analyzer.kafka_publisher.publish.assert_called_once()
 
+    def test_new_file_gets_analyzer_node_name_not_empty(self, analyzer, temp_dir):
+        """
+        A cert discovered via periodic_scan must carry the analyzer's own
+        configured node identity (_NODE_NAME), not an empty string.
+
+        periodic_scan has no Tetragon event to read node_name from (unlike the
+        real-time event path), so it used to hardcode node_name="" -- silently
+        dropping every periodic-scan-only cert (the majority on any node, since
+        periodic scan sweeps the whole filesystem while Tetragon only catches
+        real-time accesses) into its own empty-node_name bucket on any
+        Prometheus query grouped `by (node_name)`, alongside the real per-node
+        groups.
+        """
+        from agent.constants import _NODE_NAME
+
+        cert, _ = TestCertificateGeneration.generate_certificate("nodename.example.com", 365)
+        cert_path = os.path.join(temp_dir, "nodename.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(cert_path + ":")]
+        assert len(matching) == 1
+        cert_info = analyzer.known_certs[matching[0]]
+        assert cert_info.node_name == _NODE_NAME
+        assert cert_info.node_name != ""
+
+    def test_large_bundle_gets_analyzer_node_name_not_empty(self, analyzer, temp_dir):
+        """Same as above, but for the large-bundle path routed through _process_certificate_file_async."""
+        from agent.constants import _NODE_NAME
+
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "nodename_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and bundle_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
+        for key in matching:
+            assert analyzer.known_certs[key].node_name == _NODE_NAME
+
     def test_nonexistent_scan_path_is_skipped(self, analyzer):
         """A configured scan path that doesn't exist on disk is skipped without raising."""
         analyzer.periodic_scan(["/nonexistent/scan/path"])
