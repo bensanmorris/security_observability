@@ -296,6 +296,16 @@ Once you're happy with a build, consider tagging and committing a real version i
 ad hoc `dev-<timestamp>` tag, and updating `extras/openshift/daemonset.yaml`'s image field to
 match — the checked-in manifest intentionally stays on a stable tag rather than a moving one.
 
+**Always use `sudo podman` for every step above, not plain `podman`** — `extras/build.sh` builds
+via `sudo podman build`, which writes into *root's* podman image storage, entirely separate from
+your own user's storage. Tagging or pushing with plain `podman` reads from your user's storage
+instead, which may contain an old, unrelated `cert-analyzer:latest` from some earlier manual
+build. The two storages don't share content, and podman gives no warning that it just silently
+tagged/pushed a different image than the one `build.sh` produced — the push and deploy both
+"succeed" and everything looks fine until you notice the running pod is inexplicably missing a
+fix that's definitely in the source. Confirm which image you're actually about to push with
+`sudo podman images localhost/cert-analyzer:latest` immediately before tagging it.
+
 ---
 
 ## Validation

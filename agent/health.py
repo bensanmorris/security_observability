@@ -11,6 +11,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# grpc.Channel (grpc 1.60.1's concrete implementation, grpc._channel.Channel)
+# has no public synchronous "give me the current state" method -- get_state()
+# doesn't exist on it, and the only public API for connectivity is the async
+# subscribe(callback)/unsubscribe() pair, which doesn't fit a synchronous HTTP
+# health-check handler. The private channel._channel.check_connectivity_state()
+# is the pragmatic way to poll it synchronously, but it returns a bare int (the
+# underlying cygrpc state code), and grpc.ChannelConnectivity(<int>) cannot
+# construct a member from that directly -- the enum's actual values are
+# (int, name) tuples, e.g. ChannelConnectivity.READY.value == (2, 'ready'), so
+# grpc.ChannelConnectivity(2) always raises ValueError. This lookup table maps
+# the raw int back to the correct member instead.
+_CONNECTIVITY_STATE_BY_INT = {member.value[0]: member for member in grpc.ChannelConnectivity}
+
 
 class HealthServer:
     """
@@ -76,12 +89,19 @@ class HealthServer:
             return True, "starting"
 
         try:
-            state = self._channel._channel.check_connectivity_state(False)
-            # grpc.ChannelConnectivity values: IDLE=0, CONNECTING=1,
-            # READY=2, TRANSIENT_FAILURE=3, SHUTDOWN=4
-            if state == grpc.ChannelConnectivity.SHUTDOWN:
+            # See _CONNECTIVITY_STATE_BY_INT's module-level comment: this used
+            # to construct grpc.ChannelConnectivity(state) directly from the
+            # raw int, which always raised ValueError and was silently
+            # swallowed below -- meaning this check always fell through to
+            # "unknown"/True and never actually detected a SHUTDOWN channel.
+            raw_state = self._channel._channel.check_connectivity_state(False)
+            connectivity = _CONNECTIVITY_STATE_BY_INT.get(raw_state)
+            if connectivity is None:
+                logger.debug(f"Health check saw unrecognised connectivity state: {raw_state}")
+                return True, "unknown"
+            if connectivity == grpc.ChannelConnectivity.SHUTDOWN:
                 return False, "channel_shutdown"
-            return True, grpc.ChannelConnectivity(state).name.lower()
+            return True, connectivity.name.lower()
         except Exception as e:
             # If we can't check the state at all the process is still running
             logger.debug(f"Health check channel state error: {e}")

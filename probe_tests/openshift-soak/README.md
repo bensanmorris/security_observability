@@ -35,10 +35,17 @@ From the repository root:
 podman build -t cert-soak-test:latest probe_tests/openshift-soak/
 
 HOST=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
-sudo podman login -u kubeadmin -p "$(oc whoami -t)" --tls-verify=false "$HOST"
-sudo podman tag cert-soak-test:latest "$HOST/certsight/cert-soak-test:latest"
-sudo podman push --tls-verify=false "$HOST/certsight/cert-soak-test:latest"
+podman login -u kubeadmin -p "$(oc whoami -t)" --tls-verify=false "$HOST"
+podman tag cert-soak-test:latest "$HOST/certsight/cert-soak-test:latest"
+podman push --tls-verify=false "$HOST/certsight/cert-soak-test:latest"
 ```
+
+Use the same `podman` (with or without `sudo`) for every command above — `build`, `tag`, `login`,
+and `push` all need to operate on the same image storage, or you'll tag/push a stale image from
+a different storage namespace while `podman images` on the "wrong" one looks completely normal.
+See "Rebuilding and redeploying after a code change" in `extras/OPENSHIFT-DEPLOYMENT-README.md`
+for how this bit us with the main cert-analyzer image (`build.sh` uses `sudo podman build`, so
+its outputs live in root's storage specifically).
 
 If you're iterating on `soak_test.py`, push under a fresh tag rather than
 re-pushing `:latest` and re-running the Job — `imagePullPolicy: IfNotPresent`

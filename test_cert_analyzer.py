@@ -4839,13 +4839,29 @@ from cert_analyzer import HealthServer
 
 
 class _MockChannel:
-    """Mock gRPC channel with controllable connectivity state."""
+    """
+    Mock gRPC channel with controllable connectivity state.
+
+    check_connectivity_state() returns a bare int (self._state.value[0]),
+    exactly like the real private grpc._channel.Channel.check_connectivity_state()
+    HealthServer.is_live() actually calls (grpc 1.60.1's Channel has no public
+    synchronous get_state() -- only the async subscribe()/unsubscribe() pair).
+    An earlier version of this mock returned the grpc.ChannelConnectivity
+    member itself instead of the raw int, which let a real bug ship unnoticed:
+    production code called grpc.ChannelConnectivity(<int>) on the real raw int,
+    which always raises ValueError (the enum's real values are (int, name)
+    tuples, not bare ints), silently caught and defaulting every check to
+    "unknown"/True. Passing the enum member straight through masked this
+    completely, since enum-from-existing-member construction is a no-op --
+    only a mock returning the same *shape* of value the real API returns
+    would have caught it.
+    """
     def __init__(self, state=grpc.ChannelConnectivity.READY):
         self._state = state
-        self._channel = self
+        self._channel = self  # mirrors channel._channel.check_connectivity_state(...)
 
-    def check_connectivity_state(self, try_to_connect):
-        return self._state
+    def check_connectivity_state(self, try_to_connect=False):
+        return self._state.value[0]
 
 
 def _make_health_server(analyzer, grace=0, staleness=300, port=None):
@@ -4899,6 +4915,10 @@ class TestHealthServerLiveness:
         status, body = _get(hs.port, '/healthz')
         hs.stop()
         assert status == 200
+        # Pins the actual channel state as the reason, not the "unknown"
+        # fallback a broken state-check would silently produce -- see
+        # _MockChannel's docstring for the bug this would have caught.
+        assert body['reason'] == 'ready'
 
     def test_liveness_returns_200_when_channel_transient_failure(self, analyzer):
         """
@@ -4911,6 +4931,7 @@ class TestHealthServerLiveness:
         status, body = _get(hs.port, '/healthz')
         hs.stop()
         assert status == 200
+        assert body['reason'] == 'transient_failure'
 
     def test_liveness_returns_200_when_channel_idle(self, analyzer):
         """Liveness is 200 when channel is IDLE (not yet connected)."""
@@ -4920,6 +4941,7 @@ class TestHealthServerLiveness:
         status, body = _get(hs.port, '/healthz')
         hs.stop()
         assert status == 200
+        assert body['reason'] == 'idle'
 
     def test_liveness_returns_503_when_channel_shutdown(self, analyzer):
         """Liveness is 503 only when the channel has been explicitly shut down."""
