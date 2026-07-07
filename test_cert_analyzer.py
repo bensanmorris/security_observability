@@ -2673,10 +2673,11 @@ class TestCacheHitReDetection:
     """
 
     class _MockEvent:
-        """Minimal mock Tetragon kprobe event with a configurable process binary."""
+        """Minimal mock Tetragon kprobe event with a configurable process binary
+        and, optionally, pod context (for per-access pod attribution tests)."""
         node_name = ''
 
-        def __init__(self, path, process_binary):
+        def __init__(self, path, process_binary, pod=None):
             class _Arg:
                 def __init__(self, path):
                     self.string_arg = path
@@ -2684,21 +2685,22 @@ class TestCacheHitReDetection:
                     return name == 'string_arg'
 
             class _Process:
-                def __init__(self, binary):
+                def __init__(self, binary, pod):
                     self.binary    = binary
                     self.pid       = 4321
                     self.arguments = ''
+                    self.pod       = pod
                 def HasField(self, name):
-                    return False
+                    return name == 'pod' and self.pod is not None
 
             class _Kprobe:
-                def __init__(self, path, binary):
-                    self.process = _Process(binary)
+                def __init__(self, path, binary, pod):
+                    self.process = _Process(binary, pod)
                     self.args    = [_Arg(path)]
                 def HasField(self, name):
                     return False
 
-            self._kprobe = _Kprobe(path, process_binary)
+            self._kprobe = _Kprobe(path, process_binary, pod)
 
         def HasField(self, name):
             return name == 'process_kprobe'
@@ -2737,15 +2739,58 @@ class TestCacheHitReDetection:
         gauge = analyzer.metrics.cert_process_info
         cat_val = gauge.labels(
             cert_path=disk_path, cert_index='0', serial='42',
-            process='/usr/bin/cat', parent_process='', node_name='', checksum='',
+            process='/usr/bin/cat', parent_process='', node_name='',
+            pod_name='', namespace='', app_label='', container_name='', checksum='',
         )._value.get()
         firefox_val = gauge.labels(
             cert_path=disk_path, cert_index='0', serial='42',
-            process='/usr/lib64/firefox/firefox', parent_process='', node_name='', checksum='',
+            process='/usr/lib64/firefox/firefox', parent_process='', node_name='',
+            pod_name='', namespace='', app_label='', container_name='', checksum='',
         )._value.get()
 
         assert cat_val == 1, "original discoverer's series must survive the re-detection"
         assert firefox_val == 1, "new accessing process must get its own series"
+
+    def test_redetection_by_different_pods_attributes_each_to_its_own_pod(self, analyzer, temp_dir):
+        """
+        The same process binary re-detecting a known cert file from two
+        different pods must produce two distinct tls_certificate_process_info
+        series, each correctly labeled with *its own* pod_name/namespace/
+        app_label/container_name — not both attributed to the cert's own
+        (possibly different) discovering pod, which is what using cert_info's
+        sticky pod fields instead of the current event's would have done.
+        """
+        disk_path = os.path.join(temp_dir, "multi-pod-ca.pem")
+        # Discovered outside any pod (cert_info.pod_name stays "").
+        self._seed_known_cert(analyzer, disk_path, process='/usr/bin/python')
+
+        pod_a = MockTetragonPod(
+            name="svc-a-abc12", namespace="ns-a", pod_labels={"app": "svc-a"},
+            container=MockTetragonContainer(name="main-a"),
+        )
+        pod_b = MockTetragonPod(
+            name="svc-b-def34", namespace="ns-b", pod_labels={"app": "svc-b"},
+            container=MockTetragonContainer(name="main-b"),
+        )
+
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/python', pod=pod_a))
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/python', pod=pod_b))
+
+        gauge = analyzer.metrics.cert_process_info
+        samples = [
+            s for metric in gauge.collect() for s in metric.samples
+            if s.labels.get('cert_path') == disk_path
+        ]
+        by_pod = {s.labels['pod_name']: s.labels for s in samples}
+
+        assert "svc-a-abc12" in by_pod, "pod-a's access must get its own series"
+        assert "svc-b-def34" in by_pod, "pod-b's access must get its own series"
+        assert by_pod["svc-a-abc12"]['namespace']      == 'ns-a'
+        assert by_pod["svc-a-abc12"]['app_label']      == 'svc-a'
+        assert by_pod["svc-a-abc12"]['container_name'] == 'main-a'
+        assert by_pod["svc-b-def34"]['namespace']      == 'ns-b'
+        assert by_pod["svc-b-def34"]['app_label']      == 'svc-b'
+        assert by_pod["svc-b-def34"]['container_name'] == 'main-b'
 
     def test_redetection_updates_last_accessed_timestamp(self, analyzer, temp_dir):
         """tls_certificate_last_accessed_timestamp is refreshed on re-detection."""
@@ -6712,6 +6757,8 @@ class TestSelfSignedDetection:
             workload_kind="",
             workload_name="",
             node_name="",
+            app_label="",
+            container_name="",
             is_ca="unknown",  # generate_certificate without is_ca=True adds no BasicConstraints
             issuer=cert_infos[0].issuer[:100],
             serial=cert_infos[0].serial_number,
@@ -6738,6 +6785,8 @@ class TestSelfSignedDetection:
             workload_kind="",
             workload_name="",
             node_name="",
+            app_label="",
+            container_name="",
             is_ca="unknown",  # _generate_ca_signed_certificate adds no BasicConstraints
             issuer=cert_infos[0].issuer[:100],
             serial=cert_infos[0].serial_number,

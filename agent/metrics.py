@@ -215,11 +215,19 @@ class PrometheusMetrics:
              'key_usage', 'extended_key_usage']
         )
 
+        # pod_name/namespace/app_label/container_name reflect the *accessing*
+        # process's own pod/container at the time it was recorded (see
+        # CertificateAnalyzer._record_cert_process_access), which is why they
+        # live here as part of the fan-out key rather than being backfilled
+        # from the cert's own (sticky, discoverer-attributed) pod fields --
+        # a bundle re-accessed by processes in several different pods should
+        # show each pod distinctly, not all attributed to whichever pod
+        # happened to discover the cert first.
         self.cert_process_info = Gauge(
             'tls_certificate_process_info',
             'Processes observed loading this certificate (1=observed)',
             ['cert_path', 'cert_index', 'serial', 'process', 'parent_process', 'node_name',
-             'checksum'],
+             'pod_name', 'namespace', 'app_label', 'container_name', 'checksum'],
         )
 
         # TLS protocol version and cipher suite negotiated during a TLS port
@@ -272,8 +280,8 @@ class PrometheusMetrics:
             'tls_certificate_expired',
             'Whether certificate is expired (1=expired, 0=valid)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'issuer', 'serial',
-             'checksum']
+             'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
+             'issuer', 'serial', 'checksum']
         )
 
         self.cert_expiring_soon = Gauge(
@@ -281,23 +289,24 @@ class PrometheusMetrics:
             'Whether certificate expires within threshold (1=yes, 0=no)',
             ['cert_path', 'threshold_days', 'cert_index', 'pod_name',
              'namespace', 'workload_kind', 'workload_name', 'node_name',
-             'issuer', 'serial', 'checksum']
+             'app_label', 'container_name', 'issuer', 'serial', 'checksum']
         )
 
         self.cert_fips_compliant = Gauge(
             'tls_certificate_fips_compliant',
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'key_algorithm', 'signature_hash',
-             'key_size', 'curve_name', 'issuer', 'serial', 'checksum']
+             'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
+             'key_algorithm', 'signature_hash', 'key_size', 'curve_name', 'issuer', 'serial',
+             'checksum']
         )
 
         self.cert_self_signed = Gauge(
             'tls_certificate_self_signed',
             'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'is_ca', 'issuer', 'serial',
-             'checksum']
+             'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
+             'is_ca', 'issuer', 'serial', 'checksum']
         )
 
         # System health
@@ -493,13 +502,23 @@ class PrometheusMetrics:
             process=info.process,
             parent_process=info.parent_process,
             node_name=info.node_name,
+            pod_name=info.pod_name,
+            namespace=info.namespace,
+            app_label=info.app_label,
+            container_name=info.container_name,
             checksum=info.checksum,
         ).set(1)
         # The discovering process is always allowed (an empty seen-set can
         # never already be at the fan-out cap) — seed it here so a later
         # cache-hit re-access by this same process isn't mistaken for a new
         # distinct process by CertificateAnalyzer._record_cert_process_access.
-        info._seen_processes.add((info.process, info.parent_process))
+        # info.pod_name/namespace/app_label/container_name are correct here
+        # (not stale) since this is the discovery event itself -- they were
+        # just set by _apply_pod_context moments before this call.
+        info._seen_processes.add((
+            info.process, info.parent_process,
+            info.pod_name, info.namespace, info.app_label, info.container_name,
+        ))
 
         self.cert_expiry_days.labels(**labels).set(days_left)
         # not_after/not_before are naive datetimes that represent UTC wall-clock
@@ -517,6 +536,8 @@ class PrometheusMetrics:
             workload_kind=info.workload_kind,
             workload_name=info.workload_name,
             node_name=info.node_name,
+            app_label=info.app_label,
+            container_name=info.container_name,
             issuer=info.issuer[:100],
             serial=info.serial_number,
             checksum=info.checksum,
@@ -532,6 +553,8 @@ class PrometheusMetrics:
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
                 node_name=info.node_name,
+                app_label=info.app_label,
+                container_name=info.container_name,
                 issuer=info.issuer[:100],
                 serial=info.serial_number,
                 checksum=info.checksum,
@@ -546,6 +569,8 @@ class PrometheusMetrics:
                 workload_kind=info.workload_kind,
                 workload_name=info.workload_name,
                 node_name=info.node_name,
+                app_label=info.app_label,
+                container_name=info.container_name,
                 key_algorithm=info.key_algorithm,
                 signature_hash=info.signature_hash,
                 key_size=str(info.key_size),
@@ -563,6 +588,8 @@ class PrometheusMetrics:
             workload_kind=info.workload_kind,
             workload_name=info.workload_name,
             node_name=info.node_name,
+            app_label=info.app_label,
+            container_name=info.container_name,
             is_ca='true' if info.is_ca else ('false' if info.is_ca is False else 'unknown'),
             issuer=info.issuer[:100],
             serial=info.serial_number,
@@ -589,14 +616,15 @@ class PrometheusMetrics:
         previously removed them on eviction, so every certificate ever seen
         stayed resident in the registry forever.
 
-        cert_process_info fans out to one series per distinct process that
-        has accessed this cert, capped at max_processes_per_cert -- every
-        (process, parent_process) pair that was ever actually given a series
-        is tracked in info._seen_processes, so all of them are removed here,
-        not just the most recent. tls_negotiated_protocol (TLS-probe
-        discoveries only) still isn't cleaned up: protocol/cipher aren't
-        persisted on CertificateInfo after the probe completes, so there's
-        nothing to reconstruct that label tuple from.
+        cert_process_info fans out to one series per distinct (process,
+        parent_process, pod_name, namespace, app_label, container_name)
+        tuple that has accessed this cert, capped at max_processes_per_cert --
+        every tuple that was ever actually given a series is tracked in
+        info._seen_processes, so all of them are removed here, not just the
+        most recent. tls_negotiated_protocol (TLS-probe discoveries only)
+        still isn't cleaned up: protocol/cipher aren't persisted on
+        CertificateInfo after the probe completes, so there's nothing to
+        reconstruct that label tuple from.
         """
         shared_labels = (
             info.path, info.subject[:100], info.issuer[:100], info.serial_number,
@@ -611,16 +639,22 @@ class PrometheusMetrics:
                       self.cert_valid_from, self.cert_last_accessed):
             self._safe_remove(gauge, shared_labels)
 
-        seen_processes = getattr(info, '_seen_processes', None) or {(info.process, info.parent_process)}
-        for process, parent_process in seen_processes:
+        seen_processes = getattr(info, '_seen_processes', None) or {(
+            info.process, info.parent_process,
+            info.pod_name, info.namespace, info.app_label, info.container_name,
+        )}
+        for process, parent_process, pod_name, namespace, app_label, container_name in seen_processes:
             self._safe_remove(self.cert_process_info, (
                 info.path, str(info.cert_index), info.serial_number,
-                process, parent_process, info.node_name, info.checksum,
+                process, parent_process, info.node_name,
+                pod_name, namespace, app_label, container_name,
+                info.checksum,
             ))
 
         self._safe_remove(self.cert_expired, (
             info.path, str(info.cert_index), info.pod_name, info.namespace,
             info.workload_kind, info.workload_name, info.node_name,
+            info.app_label, info.container_name,
             info.issuer[:100], info.serial_number, info.checksum,
         ))
 
@@ -628,13 +662,15 @@ class PrometheusMetrics:
             self._safe_remove(self.cert_expiring_soon, (
                 info.path, str(threshold), str(info.cert_index), info.pod_name,
                 info.namespace, info.workload_kind, info.workload_name,
-                info.node_name, info.issuer[:100], info.serial_number, info.checksum,
+                info.node_name, info.app_label, info.container_name,
+                info.issuer[:100], info.serial_number, info.checksum,
             ))
 
         if info.key_algorithm:
             self._safe_remove(self.cert_fips_compliant, (
                 info.path, str(info.cert_index), info.pod_name, info.namespace,
                 info.workload_kind, info.workload_name, info.node_name,
+                info.app_label, info.container_name,
                 info.key_algorithm, info.signature_hash, str(info.key_size),
                 info.curve_name, info.issuer[:100], info.serial_number, info.checksum,
             ))
@@ -643,6 +679,7 @@ class PrometheusMetrics:
         self._safe_remove(self.cert_self_signed, (
             info.path, str(info.cert_index), info.pod_name, info.namespace,
             info.workload_kind, info.workload_name, info.node_name,
+            info.app_label, info.container_name,
             is_ca_label, info.issuer[:100], info.serial_number, info.checksum,
         ))
 
@@ -678,13 +715,24 @@ class PrometheusMetrics:
         # by the local UTC offset (see update_certificate_metrics above).
         ).set(datetime.now(timezone.utc).timestamp())
 
-    def record_cert_process_access(self, info: CertificateInfo, process: str, parent_process: str) -> None:
+    def record_cert_process_access(self, info: CertificateInfo, process: str, parent_process: str,
+                                    pod_name: str = "", namespace: str = "",
+                                    app_label: str = "", container_name: str = "") -> None:
         """
         Record that `process` has loaded an already-known certificate.
 
-        A distinct (process, parent_process) label pair is its own Prometheus series,
-        so repeated calls for different processes accumulate into a multi-process view
-        of who has loaded this cert, rather than overwriting the original discoverer.
+        A distinct (process, parent_process, pod_name, namespace, app_label,
+        container_name) label tuple is its own Prometheus series, so repeated
+        calls for different processes -- or the same process in a different
+        pod -- accumulate into a multi-process, multi-pod view of who has
+        loaded this cert, rather than overwriting the original discoverer.
+
+        pod_name/namespace/app_label/container_name default to "" (rather than
+        falling back to info's own fields) since they describe the *current*
+        accessing event, which the caller (CertificateAnalyzer.
+        _record_cert_process_access) is responsible for supplying -- info's
+        own pod fields belong to whichever access first discovered the cert
+        and may well be a different pod than this one.
 
         This method always writes the series unconditionally — capping the
         number of distinct processes tracked per cert (max_processes_per_cert)
@@ -698,6 +746,10 @@ class PrometheusMetrics:
             process=process,
             parent_process=parent_process,
             node_name=info.node_name,
+            pod_name=pod_name,
+            namespace=namespace,
+            app_label=app_label,
+            container_name=container_name,
             checksum=info.checksum,
         ).set(1)
 

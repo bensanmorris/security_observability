@@ -49,16 +49,28 @@ All share the same label set:
 Note: `process`/`parent_process` are per-*access*, not per-certificate, so they are
 deliberately not labels on these four gauges — they're tracked instead on the
 `tls_certificate_process_info` gauge, which maps certificates to the processes
-observed loading them.
+observed loading them (see below).
 
 ### Certificate status flags
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `tls_certificate_expired` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `issuer`, `serial`, `checksum` | `1` if expired, `0` if valid. `checksum` is empty unless `checksum_enabled=true` |
+| `tls_certificate_expired` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `issuer`, `serial`, `checksum` | `1` if expired, `0` if valid. `checksum` is empty unless `checksum_enabled=true` |
 | `tls_certificate_expiring_soon` | Gauge | above + `threshold_days` | `1` if expiring within threshold, `0` otherwise. Emitted for thresholds `7`, `30`, and `90` days |
-| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
-| `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `is_ca`, `issuer`, `serial`, `checksum` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
+| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
+| `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `is_ca`, `issuer`, `serial`, `checksum` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
+
+### Certificate-to-process map
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `tls_certificate_process_info` | Gauge | `cert_path`, `cert_index`, `serial`, `process`, `parent_process`, `node_name`, `pod_name`, `namespace`, `app_label`, `container_name`, `checksum` | `1` per distinct process observed loading this certificate. One series per distinct `(process, parent_process, pod_name, namespace, app_label, container_name)` tuple, capped at `max_processes_per_cert` (default 20) per certificate |
+
+Unlike the certificate status flags above, `pod_name`/`namespace`/`app_label`/`container_name`
+here describe the *accessing* process's own pod at the time it was recorded — not necessarily
+the same pod that first discovered the certificate (that pod's context is what's attached to
+the four status-flag gauges and the four expiry gauges instead). A cert bundle read by the same
+binary running in several different pods shows up as several distinct series here, one per pod.
 
 ### Event and error counters
 
