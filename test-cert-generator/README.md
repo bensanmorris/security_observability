@@ -1,4 +1,4 @@
-# k8s_enrich_demo — test cert generator
+# test-cert-generator
 
 Periodically generates PEM, JKS and PKCS12 test certificates (expired, expiring-soon,
 and valid) so that `cert_analyzer.py` has real material to detect and report on.
@@ -8,9 +8,9 @@ Certificates are regenerated every `CERT_REGEN_INTERVAL_SECONDS` (default: 60 s)
 ## Build the image
 
 ```bash
-podman build -t cert-test-generator:latest k8s_enrich_demo/
+podman build -t cert-test-generator:latest test-cert-generator/
 # or
-docker build -t cert-test-generator:latest k8s_enrich_demo/
+docker build -t cert-test-generator:latest test-cert-generator/
 ```
 
 Or pull the pre-built image from GHCR:
@@ -36,7 +36,7 @@ kind load docker-image ghcr.io/bensanmorris/cert-test-generator:latest
 ### 2. Deploy
 
 ```bash
-kubectl apply -f k8s_enrich_demo/job.yaml
+kubectl apply -f test-cert-generator/job.yaml
 kubectl -n kube-system rollout status deployment/cert-test-generator
 kubectl -n kube-system logs -f deployment/cert-test-generator
 ```
@@ -55,7 +55,7 @@ kubectl apply -f kubernetes/deployment.yaml
 ### 4. Tear down
 
 ```bash
-kubectl delete -f k8s_enrich_demo/job.yaml
+kubectl delete -f test-cert-generator/job.yaml
 ```
 
 ---
@@ -177,7 +177,7 @@ kubectl apply -f tetragon-policies/certificate-file-access.yaml
 
 # 5. Load the cert-test-generator image and deploy it
 kind load docker-image cert-test-generator:latest
-kubectl apply -f k8s_enrich_demo/job.yaml
+kubectl apply -f test-cert-generator/job.yaml
 
 # 6. Deploy cert-analyzer with the test cert path included in its scan paths
 # Edit kubernetes/deployment.yaml: add /host/tmp/cert-analyzer-test to CERT_SCAN_PATHS
