@@ -1,0 +1,18 @@
+# Grants the cert-expiry-monitor ServiceAccount the 'hostaccess' SCC, which permits the
+# hostNetwork/hostPID/hostPath access the DaemonSet needs (daemonset.yaml) while still
+# enforcing a namespace-allocated non-root UID and SELinux context. Equivalent to running:
+#   oc adm policy add-scc-to-user hostaccess -z cert-expiry-monitor -n certsight
+# expressed declaratively so it can be applied with the rest of the manifests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-expiry-monitor-hostaccess-scc
+  namespace: certsight
+subjects:
+- kind: ServiceAccount
+  name: cert-expiry-monitor
+  namespace: certsight
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:hostaccess
+  apiGroup: rbac.authorization.k8s.io

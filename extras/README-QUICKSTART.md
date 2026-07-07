@@ -337,7 +337,8 @@ After the demo, you can:
 
 - **Integrate with Prometheus**: See [Prometheus Integration](../README.md#prometheus-integration)
 - **Set up Grafana dashboards**: See [Grafana Dashboard](../README.md#grafana-dashboard)
-- **Deploy to Kubernetes**: See [Kubernetes Deployment](../README.md#kubernetesopenshift-deployment)
+- **Deploy to Kubernetes**: See [Kubernetes DaemonSet Deployment](DEPLOYMENT-README.md#kubernetes-daemonset-deployment)
+- **Deploy to OpenShift**: See [OpenShift Deployment Guide](OPENSHIFT-DEPLOYMENT-README.md)
 - **Upgrade to Tetragon v1.6**: For uprobe support and TLS handshake monitoring
 
 ---
