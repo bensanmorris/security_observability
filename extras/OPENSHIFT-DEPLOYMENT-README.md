@@ -255,6 +255,49 @@ basic operational needs.
 
 ---
 
+## Rebuilding and redeploying after a code change
+
+Once the DaemonSet is up, iterating on `agent/`/`cert_analyzer.py` changes means getting a new
+image built and actually picked up — which is less trivial than it sounds.
+
+```bash
+# 1. Rebuild (from the repository root, not extras/)
+bash extras/build.sh
+
+# 2. Push under a FRESH tag, not :latest
+HOST=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+TAG="dev-$(date +%s)"
+sudo podman tag localhost/cert-analyzer:latest "$HOST/certsight/cert-analyzer:$TAG"
+sudo podman push --tls-verify=false "$HOST/certsight/cert-analyzer:$TAG"
+
+# 3. Point the DaemonSet at the new tag
+oc set image daemonset/cert-expiry-monitor \
+  analyzer="image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:$TAG" \
+  -n certsight
+
+# 4. Confirm the new pod picked up the new digest
+oc get pods -n certsight -o wide
+oc get pod <new-pod> -n certsight -o jsonpath='{.status.containerStatuses[0].imageID}'
+```
+
+**Why a fresh tag, not just re-pushing `:latest`**: the DaemonSet's `imagePullPolicy:
+IfNotPresent` means the node only checks whether an image with that exact tag *string* is
+already present locally — it does not compare digests. Re-pushing new content under `:latest`
+and deleting the pod is not enough; CRI-O still considers `cert-analyzer:latest` "present" from
+the previous pull and skips re-pulling, so the DaemonSet controller happily recreates the pod
+with the stale image. Evicting the node's cached copy first
+(`oc debug node/<node> -- chroot /host crictl rmi <image>`) works in principle, but the
+DaemonSet controller recreates the pod near-instantly after a delete, and `oc debug node`'s own
+startup overhead is too slow to win that race reliably — the image is usually still "in use by a
+container" by the time the `crictl rmi` call lands. A fresh tag sidesteps the whole problem: it
+was never cached, so the pull is unconditionally fresh regardless of policy.
+
+Once you're happy with a build, consider tagging and committing a real version instead of an
+ad hoc `dev-<timestamp>` tag, and updating `extras/openshift/daemonset.yaml`'s image field to
+match — the checked-in manifest intentionally stays on a stable tag rather than a moving one.
+
+---
+
 ## Validation
 
 Mirrors the flow in [`README-QUICKSTART.md`](README-QUICKSTART.md), adapted for `oc`:
