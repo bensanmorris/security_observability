@@ -67,7 +67,17 @@ spec:
           readOnly: true
         resources:
           limits:
-            memory: 256Mi
+            # Doubled from 256Mi after a soak test OOMKilled the container at
+            # 67 minutes under sustained load. The app's own
+            # cert_analyzer_process_rss_bytes never exceeded ~196MB, and
+            # cert_analyzer_cache_known_certs_size was nowhere near its
+            # 10,000-entry cap, so this wasn't the known_certs cache growing
+            # unbounded -- the working theory is cgroup page-cache pressure
+            # from the sheer volume of cert file reads (thousands/minute on a
+            # busy node) counting against the container's memory.max even
+            # though the process's own heap looked fine. See
+            # probe_tests/openshift-soak/ for the reproduction.
+            memory: 512Mi
             cpu: 200m
           requests:
             memory: 128Mi
