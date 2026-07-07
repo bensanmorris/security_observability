@@ -330,3 +330,7 @@ A 5-day test certificate should produce `tls_certificate_expiry_days` just under
 tls_certificate_expiry_days > 0`) checks for. Where a live UWM Prometheus is available, confirm
 the alert actually fires (`for: 5m`) via `Observe → Alerting` in the console rather than just
 checking the raw metric value.
+
+For a longer-running soak — repeated large-bundle background-parsing bursts and re-access
+cardinality-cap checks over hours instead of a single burst — see
+[`probe_tests/openshift-soak/`](../probe_tests/openshift-soak/).
