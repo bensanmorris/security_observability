@@ -344,3 +344,8 @@ checking the raw metric value.
 For a longer-running soak — repeated large-bundle background-parsing bursts and re-access
 cardinality-cap checks over hours instead of a single burst — see
 [`probe_tests/openshift-soak/`](../probe_tests/openshift-soak/).
+
+To bring the whole demo (CRC, Tetragon, cert-analyzer, tracing policies, soak Job) back up after
+a host reboot without re-running every step above by hand, use the menu-driven
+[`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh) — it currently offers
+"start the soak demo from a reboot" and is the home for future OpenShift utility scripts.
