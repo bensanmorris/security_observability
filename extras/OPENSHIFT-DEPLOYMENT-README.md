@@ -280,6 +280,11 @@ oc get pods -n certsight -o wide
 oc get pod <new-pod> -n certsight -o jsonpath='{.status.containerStatuses[0].imageID}'
 ```
 
+All four steps are automated by
+[`extras/openshift/scripts/rebuild-redeploy-cert-analyzer.sh`](openshift/scripts/rebuild-redeploy-cert-analyzer.sh)
+(reachable via the [`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh) menu) —
+useful to know the manual steps below for troubleshooting, but day to day the script is faster.
+
 **Why a fresh tag, not just re-pushing `:latest`**: the DaemonSet's `imagePullPolicy:
 IfNotPresent` means the node only checks whether an image with that exact tag *string* is
 already present locally — it does not compare digests. Re-pushing new content under `:latest`
