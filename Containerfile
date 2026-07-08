@@ -6,8 +6,12 @@
 # =============================================================================
 ARG UBI_VERSION=9
 ARG PYTHON_VERSION=311
+# Override to point at a corporate mirror/proxy of the UBI Python image
+# (e.g. registry.corp.example.com/ubi9/python-311:latest) instead of the
+# public Red Hat registry.
+ARG UBI_PYTHON_IMAGE=registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest
 
-FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest AS proto-builder
+FROM ${UBI_PYTHON_IMAGE} AS proto-builder
 
 ARG TETRAGON_VERSION=v1.7.0
 ARG PIP_INDEX_URL=https://pypi.org/simple/
@@ -58,7 +62,7 @@ RUN python -c "import sys; sys.path.insert(0, '/build/generated'); from tetragon
 # Only the compiled bindings and application code are copied in.
 # No compiler toolchain, no git, no grpcio-tools.
 # =============================================================================
-FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest AS runtime
+FROM ${UBI_PYTHON_IMAGE} AS runtime
 
 ARG PIP_INDEX_URL=https://pypi.org/simple/
 ARG PIP_TRUSTED_HOST=pypi.org
