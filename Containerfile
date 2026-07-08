@@ -14,8 +14,11 @@ ARG UBI_PYTHON_IMAGE=registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHO
 FROM ${UBI_PYTHON_IMAGE} AS proto-builder
 
 ARG TETRAGON_VERSION=v1.7.0
-ARG PIP_INDEX_URL=https://pypi.org/simple/
-ARG PIP_TRUSTED_HOST=pypi.org
+# Leave unset to use whatever index pip is already configured for in the
+# base image (e.g. a corporate mirror baked into /etc/pip.conf) instead of
+# forcing one here. Only set these if the base image has no such default.
+ARG PIP_INDEX_URL=
+ARG PIP_TRUSTED_HOST=
 
 USER 0
 
@@ -24,10 +27,12 @@ WORKDIR /build
 # git is needed to fetch the Tetragon source tree at the specified tag
 RUN dnf install -y --setopt=tsflags=nodocs git && dnf clean all
 
-# Install the protobuf compiler (grpcio-tools) from your accessible index
+# Install the protobuf compiler (grpcio-tools) from your accessible index.
+# ${VAR:+...} omits the flag entirely when PIP_INDEX_URL/PIP_TRUSTED_HOST are
+# unset, falling back to the base image's own pip configuration.
 RUN pip install --no-cache-dir \
-    --index-url ${PIP_INDEX_URL} \
-    --trusted-host ${PIP_TRUSTED_HOST} \
+    ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+    ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} \
     grpcio-tools==1.60.1 \
     protobuf==4.25.3
 
@@ -64,8 +69,10 @@ RUN python -c "import sys; sys.path.insert(0, '/build/generated'); from tetragon
 # =============================================================================
 FROM ${UBI_PYTHON_IMAGE} AS runtime
 
-ARG PIP_INDEX_URL=https://pypi.org/simple/
-ARG PIP_TRUSTED_HOST=pypi.org
+# See the proto-builder stage above — leave unset to use the base image's own
+# pip configuration (e.g. a corporate mirror baked into /etc/pip.conf).
+ARG PIP_INDEX_URL=
+ARG PIP_TRUSTED_HOST=
 # Re-declare so it's available in this stage (top-level ARGs don't cross stages)
 ARG TETRAGON_VERSION=v1.7.0
 # Version of the cert-analyzer itself — set from git tag or commit SHA by CI
@@ -83,11 +90,11 @@ WORKDIR /app
 # Install runtime Python dependencies only
 COPY requirements.txt .
 RUN pip install --upgrade pip --no-cache-dir \
-        --index-url ${PIP_INDEX_URL} \
-        --trusted-host ${PIP_TRUSTED_HOST} && \
+        ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+        ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} && \
     pip install --no-cache-dir \
-        --index-url ${PIP_INDEX_URL} \
-        --trusted-host ${PIP_TRUSTED_HOST} \
+        ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+        ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} \
         --only-binary=grpcio \
         -r requirements.txt
 
