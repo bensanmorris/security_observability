@@ -1478,16 +1478,24 @@
               "cert_path": 1,
               "process": 2,
               "parent_process": 3,
-              "issuer": 4,
-              "node_name": 5,
-              "Value": 7,
-              "checksum": 6
+              "pod_name": 4,
+              "namespace": 5,
+              "app_label": 6,
+              "container_name": 7,
+              "issuer": 8,
+              "node_name": 9,
+              "Value": 11,
+              "checksum": 10
             },
             "renameByName": {
               "common_name": "Common Name",
               "cert_path": "Path",
               "process": "Process",
               "parent_process": "Parent Process",
+              "pod_name": "Pod",
+              "namespace": "Namespace",
+              "app_label": "App",
+              "container_name": "Container",
               "issuer": "Issuer",
               "node_name": "Node",
               "Value": "Days Until Expiry",
@@ -2076,7 +2084,7 @@
               "job": true,
               "Value": true,
               "workload_kind": false,
-              "app_label": true
+              "app_label": false
             },
             "renameByName": {
               "cert_path": "Path",
@@ -2087,6 +2095,8 @@
               "workload_kind": "Workload Kind",
               "workload_name": "Workload",
               "pod_name": "Pod",
+              "app_label": "App",
+              "container_name": "Container",
               "node_name": "Node",
               "key_size": "Key Size",
               "curve_name": "EC Curve"
@@ -2264,6 +2274,8 @@
               "workload_kind": "Workload Kind",
               "workload_name": "Workload",
               "pod_name": "Pod",
+              "app_label": "App",
+              "container_name": "Container",
               "node_name": "Node"
             }
           }
@@ -2573,13 +2585,21 @@
             "indexByName": {
               "parent_process": 0,
               "process": 1,
-              "common_name": 2,
-              "cert_path": 3,
-              "node_name": 4
+              "pod_name": 2,
+              "namespace": 3,
+              "app_label": 4,
+              "container_name": 5,
+              "common_name": 6,
+              "cert_path": 7,
+              "node_name": 8
             },
             "renameByName": {
               "parent_process": "Parent Process",
               "process": "Process",
+              "pod_name": "Pod",
+              "namespace": "Namespace",
+              "app_label": "App",
+              "container_name": "Container",
               "common_name": "Common Name",
               "cert_path": "Path",
               "node_name": "Node"

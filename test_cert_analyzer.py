@@ -707,6 +707,54 @@ class TestPeriodicScan:
         assert len(matching) == 1
         analyzer.kafka_publisher.publish.assert_called_once()
 
+    def test_new_file_gets_analyzer_node_name_not_empty(self, analyzer, temp_dir):
+        """
+        A cert discovered via periodic_scan must carry the analyzer's own
+        configured node identity (_NODE_NAME), not an empty string.
+
+        periodic_scan has no Tetragon event to read node_name from (unlike the
+        real-time event path), so it used to hardcode node_name="" -- silently
+        dropping every periodic-scan-only cert (the majority on any node, since
+        periodic scan sweeps the whole filesystem while Tetragon only catches
+        real-time accesses) into its own empty-node_name bucket on any
+        Prometheus query grouped `by (node_name)`, alongside the real per-node
+        groups.
+        """
+        from agent.constants import _NODE_NAME
+
+        cert, _ = TestCertificateGeneration.generate_certificate("nodename.example.com", 365)
+        cert_path = os.path.join(temp_dir, "nodename.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, cert_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(cert_path + ":")]
+        assert len(matching) == 1
+        cert_info = analyzer.known_certs[matching[0]]
+        assert cert_info.node_name == _NODE_NAME
+        assert cert_info.node_name != ""
+
+    def test_large_bundle_gets_analyzer_node_name_not_empty(self, analyzer, temp_dir):
+        """Same as above, but for the large-bundle path routed through _process_certificate_file_async."""
+        from agent.constants import _NODE_NAME
+
+        analyzer._large_file_cert_threshold = 3
+        certs = [TestCertificateGeneration.generate_certificate(f"c{i}.example.com", 365)[0]
+                 for i in range(5)]
+        bundle_path = os.path.join(temp_dir, "nodename_bundle.pem")
+        TestCertificateGeneration.save_multi_certificate_pem(certs, bundle_path)
+
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and bundle_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
+        assert len(matching) == 5
+        for key in matching:
+            assert analyzer.known_certs[key].node_name == _NODE_NAME
+
     def test_nonexistent_scan_path_is_skipped(self, analyzer):
         """A configured scan path that doesn't exist on disk is skipped without raising."""
         analyzer.periodic_scan(["/nonexistent/scan/path"])
@@ -2673,10 +2721,11 @@ class TestCacheHitReDetection:
     """
 
     class _MockEvent:
-        """Minimal mock Tetragon kprobe event with a configurable process binary."""
+        """Minimal mock Tetragon kprobe event with a configurable process binary
+        and, optionally, pod context (for per-access pod attribution tests)."""
         node_name = ''
 
-        def __init__(self, path, process_binary):
+        def __init__(self, path, process_binary, pod=None):
             class _Arg:
                 def __init__(self, path):
                     self.string_arg = path
@@ -2684,21 +2733,22 @@ class TestCacheHitReDetection:
                     return name == 'string_arg'
 
             class _Process:
-                def __init__(self, binary):
+                def __init__(self, binary, pod):
                     self.binary    = binary
                     self.pid       = 4321
                     self.arguments = ''
+                    self.pod       = pod
                 def HasField(self, name):
-                    return False
+                    return name == 'pod' and self.pod is not None
 
             class _Kprobe:
-                def __init__(self, path, binary):
-                    self.process = _Process(binary)
+                def __init__(self, path, binary, pod):
+                    self.process = _Process(binary, pod)
                     self.args    = [_Arg(path)]
                 def HasField(self, name):
                     return False
 
-            self._kprobe = _Kprobe(path, process_binary)
+            self._kprobe = _Kprobe(path, process_binary, pod)
 
         def HasField(self, name):
             return name == 'process_kprobe'
@@ -2737,15 +2787,58 @@ class TestCacheHitReDetection:
         gauge = analyzer.metrics.cert_process_info
         cat_val = gauge.labels(
             cert_path=disk_path, cert_index='0', serial='42',
-            process='/usr/bin/cat', parent_process='', node_name='', checksum='',
+            process='/usr/bin/cat', parent_process='', node_name='',
+            pod_name='', namespace='', app_label='', container_name='', checksum='',
         )._value.get()
         firefox_val = gauge.labels(
             cert_path=disk_path, cert_index='0', serial='42',
-            process='/usr/lib64/firefox/firefox', parent_process='', node_name='', checksum='',
+            process='/usr/lib64/firefox/firefox', parent_process='', node_name='',
+            pod_name='', namespace='', app_label='', container_name='', checksum='',
         )._value.get()
 
         assert cat_val == 1, "original discoverer's series must survive the re-detection"
         assert firefox_val == 1, "new accessing process must get its own series"
+
+    def test_redetection_by_different_pods_attributes_each_to_its_own_pod(self, analyzer, temp_dir):
+        """
+        The same process binary re-detecting a known cert file from two
+        different pods must produce two distinct tls_certificate_process_info
+        series, each correctly labeled with *its own* pod_name/namespace/
+        app_label/container_name — not both attributed to the cert's own
+        (possibly different) discovering pod, which is what using cert_info's
+        sticky pod fields instead of the current event's would have done.
+        """
+        disk_path = os.path.join(temp_dir, "multi-pod-ca.pem")
+        # Discovered outside any pod (cert_info.pod_name stays "").
+        self._seed_known_cert(analyzer, disk_path, process='/usr/bin/python')
+
+        pod_a = MockTetragonPod(
+            name="svc-a-abc12", namespace="ns-a", pod_labels={"app": "svc-a"},
+            container=MockTetragonContainer(name="main-a"),
+        )
+        pod_b = MockTetragonPod(
+            name="svc-b-def34", namespace="ns-b", pod_labels={"app": "svc-b"},
+            container=MockTetragonContainer(name="main-b"),
+        )
+
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/python', pod=pod_a))
+        analyzer.process_event(self._MockEvent(disk_path, '/usr/bin/python', pod=pod_b))
+
+        gauge = analyzer.metrics.cert_process_info
+        samples = [
+            s for metric in gauge.collect() for s in metric.samples
+            if s.labels.get('cert_path') == disk_path
+        ]
+        by_pod = {s.labels['pod_name']: s.labels for s in samples}
+
+        assert "svc-a-abc12" in by_pod, "pod-a's access must get its own series"
+        assert "svc-b-def34" in by_pod, "pod-b's access must get its own series"
+        assert by_pod["svc-a-abc12"]['namespace']      == 'ns-a'
+        assert by_pod["svc-a-abc12"]['app_label']      == 'svc-a'
+        assert by_pod["svc-a-abc12"]['container_name'] == 'main-a'
+        assert by_pod["svc-b-def34"]['namespace']      == 'ns-b'
+        assert by_pod["svc-b-def34"]['app_label']      == 'svc-b'
+        assert by_pod["svc-b-def34"]['container_name'] == 'main-b'
 
     def test_redetection_updates_last_accessed_timestamp(self, analyzer, temp_dir):
         """tls_certificate_last_accessed_timestamp is refreshed on re-detection."""
@@ -4746,13 +4839,29 @@ from cert_analyzer import HealthServer
 
 
 class _MockChannel:
-    """Mock gRPC channel with controllable connectivity state."""
+    """
+    Mock gRPC channel with controllable connectivity state.
+
+    check_connectivity_state() returns a bare int (self._state.value[0]),
+    exactly like the real private grpc._channel.Channel.check_connectivity_state()
+    HealthServer.is_live() actually calls (grpc 1.60.1's Channel has no public
+    synchronous get_state() -- only the async subscribe()/unsubscribe() pair).
+    An earlier version of this mock returned the grpc.ChannelConnectivity
+    member itself instead of the raw int, which let a real bug ship unnoticed:
+    production code called grpc.ChannelConnectivity(<int>) on the real raw int,
+    which always raises ValueError (the enum's real values are (int, name)
+    tuples, not bare ints), silently caught and defaulting every check to
+    "unknown"/True. Passing the enum member straight through masked this
+    completely, since enum-from-existing-member construction is a no-op --
+    only a mock returning the same *shape* of value the real API returns
+    would have caught it.
+    """
     def __init__(self, state=grpc.ChannelConnectivity.READY):
         self._state = state
-        self._channel = self
+        self._channel = self  # mirrors channel._channel.check_connectivity_state(...)
 
-    def check_connectivity_state(self, try_to_connect):
-        return self._state
+    def check_connectivity_state(self, try_to_connect=False):
+        return self._state.value[0]
 
 
 def _make_health_server(analyzer, grace=0, staleness=300, port=None):
@@ -4806,6 +4915,10 @@ class TestHealthServerLiveness:
         status, body = _get(hs.port, '/healthz')
         hs.stop()
         assert status == 200
+        # Pins the actual channel state as the reason, not the "unknown"
+        # fallback a broken state-check would silently produce -- see
+        # _MockChannel's docstring for the bug this would have caught.
+        assert body['reason'] == 'ready'
 
     def test_liveness_returns_200_when_channel_transient_failure(self, analyzer):
         """
@@ -4818,6 +4931,7 @@ class TestHealthServerLiveness:
         status, body = _get(hs.port, '/healthz')
         hs.stop()
         assert status == 200
+        assert body['reason'] == 'transient_failure'
 
     def test_liveness_returns_200_when_channel_idle(self, analyzer):
         """Liveness is 200 when channel is IDLE (not yet connected)."""
@@ -4827,6 +4941,7 @@ class TestHealthServerLiveness:
         status, body = _get(hs.port, '/healthz')
         hs.stop()
         assert status == 200
+        assert body['reason'] == 'idle'
 
     def test_liveness_returns_503_when_channel_shutdown(self, analyzer):
         """Liveness is 503 only when the channel has been explicitly shut down."""
@@ -6712,6 +6827,8 @@ class TestSelfSignedDetection:
             workload_kind="",
             workload_name="",
             node_name="",
+            app_label="",
+            container_name="",
             is_ca="unknown",  # generate_certificate without is_ca=True adds no BasicConstraints
             issuer=cert_infos[0].issuer[:100],
             serial=cert_infos[0].serial_number,
@@ -6738,6 +6855,8 @@ class TestSelfSignedDetection:
             workload_kind="",
             workload_name="",
             node_name="",
+            app_label="",
+            container_name="",
             is_ca="unknown",  # _generate_ca_signed_certificate adds no BasicConstraints
             issuer=cert_infos[0].issuer[:100],
             serial=cert_infos[0].serial_number,

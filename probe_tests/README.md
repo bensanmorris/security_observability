@@ -471,3 +471,8 @@ sudo tetra tracingpolicy delete certificate-file-access
 not `cert_fips_compliant`/`tls_certificate_expiry_days` correctness for the
 bundle's certs — that's already covered by
 `TestLargeFileBackgroundProcessing` in `test_cert_analyzer.py`.
+
+**On OpenShift**, use [`openshift-soak/`](openshift-soak/) instead — same
+scenario, but packaged as a container Job so it can write onto the node's
+real filesystem and drive a genuinely unattended multi-hour soak, neither of
+which this script can do against a remote cluster.

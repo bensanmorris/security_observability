@@ -10,7 +10,7 @@
 #
 # Usage:
 #   kind load docker-image ghcr.io/<owner>/cert-test-generator:latest
-#   kubectl apply -f k8s_enrich_demo/job.yaml
+#   kubectl apply -f test-cert-generator/job.yaml
 #   kubectl -n kube-system logs -f deployment/cert-test-generator
 ---
 apiVersion: apps/v1

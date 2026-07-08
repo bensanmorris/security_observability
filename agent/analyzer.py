@@ -258,11 +258,20 @@ class CertificateAnalyzer:
         self.metrics.cache_password_failed_size.labels(node_name=self.metrics._node_name).set(len(self.password_failed_paths))
         self.metrics.update_process_metrics()
 
-    def _record_cert_process_access(self, cert_info: CertificateInfo, process: str, parent_process: str) -> None:
+    def _record_cert_process_access(self, cert_info: CertificateInfo, process: str, parent_process: str,
+                                     pod_name: str = "", namespace: str = "",
+                                     app_label: str = "", container_name: str = "") -> None:
         """
         Record that `process` has accessed an already-known cert, capped at
-        max_processes_per_cert distinct (process, parent_process) pairs per
-        cert.
+        max_processes_per_cert distinct (process, parent_process, pod_name,
+        namespace, app_label, container_name) tuples per cert.
+
+        pod_name/namespace/app_label/container_name describe *this specific
+        access* (the caller's current event), not cert_info's own pod fields —
+        those are set once by whichever access first discovered the cert (see
+        _apply_pod_context) and stay sticky to that discoverer even when a
+        different pod later accesses the same cert, so they'd misattribute
+        every subsequent access to the wrong pod if used here instead.
 
         Without this cap, a file opened by many unrelated binaries over the
         life of the process (e.g. the system CA trust bundle touched by curl,
@@ -277,8 +286,8 @@ class CertificateAnalyzer:
         lock — nothing else mutates it after the initial seed in
         PrometheusMetrics.update_certificate_metrics.
         """
-        pair = (process, parent_process)
-        if pair not in cert_info._seen_processes:
+        key = (process, parent_process, pod_name, namespace, app_label, container_name)
+        if key not in cert_info._seen_processes:
             if len(cert_info._seen_processes) >= self._max_processes_per_cert:
                 logger.debug(
                     "cert_process_info fan-out cap (%s) reached for %s — "
@@ -287,8 +296,10 @@ class CertificateAnalyzer:
                 )
                 self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached').inc()
                 return
-            cert_info._seen_processes.add(pair)
-        self.metrics.record_cert_process_access(cert_info, process, parent_process)
+            cert_info._seen_processes.add(key)
+        self.metrics.record_cert_process_access(
+            cert_info, process, parent_process, pod_name, namespace, app_label, container_name,
+        )
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -1035,6 +1046,33 @@ class CertificateAnalyzer:
             cert_info.container_name, cert_info.container_image,
             cert_info.container_privileged, cert_info.pod_labels,
         )
+
+    @staticmethod
+    def _derive_app_label_and_container_name(tetragon_pod) -> Tuple[str, str]:
+        """
+        Derive (app_label, container_name) directly from a raw Tetragon pod
+        proto, without mutating a CertificateInfo.
+
+        Used for per-access attribution (tls_certificate_process_info), where
+        the *current* event's pod/container may differ from the cert's own
+        (sticky, set-once-by-the-discoverer) pod_name/namespace/app_label/
+        container_name -- see _apply_pod_context's "only if not already set"
+        guard at its call site. Mirrors the same app_label preference order
+        (app.kubernetes.io/name, then app, then name) that _apply_pod_context
+        uses, so the two stay consistent for the same pod.
+
+        Returns ("", "") if tetragon_pod is None.
+        """
+        if tetragon_pod is None:
+            return "", ""
+        app_label = ""
+        pod_labels = tetragon_pod.pod_labels
+        if pod_labels:
+            for key in ["app.kubernetes.io/name", "app", "name"]:
+                if key in pod_labels:
+                    app_label = pod_labels[key]
+                    break
+        return app_label, tetragon_pod.container.name
 
     def log_certificate_status(self, info: CertificateInfo, summary_only: bool = False):
         """
@@ -1899,6 +1937,10 @@ class CertificateAnalyzer:
             # to large_file_metrics_cap certs, same cap as the initial-parse cap.
             metrics_cap = self._large_file_metrics_cap
             is_bundle = len(matching_keys) > metrics_cap
+            # Derived once per event, not per cached cert below -- this is the
+            # *accessing* pod/container for this specific event, independent of
+            # each cert_info's own (sticky, discoverer-attributed) pod fields.
+            app_label, container_name = self._derive_app_label_and_container_name(tetragon_pod)
             for i, key in enumerate(matching_keys):
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
@@ -1917,7 +1959,10 @@ class CertificateAnalyzer:
                 # in this file.
                 self.log_certificate_status(cert_info, summary_only=True)
                 self.metrics.update_last_accessed(cert_info)
-                self._record_cert_process_access(cert_info, process_name, parent_process)
+                self._record_cert_process_access(
+                    cert_info, process_name, parent_process,
+                    pod_name, namespace, app_label, container_name,
+                )
 
             if is_bundle:
                 logger.info(
@@ -2305,7 +2350,7 @@ class CertificateAnalyzer:
                     if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
                         self._process_certificate_file_async(
                             cert_path, "periodic_scan", 0, "",
-                            None, "", 0, "",
+                            None, "", 0, _NODE_NAME,
                         )
                         continue
 
@@ -2322,7 +2367,7 @@ class CertificateAnalyzer:
                         if cert_infos:
                             self._finish_new_certificate_file(
                                 cert_infos, tetragon_pod=None, parent_process="",
-                                parent_pid=0, node_name="",
+                                parent_pid=0, node_name=_NODE_NAME,
                             )
                             cert_count += len(cert_infos)
                     finally:

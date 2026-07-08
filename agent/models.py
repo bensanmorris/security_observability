@@ -60,14 +60,17 @@ class CertificateInfo:
     # verifies against its own public key). Root CA certificates are legitimately
     # self-signed; self-signed leaf certificates are typically a configuration risk.
     is_self_signed: bool = False
-    # Distinct (process, parent_process) pairs already given their own
-    # tls_certificate_process_info series for this cert, capped at
-    # max_processes_per_cert (see CertificateAnalyzer._record_cert_process_access).
+    # Distinct (process, parent_process, pod_name, namespace, app_label,
+    # container_name) tuples already given their own tls_certificate_process_info
+    # series for this cert, capped at max_processes_per_cert (see
+    # CertificateAnalyzer._record_cert_process_access). The pod/namespace/label
+    # fields reflect the *accessing* event, not this CertificateInfo's own
+    # (possibly different, sticky-to-the-discoverer) pod_name/namespace/etc.
     # Internal bookkeeping only — not cert data, not published to Kafka, and
     # excluded from repr/equality so it doesn't affect anything that compares
     # or prints a CertificateInfo. Dies naturally when the cert is LRU-evicted
     # from known_certs, so it needs no separate cleanup of its own.
-    _seen_processes: Set[Tuple[str, str]] = field(default_factory=set, repr=False, compare=False)
+    _seen_processes: Set[Tuple[str, str, str, str, str, str]] = field(default_factory=set, repr=False, compare=False)
 
     @property
     def days_until_expiry(self) -> float:

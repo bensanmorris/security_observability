@@ -1,14 +1,19 @@
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: certsight
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: cert-expiry-monitor
-  namespace: kube-system
+  namespace: certsight
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: cert-expiry-monitor
-  namespace: kube-system
+  namespace: certsight
   labels:
     app: cert-expiry-monitor
 spec:
@@ -19,22 +24,22 @@ spec:
     metadata:
       labels:
         app: cert-expiry-monitor
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
     spec:
       serviceAccountName: cert-expiry-monitor
       hostNetwork: true
       hostPID: true
       containers:
       - name: analyzer
-        image: localhost/cert-analyzer:latest
-        imagePullPolicy: Never
+        # Internal OpenShift registry path (see extras/OPENSHIFT-DEPLOYMENT-README.md for how
+        # this gets populated). Avoid 'latest' in production - use a versioned tag.
+        image: image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:latest
+        imagePullPolicy: IfNotPresent
         env:
         - name: TETRAGON_ADDR
-          # cilium/tetragon 1.6+ serves the gRPC socket from /var/run/tetragon, not
-          # /var/run/cilium/tetragon (that path is only used for the JSON export log file) -
-          # confirmed against the chart's daemonset.yaml and _container_tetragon.tpl.
+          # Confirmed against the running cilium/tetragon 1.7.0 chart: the agent's gRPC
+          # socket lives at /var/run/tetragon/tetragon.sock, NOT /var/run/cilium/tetragon/
+          # (that path is only used for the export log file) - the vanilla kubernetes/
+          # deployment.yaml in this repo predates this and points at the wrong path.
           value: "unix:///var/run/tetragon/tetragon.sock"
         - name: METRICS_PORT
           value: "9090"
@@ -62,7 +67,17 @@ spec:
           readOnly: true
         resources:
           limits:
-            memory: 256Mi
+            # Doubled from 256Mi after a soak test OOMKilled the container at
+            # 67 minutes under sustained load. The app's own
+            # cert_analyzer_process_rss_bytes never exceeded ~196MB, and
+            # cert_analyzer_cache_known_certs_size was nowhere near its
+            # 10,000-entry cap, so this wasn't the known_certs cache growing
+            # unbounded -- the working theory is cgroup page-cache pressure
+            # from the sheer volume of cert file reads (thousands/minute on a
+            # busy node) counting against the container's memory.max even
+            # though the process's own heap looked fine. See
+            # probe_tests/openshift-soak/ for the reproduction.
+            memory: 512Mi
             cpu: 200m
           requests:
             memory: 128Mi
@@ -95,10 +110,22 @@ spec:
           capabilities:
             drop:
             - ALL
-          runAsNonRoot: true
-          runAsUser: 1001
-          seccompProfile:
-            type: RuntimeDefault
+          # No explicit seccompProfile: the 'hostaccess' SCC advertises
+          # seccompProfiles: ["runtime/default"] as allowed, but in practice this cluster's
+          # SCC admission rejects any pod that sets securityContext.seccompProfile at all
+          # (pod-level or container-level) for this SA - confirmed via
+          # `oc adm policy scc-review`. Omitting the field entirely admits fine; hostaccess's
+          # own default is applied. Worth re-testing against the real pilot cluster in case
+          # this is CRC-bundle-specific.
+      securityContext:
+        # No fixed runAsUser: the 'hostaccess' SCC (see scc-hostaccess-binding.yaml) enforces
+        # MustRunAsRange, so a UID from the certsight namespace's allocated range is assigned
+        # automatically. The Tetragon gRPC socket is root:root mode 0660 on the host
+        # (srw-rw----), so the container needs supplemental group 0 (root) to read/write it -
+        # this is the standard way to reach a root-owned hostPath socket without running as
+        # root itself.
+        supplementalGroups:
+        - 0
       volumes:
       - name: tetragon-sock
         hostPath:
@@ -118,7 +145,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: cert-expiry-monitor
-  namespace: kube-system
+  namespace: certsight
   labels:
     app: cert-expiry-monitor
 spec:
@@ -154,7 +181,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: cert-expiry-monitor
-    namespace: kube-system
+    namespace: certsight
 roleRef:
   kind: ClusterRole
   name: cert-expiry-monitor-pod-reader

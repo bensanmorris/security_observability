@@ -48,7 +48,7 @@ jobs:
             - 'tetragon-config/**'
             - '.github/workflows/build.yml'
           test-generator:
-            - 'k8s_enrich_demo/**'
+            - 'test-cert-generator/**'
             - '.github/workflows/build.yml'
           probe-tests:
             - 'probe_tests/**'
@@ -380,7 +380,7 @@ jobs:
         echo "**Grafana dashboard:** \`${{ steps.dashboard.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
 
   build-test-generator:
-    name: Build Test Cert Generator (k8s_enrich_demo)
+    name: Build Test Cert Generator (test-cert-generator)
     runs-on: ubuntu-latest
     needs: changes
     if: |
@@ -430,8 +430,8 @@ jobs:
     - name: Build (and push on merge)
       uses: docker/build-push-action@v5
       with:
-        context: k8s_enrich_demo
-        file: k8s_enrich_demo/Containerfile
+        context: test-cert-generator
+        file: test-cert-generator/Containerfile
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
@@ -463,7 +463,7 @@ jobs:
 
     - name: Build summary
       run: |
-        echo "## 🧪 Test Cert Generator (k8s_enrich_demo)" >> $GITHUB_STEP_SUMMARY
+        echo "## 🧪 Test Cert Generator (test-cert-generator)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Pushed:** \`${{ github.event_name != 'pull_request' }}\`" >> $GITHUB_STEP_SUMMARY
@@ -476,7 +476,7 @@ jobs:
         echo "**Deploy to kind:**" >> $GITHUB_STEP_SUMMARY
         echo '```bash' >> $GITHUB_STEP_SUMMARY
         echo "kind load docker-image ghcr.io/${{ github.repository_owner }}/cert-test-generator:latest" >> $GITHUB_STEP_SUMMARY
-        echo "kubectl apply -f k8s_enrich_demo/job.yaml" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl apply -f test-cert-generator/job.yaml" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
 
   build-probe-tests:

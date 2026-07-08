@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-soak-test
+  namespace: certsight
+---
+# hostmount-anyuid (the narrower SCC that just permits a hostPath volume) is
+# NOT enough here: RHCOS hosts label /etc/pki/tls/certs as SELinux type
+# cert_t, and confined containers (container_t, what every other SCC here
+# assigns) get an AVC write denial against it regardless of UID -- confirmed
+# via `ausearch -m avc`: "denied { write } ... scontext=container_t
+# tcontext=...cert_t". Writing there needs the spc_t (super-privileged
+# container) SELinux type instead, which requires the privileged SCC
+# (seLinuxContext: RunAsAny) so the pod can actually request it below.
+# This soak Job is purely a test tool, not part of the deployed product, so
+# the wider grant here doesn't affect cert-analyzer's own security posture.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-soak-test-privileged-scc
+  namespace: certsight
+subjects:
+- kind: ServiceAccount
+  name: cert-soak-test
+  namespace: certsight
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cert-soak-test
+  namespace: certsight
+spec:
+  backoffLimit: 0
+  # Hard external stop in case the script itself hangs — a bit past the
+  # --duration passed to soak_test.py below so the script's own clean exit
+  # wins under normal operation.
+  activeDeadlineSeconds: 14700
+  template:
+    spec:
+      serviceAccountName: cert-soak-test
+      restartPolicy: Never
+      # Runs wherever the scheduler puts it by default (fine on CRC's single
+      # node); on a multi-node cluster, pin this to the same node as the
+      # cert-analyzer pod you want to soak so the hostPath write and the
+      # analyzer's own /host mount really are the same filesystem.
+      containers:
+      - name: soak
+        image: image-registry.openshift-image-registry.svc:5000/certsight/cert-soak-test:latest
+        imagePullPolicy: IfNotPresent
+        args:
+          - "--count=50"
+          - "--parallel-processes=25"
+          - "--loop-interval=300"
+          - "--duration=14400"     # 4 hours; adjust to taste
+        volumeMounts:
+        - name: host-pki-certs
+          mountPath: /etc/pki/tls/certs
+        resources:
+          limits:
+            memory: 256Mi
+            cpu: 500m
+          requests:
+            memory: 64Mi
+            cpu: 100m
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seLinuxOptions:
+            type: spc_t
+      volumes:
+      - name: host-pki-certs
+        hostPath:
+          path: /etc/pki/tls/certs
+          type: Directory
