@@ -17,9 +17,12 @@
 # nothing below is fetched by this script when OFFLINE=1 — it fails fast instead of
 # hanging on a dead network call if a required one is missing.
 #
-#   OFFLINE_RPM_DIR         Dir of .rpm files for NetworkManager/libvirt/qemu-kvm/podman
-#                           and their deps, e.g. via 'dnf download --resolve <pkgs>' on a
-#                           connected host running the same RHEL9 minor version.
+#   OFFLINE_RPM_DIR         Dir of .rpm files for NetworkManager/libvirt/qemu-kvm/podman and
+#                           every dependency they need beyond a standard RHEL9 install (see
+#                           rpms/README.md for exactly how the set was computed). Defaults to
+#                           this script's own rpms/ subdirectory if it exists and isn't empty
+#                           — a pre-populated set for RHEL 9.8/x86_64 already lives there;
+#                           regenerate it if the target runs a different minor version.
 #   HELM_BINARY_FILE        A helm binary (it's a single static Go binary — just copy
 #                           /usr/local/bin/helm from a connected machine).
 #   CRC_TARBALL_FILE        crc-linux-amd64.tar.xz (or an already-extracted crc binary)
@@ -52,7 +55,13 @@ CRC_VERSION="${CRC_VERSION:-2.57.0}"
 CRC_DISK_SIZE="${CRC_DISK_SIZE:-60}"
 TETRAGON_VERSION="${TETRAGON_VERSION:-1.7.0}"
 PULL_SECRET_FILE="${PULL_SECRET_FILE:-$HOME/pull-secret.json}"
-OFFLINE_RPM_DIR="${OFFLINE_RPM_DIR:-}"
+if [[ -n "${OFFLINE_RPM_DIR:-}" ]]; then
+    OFFLINE_RPM_DIR="$OFFLINE_RPM_DIR"
+elif [[ -d "$SCRIPT_DIR/rpms" ]] && compgen -G "$SCRIPT_DIR/rpms/*.rpm" >/dev/null; then
+    OFFLINE_RPM_DIR="$SCRIPT_DIR/rpms"
+else
+    OFFLINE_RPM_DIR=""
+fi
 HELM_BINARY_FILE="${HELM_BINARY_FILE:-}"
 CRC_TARBALL_FILE="${CRC_TARBALL_FILE:-}"
 CRC_BUNDLE_FILE="${CRC_BUNDLE_FILE:-}"
