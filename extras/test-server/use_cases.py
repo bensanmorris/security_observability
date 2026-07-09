@@ -76,8 +76,17 @@ def _generate_and_read_fresh_cert() -> UseCaseResult:
         .sign(private_key, hashes.SHA256())
     )
 
+    # cert-analyzer runs as its own unprivileged 'cert-analyzer' user (see
+    # cert-analyzer.service), not as whoever runs this script -- it needs
+    # "other" read/execute on the dir and "other" read on the file to open
+    # them at all. mkdir/write_bytes alone would leave that to the caller's
+    # umask, which is fine under the common 022 default but silently breaks
+    # detection under a stricter one (e.g. 077), so set the bits explicitly
+    # rather than trust the environment.
     _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    path.chmod(0o644)
 
     try:
         proc = subprocess.run(["cat", str(path)], capture_output=True, text=True, timeout=10)

@@ -23,7 +23,10 @@ streamed live via Server-Sent Events as it arrives.
 - cert-analyzer configured with `[kafka] enabled = true` and pointed at a
   reachable broker -- see [extras/kafka/KAFKA-README.md](../kafka/KAFKA-README.md)
   to stand up a throwaway local broker
-- `kafka-python` (`pip install kafka-python`)
+- `kafka-python` and `cryptography` (`pip install kafka-python cryptography`)
+  -- `cryptography` is already a cert-analyzer dependency (see
+  `requirements.txt`), so nothing extra to install if you're running this
+  from the same virtualenv/environment as cert-analyzer itself
 - Run this **on the same host** cert-analyzer is monitoring -- use cases
   shell out to real local commands (e.g. `cat`), so running it from a
   different machine won't trigger anything
@@ -66,6 +69,24 @@ directory's contents by hand at any time. `/dev/shm` is used deliberately
 instead of `/tmp`: cert-analyzer's systemd unit runs with `PrivateTmp=true`,
 which gives it its own private `/tmp`/`/var/tmp` mount namespace that can't
 see files written to the host's `/tmp`.
+
+### Permissions on the generated cert directory
+
+No manual setup is required -- this all happens automatically -- but it's
+worth knowing why it works: `/dev/shm` itself is world-writable with the
+sticky bit set (`drwxrwxrwt`, same model as `/tmp`), so any user can create
+`certsight-test-server/` under it without `sudo`. cert-analyzer, however,
+runs as its own unprivileged `cert-analyzer` system user (see `User=` /
+`Group=` in `cert-analyzer.service`), not as whoever runs this test server,
+so it needs "other" read+execute on that directory and "other" read on
+each generated cert file to open them at all. `use_cases.py` sets those
+bits explicitly (`0o755` / `0o644`) after creating them rather than relying
+on the calling user's umask, since a stricter umask (e.g. `077`, common on
+hardened hosts) would otherwise silently produce files cert-analyzer can't
+read -- Tetragon would still report the file access (its `fd_install`
+kprobe doesn't care about DAC permissions), but cert-analyzer's own
+follow-up read of the file content would fail, and no event would reach
+Kafka.
 
 More use cases (JKS/PKCS12 keystores, in-memory OpenSSL/NSS certs, TLS
 service binds, outbound `tcp_connect` probes, Java cert-agent operations)
