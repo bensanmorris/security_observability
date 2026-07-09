@@ -343,12 +343,16 @@ jobs:
           python3.11 \
           python3.11-devel \
           rpm-build \
+          git \
           gcc \
           findutils \
           which
 
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Fix git safe directory
+      run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
     - name: Determine version string
       id: version
