@@ -23,19 +23,35 @@ streamed live via Server-Sent Events as it arrives.
 - cert-analyzer configured with `[kafka] enabled = true` and pointed at a
   reachable broker -- see [extras/kafka/KAFKA-README.md](../kafka/KAFKA-README.md)
   to stand up a throwaway local broker
-- `kafka-python` and `cryptography` (`pip install kafka-python cryptography`)
-  -- `cryptography` is already a cert-analyzer dependency (see
-  `requirements.txt`), so nothing extra to install if you're running this
-  from the same virtualenv/environment as cert-analyzer itself
+- Python 3.9+ with `python3-venv` (or equivalent) available
 - Run this **on the same host** cert-analyzer is monitoring -- use cases
   shell out to real local commands (e.g. `cat`), so running it from a
   different machine won't trigger anything
 
+## Set up a virtualenv
+
+```bash
+cd extras/test-server
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+`requirements.txt` pins the same `cryptography`/`kafka-python` versions as
+the main [requirements.txt](../../requirements.txt), so if you're already
+running cert-analyzer's own virtualenv on this host, that one already
+satisfies both and you can skip creating a separate one -- just `source`
+that venv's `activate` instead.
+
 ## Run
 
 ```bash
-python3 extras/test-server/server.py --kafka-host localhost --kafka-port 9092
+source .venv/bin/activate   # if not already active
+python3 server.py --kafka-host localhost --kafka-port 9092
 ```
+
+(Adjust the path to `server.py` if running from the repo root instead of
+`extras/test-server/`.)
 
 Then open http://localhost:8090.
 
