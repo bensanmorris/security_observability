@@ -381,6 +381,74 @@ class TestLargeFileBackgroundProcessing:
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
 
+    def test_is_large_certificate_file_pkcs12_uses_byte_cap(self, analyzer, temp_dir):
+        """
+        JKS/PKCS12 routing is gated by _large_file_byte_cap (size), not cert
+        count -- _count_pem_certs always returns 0 for these extensions
+        (they have no cheap text marker to count), so _is_large_certificate_file
+        must not fall through to the PEM-marker comparison for them. Content
+        doesn't matter here, only size, since the check is a plain stat().
+        """
+        analyzer._large_file_byte_cap = 100
+        small_path = os.path.join(temp_dir, "small.p12")
+        with open(small_path, 'wb') as f:
+            f.write(b'x' * 50)
+        large_path = os.path.join(temp_dir, "large.p12")
+        with open(large_path, 'wb') as f:
+            f.write(b'x' * 200)
+
+        assert not analyzer._is_large_certificate_file(small_path)
+        assert analyzer._is_large_certificate_file(large_path)
+
+        # Same gate applies to the other JKS/PKCS12 extensions.
+        jks_path = os.path.join(temp_dir, "large.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(b'x' * 200)
+        assert analyzer._is_large_certificate_file(jks_path)
+
+    def test_is_large_certificate_file_der_falls_back_to_byte_cap(self, analyzer, temp_dir):
+        """
+        A .crt/.cer/.cert file with no PEM markers (binary DER content, or
+        just garbage) must not be silently treated as "small" -- 0 markers
+        found is ambiguous between "genuinely tiny file" and "binary content
+        the text scan can't see" (parse_certificates falls back to
+        load_der_x509_certificate for exactly these extensions). Falls back
+        to the same byte-cap gate as JKS/PKCS12 rather than defaulting to
+        the sync path.
+        """
+        analyzer._large_file_byte_cap = 100
+        small_der_path = os.path.join(temp_dir, "small.crt")
+        with open(small_der_path, 'wb') as f:
+            f.write(b'\x30\x82' + b'\x00' * 40)  # DER-ish, no PEM markers, under cap
+        large_der_path = os.path.join(temp_dir, "large.cer")
+        with open(large_der_path, 'wb') as f:
+            f.write(b'\x30\x82' + b'\x00' * 300)  # DER-ish, no PEM markers, over cap
+
+        assert analyzer._count_pem_certs(large_der_path) == 0  # confirms the marker scan is blind here
+        assert not analyzer._is_large_certificate_file(small_der_path)
+        assert analyzer._is_large_certificate_file(large_der_path)
+
+    def test_is_large_certificate_file_key_falls_back_to_byte_cap(self, analyzer, temp_dir):
+        """
+        .key files (private keys, discoverable via periodic_scan even though
+        no Tetragon policy watches them -- see is_cert_path) contain no
+        "-----BEGIN CERTIFICATE-----" marker either, only a private-key PEM
+        header. Same zero-markers fallback as the DER case above must apply
+        so a large .key file can't bypass the gate.
+        """
+        analyzer._large_file_byte_cap = 100
+        small_key_path = os.path.join(temp_dir, "small.key")
+        with open(small_key_path, 'wb') as f:
+            f.write(b'-----BEGIN PRIVATE KEY-----\n' + b'x' * 20)
+        large_key_path = os.path.join(temp_dir, "large.key")
+        with open(large_key_path, 'wb') as f:
+            f.write(b'-----BEGIN PRIVATE KEY-----\n' + b'x' * 300)
+
+        assert analyzer.is_cert_path(large_key_path)
+        assert analyzer._count_pem_certs(large_key_path) == 0  # no CERTIFICATE marker in a private key
+        assert not analyzer._is_large_certificate_file(small_key_path)
+        assert analyzer._is_large_certificate_file(large_key_path)
+
     def test_small_file_processed_synchronously(self, analyzer, temp_dir):
         """A file at or below the threshold is processed inline, no background thread"""
         analyzer._large_file_cert_threshold = 3
@@ -409,6 +477,52 @@ class TestLargeFileBackgroundProcessing:
         self._wait_for_background_processing(analyzer, bundle_path)
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
+
+    def test_large_pkcs12_routed_to_background_thread(self, analyzer, temp_dir):
+        """
+        A PKCS12 file over _large_file_byte_cap must not block process_event
+        on the sync path. Regression test for _count_pem_certs(...) == 0
+        always holding for JKS/PKCS12 (they have no cheap text marker to
+        count) and silently bypassing the background-thread gate — see
+        _is_large_certificate_file, which now gates these formats on size.
+        """
+        analyzer._large_file_byte_cap = 1024
+        root_ca, root_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf, leaf_key = TestCertificateGeneration.generate_certificate("leaf.example.com", 365)
+        p12_data = _make_pkcs12(leaf, leaf_key, chain_certs=[root_ca] * 3)
+        p12_path = os.path.join(temp_dir, "large.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+        assert len(p12_data) > analyzer._large_file_byte_cap  # sanity check on the fixture
+
+        analyzer.process_event(self._make_event(p12_path))
+
+        assert p12_path in analyzer._large_file_in_flight
+        self._wait_for_background_processing(analyzer, p12_path)
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(p12_path + ":")]
+        assert len(matching) == 4
+
+    def test_large_der_crt_routed_to_background_thread(self, analyzer, temp_dir):
+        """
+        A large binary/DER .crt file (no PEM markers) must be routed to the
+        background-thread path, not parsed inline -- regression test for the
+        DER/binary blind spot in _count_pem_certs (see
+        test_is_large_certificate_file_der_falls_back_to_byte_cap). Mocks
+        _process_certificate_file_async rather than waiting on
+        _large_file_in_flight, since garbage DER content parses to 0 certs
+        near-instantly either way and the in-flight window would be racy.
+        """
+        from unittest.mock import MagicMock
+        analyzer._large_file_byte_cap = 1024
+        der_path = os.path.join(temp_dir, "large.crt")
+        with open(der_path, 'wb') as f:
+            f.write(b'\x30\x82' + os.urandom(2000))  # no PEM markers, over the byte cap
+
+        analyzer._process_certificate_file_async = MagicMock()
+        analyzer.process_event(self._make_event(der_path))
+
+        analyzer._process_certificate_file_async.assert_called_once()
+        assert analyzer._process_certificate_file_async.call_args[0][0] == der_path
 
     def test_background_threading_and_metrics_cap_are_independent(self, analyzer, temp_dir):
         """
@@ -666,6 +780,35 @@ class TestPeriodicScan:
             time.sleep(0.01)
 
         assert calls == [bundle_path]
+
+    def test_large_key_file_routed_to_background_worker(self, analyzer, temp_dir):
+        """
+        A large .key file discovered by periodic_scan (the only path that can
+        reach .key -- no Tetragon policy watches it) must be routed to the
+        background worker like any other oversized cert-adjacent file, not
+        parsed inline. Regression test for the private-key zero-markers gap
+        -- see test_is_large_certificate_file_key_falls_back_to_byte_cap.
+        """
+        analyzer._large_file_byte_cap = 100
+        key_path = os.path.join(temp_dir, "large.key")
+        with open(key_path, 'wb') as f:
+            f.write(b'-----BEGIN PRIVATE KEY-----\n' + b'x' * 300)
+
+        real_async = analyzer._process_certificate_file_async
+        calls = []
+
+        def spy(cert_path, *args, **kwargs):
+            calls.append(cert_path)
+            return real_async(cert_path, *args, **kwargs)
+
+        analyzer._process_certificate_file_async = spy
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and key_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        assert calls == [key_path]
 
     def test_already_known_file_is_not_reparsed_or_republished(self, analyzer, temp_dir):
         """A file already present in known_certs must be skipped entirely — no re-parse, no duplicate Kafka publish."""
