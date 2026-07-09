@@ -772,7 +772,7 @@ jobs:
     name: Publish Release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms ]
+    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms, build-test-server-rpm ]
     permissions:
       contents: write
 
@@ -819,6 +819,13 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download Test Server RPM artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: certsight-test-server-*.rpm
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Download Grafana dashboard artifact
       uses: actions/download-artifact@v4
       with:
@@ -847,6 +854,10 @@ jobs:
         DASHBOARD_PATH=$(find ./release-assets -name "grafana-dashboard-*.json" | head -1)
         echo "dashboard_path=${DASHBOARD_PATH}" >> $GITHUB_OUTPUT
         echo "dashboard_name=$(basename ${DASHBOARD_PATH})" >> $GITHUB_OUTPUT
+        TEST_SERVER_UBI8_PATH=$(find ./release-assets -name "certsight-test-server-*.el8*.rpm" | head -1)
+        echo "test_server_ubi8_name=$(basename ${TEST_SERVER_UBI8_PATH})" >> $GITHUB_OUTPUT
+        TEST_SERVER_UBI9_PATH=$(find ./release-assets -name "certsight-test-server-*.el9*.rpm" | head -1)
+        echo "test_server_ubi9_name=$(basename ${TEST_SERVER_UBI9_PATH})" >> $GITHUB_OUTPUT
 
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v2
@@ -857,6 +868,7 @@ jobs:
           ./release-assets/cert-analyzer*.rpm
           ./release-assets/cert-agent-jni-*.rpm
           ./release-assets/cert-agent-deployer-*.rpm
+          ./release-assets/certsight-test-server-*.rpm
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
@@ -901,6 +913,14 @@ jobs:
           sudo dnf install ./cert-agent-deployer-<version>.el9.x86_64.rpm
           sudo systemctl enable --now cert-agent-deployer
           ```
+
+          **certsight-test-server** (local web console for exercising certificate detections — bundles its own venv, no pip/internet access needed on the target host):
+          ```bash
+          sudo dnf install ./${{ steps.assets.outputs.test_server_ubi8_name }}   # RHEL 8
+          sudo dnf install ./${{ steps.assets.outputs.test_server_ubi9_name }}   # RHEL 9
+          certsight-test-server --kafka-host localhost --kafka-port 9092
+          ```
+          See `extras/test-server/TEST-SERVER-README.md` for prerequisites and how the detection pipeline works end to end.
 
           ### Tetragon Policies (tar.gz)
 
