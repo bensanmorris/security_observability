@@ -23,12 +23,18 @@ streamed live via Server-Sent Events as it arrives.
 - cert-analyzer configured with `[kafka] enabled = true` and pointed at a
   reachable broker -- see [extras/kafka/KAFKA-README.md](../kafka/KAFKA-README.md)
   to stand up a throwaway local broker
-- Python 3.9+ with `python3-venv` (or equivalent) available
+- Python 3.9+ (a virtualenv install) or `python3.11` (an RPM install) on
+  the target host -- see "Install" below for which
 - Run this **on the same host** cert-analyzer is monitoring -- use cases
   shell out to real local commands (e.g. `cat`), so running it from a
   different machine won't trigger anything
 
-## Set up a virtualenv
+## Install
+
+Two ways to get `cryptography`/`kafka-python` in place, depending on
+whether the target host has pip/internet access.
+
+### Option A: virtualenv (target host has pip/internet access)
 
 ```bash
 cd extras/test-server
@@ -43,11 +49,38 @@ running cert-analyzer's own virtualenv on this host, that one already
 satisfies both and you can skip creating a separate one -- just `source`
 that venv's `activate` instead.
 
+### Option B: RPM (target host has no pip/internet access)
+
+```bash
+./build-rpm.sh --version 0.1.0 --release 1
+```
+
+Run this on any machine that *does* have normal pip/PyPI access -- it
+doesn't need to be the target host. It builds a self-contained RPM under
+`~/rpmbuild/RPMS/$(uname -m)/certsight-test-server-<version>-<release>.*.rpm`
+with `cryptography` and `kafka-python` already bundled into a relocatable
+virtualenv at `/opt/certsight-test-server/venv`, following the same
+pattern as `cert-analyzer.spec` (see there for why the debuginfo/build-id
+suppression macros at the top of the spec are needed). Copy that RPM to
+the target host and install it with zero pip/internet access required
+there:
+
+```bash
+sudo dnf install ./certsight-test-server-0.1.0-1.*.rpm
+```
+
+This installs a `certsight-test-server` wrapper onto `$PATH` that runs
+`server.py` with the bundled venv's interpreter -- see "Run" below, just
+without the `source .venv/bin/activate` step and using `certsight-test-server`
+instead of `python3 server.py`. There's no systemd service or dedicated
+system user: this is an interactive foreground tool with environment-
+specific required arguments (`--kafka-host`/`--kafka-port`), not a daemon.
+
 ## Run
 
 ```bash
-source .venv/bin/activate   # if not already active
-python3 server.py --kafka-host localhost --kafka-port 9092
+source .venv/bin/activate   # only if you used Option A; skip for the RPM install
+python3 server.py --kafka-host localhost --kafka-port 9092   # or: certsight-test-server --kafka-host ... (RPM install)
 ```
 
 (Adjust the path to `server.py` if running from the repo root instead of
