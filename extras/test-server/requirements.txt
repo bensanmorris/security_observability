@@ -1,0 +1,2 @@
+cryptography==41.0.7
+kafka-python==2.0.3

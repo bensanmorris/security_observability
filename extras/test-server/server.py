@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""
+Test HTTP server for exercising CertSight's certificate detections.
+
+Serves a two-pane page: the left pane lists test use cases (e.g. "cat the
+system certificate bundle"); clicking one runs the underlying action on
+this host (a real file read, real TLS connection, etc.) so that a locally
+running Tetragon + cert-analyzer pick it up exactly as they would in
+production. The right pane streams cert-analyzer's resulting Kafka events
+live via Server-Sent Events.
+
+Requires:
+  - Tetragon + cert-analyzer already running on this host with the
+    relevant policy applied (see tetragon-policies/certificate-file-access.yaml)
+  - cert-analyzer configured with [kafka] enabled = true, pointed at the
+    same broker given to --kafka-host/--kafka-port here
+  - kafka-python (pip install kafka-python)
+
+cert-analyzer only publishes to Kafka on *first-time* discovery of a given
+certificate (see extras/kafka/KAFKA-README.md) -- re-running a use case
+against a certificate cert-analyzer has already seen since its last
+restart will not produce a new event. Restart cert-analyzer to clear its
+known-certs cache between test runs if you want every click to publish.
+
+Usage:
+    python3 extras/test-server/server.py --kafka-host localhost --kafka-port 9092
+"""
+import argparse
+import json
+import logging
+import queue
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+try:
+    from kafka import KafkaConsumer
+    from kafka.errors import KafkaError
+except ImportError:
+    print("ERROR: kafka-python is not installed. Install it with:", file=sys.stderr)
+    print("       pip install kafka-python", file=sys.stderr)
+    sys.exit(1)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from use_cases import USE_CASES, USE_CASES_BY_ID  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("test-server")
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "application/javascript"),
+    "/app.css": ("app.css", "text/css"),
+}
+
+
+class EventBroadcaster:
+    """Fans out each Kafka message to every currently-connected SSE client."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: "set[queue.Queue]" = set()
+
+    def subscribe(self) -> "queue.Queue":
+        q: "queue.Queue" = queue.Queue()
+        with self._lock:
+            self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: "queue.Queue") -> None:
+        with self._lock:
+            self._subscribers.discard(q)
+
+    def publish(self, message: str) -> None:
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for q in subscribers:
+            q.put(message)
+
+
+def _consume_kafka(broadcaster: EventBroadcaster, host: str, port: int, topic: str) -> None:
+    bootstrap = f"{host}:{port}"
+    while True:
+        try:
+            consumer = KafkaConsumer(
+                topic,
+                bootstrap_servers=bootstrap,
+                auto_offset_reset="latest",
+                enable_auto_commit=False,
+            )
+            logger.info("connected to Kafka %s, topic '%s'", bootstrap, topic)
+            for message in consumer:
+                broadcaster.publish(message.value.decode("utf-8", errors="replace"))
+        except KafkaError as e:
+            logger.warning("Kafka consumer error (%s), retrying in 5s", e)
+            time.sleep(5)
+        except Exception:
+            logger.exception("unexpected error in Kafka consumer loop, retrying in 5s")
+            time.sleep(5)
+
+
+def make_handler(broadcaster: EventBroadcaster):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            logger.info("%s - %s", self.address_string(), fmt % args)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            if path in STATIC_FILES:
+                self._serve_static(path)
+            elif path == "/api/use-cases":
+                self._serve_use_cases()
+            elif path == "/api/events":
+                self._serve_events()
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            path = urlparse(self.path).path
+            if path.startswith("/api/run/"):
+                self._run_use_case(path[len("/api/run/"):])
+            else:
+                self.send_error(404)
+
+        def _serve_static(self, path):
+            filename, content_type = STATIC_FILES[path]
+            data = (STATIC_DIR / filename).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _serve_use_cases(self):
+            payload = [
+                {
+                    "id": uc.id,
+                    "label": uc.label,
+                    "description": uc.description,
+                    "pipeline": uc.pipeline or [],
+                }
+                for uc in USE_CASES
+            ]
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _run_use_case(self, use_case_id):
+            use_case = USE_CASES_BY_ID.get(use_case_id)
+            if use_case is None:
+                self.send_error(404, f"unknown use case '{use_case_id}'")
+                return
+            logger.info("running use case '%s'", use_case_id)
+            result = use_case.run()
+            body = json.dumps({"ok": result.ok, "detail": result.detail}).encode("utf-8")
+            self.send_response(200 if result.ok else 500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_events(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+            q = broadcaster.subscribe()
+            try:
+                while True:
+                    try:
+                        message = q.get(timeout=15)
+                        self.wfile.write(f"data: {message}\n\n".encode("utf-8"))
+                    except queue.Empty:
+                        self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                broadcaster.unsubscribe(q)
+
+    return Handler
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--port", type=int, default=8090, help="port for this test server (default: 8090)")
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help=(
+            "address to bind to (default: 127.0.0.1) -- this server executes real "
+            "file/network actions on request, so do not expose it beyond localhost "
+            "or a trusted lab network"
+        ),
+    )
+    parser.add_argument("--kafka-host", required=True, help="Kafka broker hostname/IP cert-analyzer is publishing to")
+    parser.add_argument("--kafka-port", type=int, required=True, help="Kafka broker port")
+    parser.add_argument("--topic", default="cert-analyzer-events", help="Kafka topic to watch (default: cert-analyzer-events)")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    broadcaster = EventBroadcaster()
+    consumer_thread = threading.Thread(
+        target=_consume_kafka,
+        args=(broadcaster, args.kafka_host, args.kafka_port, args.topic),
+        daemon=True,
+    )
+    consumer_thread.start()
+
+    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster))
+    server.daemon_threads = True
+    logger.info(
+        "serving on http://%s:%d (Kafka: %s:%d, topic '%s')",
+        args.bind, args.port, args.kafka_host, args.kafka_port, args.topic,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()
