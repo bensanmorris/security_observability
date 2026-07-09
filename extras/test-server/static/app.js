@@ -1,3 +1,17 @@
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+function escapeHtml(str) {
+  return str.replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
+}
+
+// Server-supplied text is static/trusted (authored in use_cases.py, not
+// user input), so rendering it as HTML is safe -- escape first anyway as
+// defense in depth, then bold every mention of the product name so it
+// stands out against the surrounding description/pipeline copy.
+function setTextWithBrandBold(el, text) {
+  el.innerHTML = escapeHtml(text).replace(/CertSight/g, '<strong>CertSight</strong>');
+}
+
 async function loadUseCases() {
   const res = await fetch('/api/use-cases');
   const useCases = await res.json();
@@ -12,7 +26,7 @@ async function loadUseCases() {
 
     const desc = document.createElement('p');
     desc.className = 'use-case-description';
-    desc.textContent = uc.description;
+    setTextWithBrandBold(desc, uc.description);
 
     li.appendChild(button);
     li.appendChild(desc);
@@ -28,7 +42,7 @@ async function loadUseCases() {
       const steps = document.createElement('ol');
       for (const step of uc.pipeline) {
         const item = document.createElement('li');
-        item.textContent = step;
+        setTextWithBrandBold(item, step);
         steps.appendChild(item);
       }
       details.appendChild(steps);
@@ -48,7 +62,7 @@ async function runUseCase(id, button) {
   try {
     const res = await fetch(`/api/run/${encodeURIComponent(id)}`, { method: 'POST' });
     const result = await res.json();
-    status.textContent = result.detail;
+    setTextWithBrandBold(status, result.detail);
     status.className = result.ok ? 'ok' : 'error';
   } catch (err) {
     status.textContent = `Request failed: ${err}`;

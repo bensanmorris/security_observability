@@ -100,7 +100,7 @@ def _generate_and_read_fresh_cert() -> UseCaseResult:
         ok=True,
         detail=(
             f"generated a fresh self-signed cert (CN={cn}) at {path} and cat'd it -- "
-            "unique path and serial number guarantee cert-analyzer treats this as a "
+            "unique path and serial number guarantee CertSight treats this as a "
             "first-time discovery, so a new Kafka event should always appear"
         ),
     )
@@ -134,17 +134,17 @@ USE_CASES: List[UseCase] = [
             "The generated file ends in .crt, so the kprobe's selector matches "
             "and Tetragon emits a process/kprobe event over its gRPC stream.",
 
-            "cert-analyzer's Tetragon gRPC client -- already subscribed to that "
+            "CertSight's Tetragon gRPC client -- already subscribed to that "
             "stream -- receives the event and extracts the file path and the "
             "process that opened it (/usr/bin/cat), logging "
             "'🔍 Detected certificate access'.",
 
-            "cert-analyzer independently opens and reads that same file itself "
+            "CertSight independently opens and reads that same file itself "
             "(a second, separate real file read, from its own process) to parse "
             "the X.509 structure: subject, issuer, SAN, validity dates, key "
             "algorithm/size, FIPS compliance, etc.",
 
-            "Because this exact path has never been seen before, cert-analyzer's "
+            "Because this exact path has never been seen before, CertSight's "
             "known-certs cache treats it as a first-time discovery: it records "
             "the cert, updates Prometheus metrics, and -- since [kafka] enabled "
             "= true -- publishes a 'certificate_discovered' JSON event to the "
