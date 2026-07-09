@@ -10,6 +10,18 @@ if [ ! -d "tetragon" ] || [ ! -f "tetragon/tetragon_pb2.py" ]; then
     bash generate_tetragon_protos.sh
 fi
 
+# Fetch Tetragon's api/ proto sources into ./tetragon-src for the
+# Containerfile build context, unless already present. This is a git clone,
+# so it needs network access to TETRAGON_REPO_URL (defaults to the public
+# Tetragon GitHub repo). In a locked-down environment with no outbound
+# access, either point TETRAGON_REPO_URL at an internal mirror, or
+# pre-populate tetragon-src/ yourself beforehand and this step is skipped —
+# the actual podman build never needs network access.
+if [ ! -d "tetragon-src/api" ]; then
+    echo "Fetching Tetragon proto sources..."
+    ./fetch-tetragon-src.sh "${TETRAGON_VERSION:-v1.7.0}"
+fi
+
 # Stop and remove running container (ignore errors if not running/present)
 sudo podman stop cert-analyzer 2>/dev/null || true
 sudo podman rm cert-analyzer 2>/dev/null || true

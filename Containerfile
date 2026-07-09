@@ -1,8 +1,8 @@
 # =============================================================================
 # Stage 1: Proto builder
-# Fetches Tetragon .proto files for a given release tag and compiles them
-# into Python bindings using grpcio-tools.
-# grpcio-tools and git are NOT carried forward into the runtime image.
+# Compiles the Tetragon .proto files (pre-fetched into the build context by
+# ./fetch-tetragon-src.sh) into Python bindings using grpcio-tools.
+# grpcio-tools is NOT carried forward into the runtime image.
 # =============================================================================
 ARG UBI_VERSION=9
 ARG PYTHON_VERSION=311
@@ -24,9 +24,6 @@ USER 0
 
 WORKDIR /build
 
-# git is needed to fetch the Tetragon source tree at the specified tag
-RUN dnf install -y --setopt=tsflags=nodocs git && dnf clean all
-
 # Install the protobuf compiler (grpcio-tools) from your accessible index.
 # ${VAR:+...} omits the flag entirely when PIP_INDEX_URL/PIP_TRUSTED_HOST are
 # unset, falling back to the base image's own pip configuration.
@@ -36,13 +33,13 @@ RUN pip install --no-cache-dir \
     grpcio-tools==1.60.1 \
     protobuf==4.25.3
 
-# Fetch only the api/ subtree of the Tetragon repo at the requested tag —
-# a sparse checkout avoids pulling the entire repo history
-RUN git clone --depth 1 --branch ${TETRAGON_VERSION} \
-    --filter=blob:none --sparse \
-    https://github.com/cilium/tetragon.git /build/tetragon-src && \
-    cd /build/tetragon-src && \
-    git sparse-checkout set api
+# The api/ subtree of the Tetragon repo at TETRAGON_VERSION, fetched into the
+# build context ahead of time by ./fetch-tetragon-src.sh (run from build.yml
+# in CI, or manually before a local build). Pulling it in via COPY rather
+# than `git clone`-ing github.com from inside this RUN step means this image
+# build itself never needs outbound network access — required in locked-down
+# corporate environments where the clone would otherwise fail.
+COPY tetragon-src/api /build/tetragon-src/api
 
 # Compile .proto files into Python bindings.
 # --proto_path points at api/v1 (the parent of the tetragon/ package dir) so

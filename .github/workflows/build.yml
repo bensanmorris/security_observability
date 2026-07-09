@@ -97,6 +97,9 @@ jobs:
           echo "value=${{ github.sha }}" >> $GITHUB_OUTPUT
         fi
 
+    - name: Fetch Tetragon proto sources
+      run: ./fetch-tetragon-src.sh "${{ env.TETRAGON_VERSION }}"
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
