@@ -35,6 +35,7 @@ class UseCase:
     label: str
     description: str
     run: Callable[[], UseCaseResult]
+    pipeline: List[str] = None  # ordered steps from click to Kafka event, shown as a disclosure in the UI
 
 
 # cert-analyzer's known-certs dedup key is "path:index:serial" (see
@@ -111,12 +112,49 @@ USE_CASES: List[UseCase] = [
         label="generate + read a fresh test certificate",
         description=(
             "Generates a new self-signed certificate at a unique path under "
-            "/dev/shm and cat's it. Triggers cert-analyzer's file-access "
-            "detection via the certificate-file-access.yaml Tetragon policy "
-            "(fd_install kprobe), guaranteed to be a first-time discovery "
+            "/dev/shm and cat's it. Guaranteed to be a first-time discovery "
             "every click, so a new Kafka event always appears."
         ),
         run=_generate_and_read_fresh_cert,
+        pipeline=[
+            "This server generates a self-signed X.509 certificate in memory "
+            "and writes it to a brand-new path under /dev/shm/certsight-test-server/.",
+
+            "This server then runs 'cat <path>' as a real subprocess -- a real "
+            "process performing a real open()/read() of that file, no different "
+            "from an admin or application reading a cert off disk.",
+
+            "When the kernel services that open(), it calls fd_install() to "
+            "attach the new file descriptor to the cat process. Tetragon has a "
+            "kprobe on fd_install, loaded system-wide via the "
+            "certificate-file-access.yaml TracingPolicy.",
+
+            "That policy's selector matches the opened file's path against a "
+            "list of certificate-like extensions (.crt, .pem, .jks, .p12, ...). "
+            "The generated file ends in .crt, so the kprobe's selector matches "
+            "and Tetragon emits a process/kprobe event over its gRPC stream.",
+
+            "cert-analyzer's Tetragon gRPC client -- already subscribed to that "
+            "stream -- receives the event and extracts the file path and the "
+            "process that opened it (/usr/bin/cat), logging "
+            "'🔍 Detected certificate access'.",
+
+            "cert-analyzer independently opens and reads that same file itself "
+            "(a second, separate real file read, from its own process) to parse "
+            "the X.509 structure: subject, issuer, SAN, validity dates, key "
+            "algorithm/size, FIPS compliance, etc.",
+
+            "Because this exact path has never been seen before, cert-analyzer's "
+            "known-certs cache treats it as a first-time discovery: it records "
+            "the cert, updates Prometheus metrics, and -- since [kafka] enabled "
+            "= true -- publishes a 'certificate_discovered' JSON event to the "
+            "cert-analyzer-events Kafka topic.",
+
+            "This test server's own background Kafka consumer thread, "
+            "subscribed to that same topic, receives the message and pushes it "
+            "to every connected browser over the Server-Sent Events stream, "
+            "where it lands in the right-hand pane.",
+        ],
     ),
 ]
 

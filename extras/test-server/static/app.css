@@ -76,6 +76,25 @@ h2 {
   color: #777;
 }
 
+.use-case-pipeline {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+}
+
+.use-case-pipeline summary {
+  cursor: pointer;
+  color: #777;
+}
+
+.use-case-pipeline ol {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.use-case-pipeline li {
+  margin-bottom: 0.4rem;
+}
+
 #run-status {
   margin-top: 1rem;
   font-size: 0.9rem;

@@ -137,7 +137,12 @@ def make_handler(broadcaster: EventBroadcaster):
 
         def _serve_use_cases(self):
             payload = [
-                {"id": uc.id, "label": uc.label, "description": uc.description}
+                {
+                    "id": uc.id,
+                    "label": uc.label,
+                    "description": uc.description,
+                    "pipeline": uc.pipeline or [],
+                }
                 for uc in USE_CASES
             ]
             body = json.dumps(payload).encode("utf-8")

@@ -86,6 +86,42 @@ instead of `/tmp`: cert-analyzer's systemd unit runs with `PrivateTmp=true`,
 which gives it its own private `/tmp`/`/var/tmp` mount namespace that can't
 see files written to the host's `/tmp`.
 
+### What actually happens when you click it
+
+The same step-by-step breakdown is shown in the UI itself, under each use
+case's "How this works" disclosure -- reproduced here for reference:
+
+1. This server generates a self-signed X.509 certificate in memory and
+   writes it to a brand-new path under `/dev/shm/certsight-test-server/`.
+2. This server runs `cat <path>` as a real subprocess -- a real process
+   performing a real `open()`/`read()` of that file, no different from an
+   admin or application reading a cert off disk.
+3. When the kernel services that `open()`, it calls `fd_install()` to
+   attach the new file descriptor to the `cat` process. Tetragon has a
+   kprobe on `fd_install`, loaded system-wide via the
+   `certificate-file-access.yaml` TracingPolicy.
+4. That policy's selector matches the opened file's path against a list of
+   certificate-like extensions (`.crt`, `.pem`, `.jks`, `.p12`, ...). The
+   generated file ends in `.crt`, so the kprobe's selector matches and
+   Tetragon emits a process/kprobe event over its gRPC stream.
+5. cert-analyzer's Tetragon gRPC client -- already subscribed to that
+   stream -- receives the event and extracts the file path and the process
+   that opened it (`/usr/bin/cat`), logging `🔍 Detected certificate
+   access`.
+6. cert-analyzer independently opens and reads that same file itself (a
+   second, separate real file read, from its own process) to parse the
+   X.509 structure: subject, issuer, SAN, validity dates, key
+   algorithm/size, FIPS compliance, etc.
+7. Because this exact path has never been seen before, cert-analyzer's
+   known-certs cache treats it as a first-time discovery: it records the
+   cert, updates Prometheus metrics, and -- since `[kafka] enabled = true`
+   -- publishes a `certificate_discovered` JSON event to the
+   `cert-analyzer-events` Kafka topic.
+8. This test server's own background Kafka consumer thread, subscribed to
+   that same topic, receives the message and pushes it to every connected
+   browser over the Server-Sent Events stream, where it lands in the
+   right-hand pane.
+
 ### Permissions on the generated cert directory
 
 No manual setup is required -- this all happens automatically -- but it's

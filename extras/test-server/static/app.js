@@ -16,6 +16,26 @@ async function loadUseCases() {
 
     li.appendChild(button);
     li.appendChild(desc);
+
+    if (uc.pipeline && uc.pipeline.length > 0) {
+      const details = document.createElement('details');
+      details.className = 'use-case-pipeline';
+
+      const summary = document.createElement('summary');
+      summary.textContent = 'How this works';
+      details.appendChild(summary);
+
+      const steps = document.createElement('ol');
+      for (const step of uc.pipeline) {
+        const item = document.createElement('li');
+        item.textContent = step;
+        steps.appendChild(item);
+      }
+      details.appendChild(steps);
+
+      li.appendChild(details);
+    }
+
     list.appendChild(li);
   }
 }
