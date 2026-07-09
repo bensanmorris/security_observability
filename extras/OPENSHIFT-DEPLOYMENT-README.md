@@ -21,6 +21,21 @@ that `KUBECONFIG`/`oc project` is pointed at the `certsight` namespace.
 
 Useful for validating the whole pipeline before touching a real pilot cluster.
 
+To replicate an existing rehearsal environment on another RHEL9 host in one shot — host
+packages, CRC, Tetragon, the cert-analyzer image/DaemonSet, tracing policies, and User Workload
+Monitoring — use
+[`extras/openshift/scripts/provision-openshift-host.sh`](openshift/scripts/provision-openshift-host.sh)
+(also reachable via the [`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh)
+menu). It needs a personal pull secret saved locally first (see below) and takes 15-30 minutes on
+a fresh host; every phase checks whether its result already exists, so it's safe to re-run after
+fixing whatever it stopped on. The manual steps below are what it automates, useful for
+troubleshooting a specific phase.
+
+For an airgapped target host, set `OFFLINE=1` — this swaps every network fetch (RPMs, `helm`,
+`crc`, the CRC VM bundle, the Tetragon chart and its images, the cert-analyzer image) for a local
+file staged on a connected machine and copied over first. See the script's header comment for
+the full list of `*_FILE`/`*_TAR`/`*_DIR` overrides and exactly what to stage for each.
+
 ```bash
 crc setup
 # Give CRC a bigger disk than the 31GB default if you plan to do more than a single
