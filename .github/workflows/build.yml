@@ -30,6 +30,7 @@ jobs:
       probe-tests: ${{ steps.filter.outputs.probe-tests }}
       java-agent: ${{ steps.filter.outputs.java-agent }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
+      test-server: ${{ steps.filter.outputs.test-server }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -60,6 +61,9 @@ jobs:
             - '.github/workflows/build.yml'
           dashboard:
             - 'extras/examples/grafana-dashboard.json'
+            - '.github/workflows/build.yml'
+          test-server:
+            - 'extras/test-server/**'
             - '.github/workflows/build.yml'
 
   build:
@@ -307,6 +311,83 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+
+  build-test-server-rpm:
+    name: Build Test Server RPM (RHEL ${{ matrix.ubi-version }})
+    runs-on: ubuntu-latest
+    needs: changes
+    # Always run on tags, PRs, and manual dispatch; on branch pushes only run
+    # if extras/test-server/** changed. workflow_dispatch is included so this
+    # can be built on demand from any branch without cutting a tag release --
+    # see extras/test-server/TEST-SERVER-README.md.
+    if: |
+      github.ref_type == 'tag' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.test-server == 'true'
+    container:
+      image: registry.access.redhat.com/ubi${{ matrix.ubi-version }}/ubi:latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ubi-version: ["8", "9"]
+
+    steps:
+    - name: Install build prerequisites
+      run: |
+        dnf install -y \
+          python3.11 \
+          python3.11-devel \
+          rpm-build \
+          gcc \
+          findutils \
+          which
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          VERSION="${{ github.ref_name }}"
+          echo "value=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        else
+          SHA=$(git rev-parse --short HEAD)
+          echo "value=0.0.0~git${SHA}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build RPM
+      run: |
+        bash extras/test-server/build-rpm.sh \
+          --version "${{ steps.version.outputs.value }}" \
+          --release "${{ steps.version.outputs.release }}"
+
+    - name: Locate built RPM
+      id: rpm
+      run: |
+        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "certsight-test-server-*.rpm" | head -1)
+        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+
+    - name: Upload RPM as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.name }}
+        path: ${{ steps.rpm.outputs.path }}
+        retention-days: 30
+
+    - name: Build summary
+      run: |
+        echo "## 📦 Test Server RPM Build (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
 
