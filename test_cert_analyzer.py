@@ -406,6 +406,28 @@ class TestLargeFileBackgroundProcessing:
             f.write(b'x' * 200)
         assert analyzer._is_large_certificate_file(jks_path)
 
+    def test_is_large_certificate_file_der_falls_back_to_byte_cap(self, analyzer, temp_dir):
+        """
+        A .crt/.cer/.cert file with no PEM markers (binary DER content, or
+        just garbage) must not be silently treated as "small" -- 0 markers
+        found is ambiguous between "genuinely tiny file" and "binary content
+        the text scan can't see" (parse_certificates falls back to
+        load_der_x509_certificate for exactly these extensions). Falls back
+        to the same byte-cap gate as JKS/PKCS12 rather than defaulting to
+        the sync path.
+        """
+        analyzer._large_file_byte_cap = 100
+        small_der_path = os.path.join(temp_dir, "small.crt")
+        with open(small_der_path, 'wb') as f:
+            f.write(b'\x30\x82' + b'\x00' * 40)  # DER-ish, no PEM markers, under cap
+        large_der_path = os.path.join(temp_dir, "large.cer")
+        with open(large_der_path, 'wb') as f:
+            f.write(b'\x30\x82' + b'\x00' * 300)  # DER-ish, no PEM markers, over cap
+
+        assert analyzer._count_pem_certs(large_der_path) == 0  # confirms the marker scan is blind here
+        assert not analyzer._is_large_certificate_file(small_der_path)
+        assert analyzer._is_large_certificate_file(large_der_path)
+
     def test_small_file_processed_synchronously(self, analyzer, temp_dir):
         """A file at or below the threshold is processed inline, no background thread"""
         analyzer._large_file_cert_threshold = 3
@@ -458,6 +480,28 @@ class TestLargeFileBackgroundProcessing:
         self._wait_for_background_processing(analyzer, p12_path)
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(p12_path + ":")]
         assert len(matching) == 4
+
+    def test_large_der_crt_routed_to_background_thread(self, analyzer, temp_dir):
+        """
+        A large binary/DER .crt file (no PEM markers) must be routed to the
+        background-thread path, not parsed inline -- regression test for the
+        DER/binary blind spot in _count_pem_certs (see
+        test_is_large_certificate_file_der_falls_back_to_byte_cap). Mocks
+        _process_certificate_file_async rather than waiting on
+        _large_file_in_flight, since garbage DER content parses to 0 certs
+        near-instantly either way and the in-flight window would be racy.
+        """
+        from unittest.mock import MagicMock
+        analyzer._large_file_byte_cap = 1024
+        der_path = os.path.join(temp_dir, "large.crt")
+        with open(der_path, 'wb') as f:
+            f.write(b'\x30\x82' + os.urandom(2000))  # no PEM markers, over the byte cap
+
+        analyzer._process_certificate_file_async = MagicMock()
+        analyzer.process_event(self._make_event(der_path))
+
+        analyzer._process_certificate_file_async.assert_called_once()
+        assert analyzer._process_certificate_file_async.call_args[0][0] == der_path
 
     def test_background_threading_and_metrics_cap_are_independent(self, analyzer, temp_dir):
         """
