@@ -773,9 +773,9 @@ class CertificateAnalyzer:
         the cap, so this doesn't undercount real bundles in the cases that
         matter for the threshold check below.
 
-        JKS/PKCS12 keystores go through a dedicated decoder either way and
-        aren't pre-counted here — always treated as small enough to process
-        inline, since large multi-cert files in practice are PEM bundles.
+        JKS/PKCS12 keystores go through a dedicated decoder and always
+        return 0 here rather than being counted — see _is_large_certificate_file,
+        which gates them on file size instead of routing through this method.
 
         cert_path comes straight from a Tetragon-reported file path, filtered
         only by extension (is_cert_path) — nothing upstream checks the actual
@@ -798,6 +798,35 @@ class CertificateAnalyzer:
                 return f.read(self._large_file_byte_cap).count(b'-----BEGIN CERTIFICATE-----')
         except OSError:
             return 0
+
+    def _is_large_certificate_file(self, cert_path: str) -> bool:
+        """
+        True if cert_path should be parsed on a background thread instead of
+        inline on the event-consumer thread.
+
+        PEM/DER bundles: counted cheaply via _count_pem_certs (a BEGIN-marker
+        scan capped at _large_file_byte_cap bytes) and compared against
+        _large_file_cert_threshold.
+
+        JKS/PKCS12: binary keystore formats with no cheap text marker to
+        count the way PEM's "-----BEGIN CERTIFICATE-----" allows — an exact
+        count would require doing the very parse this gate exists to avoid
+        on the hot thread (parse_jks_certificates/parse_pkcs12_certificates
+        read and fully decode the file with no size cap of their own). Reuse
+        _large_file_byte_cap directly as a straight size gate instead — the
+        same knob that already bounds the PEM scan above — via one
+        non-blocking stat() call. A real keystore (even a generous
+        truststore with hundreds of certs) runs a few hundred KB in
+        practice, well under the 2MB default, so this doesn't route
+        legitimate keystores to the background path.
+        """
+        suffix = Path(cert_path).suffix.lower()
+        if suffix in self.JKS_EXTENSIONS or suffix in self.PKCS12_EXTENSIONS:
+            try:
+                return Path(cert_path).stat().st_size > self._large_file_byte_cap
+            except OSError:
+                return False
+        return self._count_pem_certs(cert_path) > self._large_file_cert_threshold
 
     def analyze_certificate(
         self,
@@ -1973,10 +2002,11 @@ class CertificateAnalyzer:
                 )
             return
 
-        # Large multi-cert files (e.g. system CA bundles with hundreds of certs)
-        # are parsed on a background thread so one file doesn't block this
-        # thread from consuming the rest of the Tetragon event stream.
-        if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
+        # Large multi-cert files (e.g. system CA bundles with hundreds of
+        # certs, or an oversized JKS/PKCS12 keystore) are parsed on a
+        # background thread so one file doesn't block this thread from
+        # consuming the rest of the Tetragon event stream.
+        if self._is_large_certificate_file(cert_path):
             self._process_certificate_file_async(
                 cert_path, process_name, pid, namespace,
                 tetragon_pod, parent_process, parent_pid, event.node_name,
@@ -2347,7 +2377,7 @@ class CertificateAnalyzer:
                         if cert_path in self._known_paths:
                             continue
 
-                    if self._count_pem_certs(cert_path) > self._large_file_cert_threshold:
+                    if self._is_large_certificate_file(cert_path):
                         self._process_certificate_file_async(
                             cert_path, "periodic_scan", 0, "",
                             None, "", 0, _NODE_NAME,

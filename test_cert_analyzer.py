@@ -381,6 +381,31 @@ class TestLargeFileBackgroundProcessing:
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
 
+    def test_is_large_certificate_file_pkcs12_uses_byte_cap(self, analyzer, temp_dir):
+        """
+        JKS/PKCS12 routing is gated by _large_file_byte_cap (size), not cert
+        count -- _count_pem_certs always returns 0 for these extensions
+        (they have no cheap text marker to count), so _is_large_certificate_file
+        must not fall through to the PEM-marker comparison for them. Content
+        doesn't matter here, only size, since the check is a plain stat().
+        """
+        analyzer._large_file_byte_cap = 100
+        small_path = os.path.join(temp_dir, "small.p12")
+        with open(small_path, 'wb') as f:
+            f.write(b'x' * 50)
+        large_path = os.path.join(temp_dir, "large.p12")
+        with open(large_path, 'wb') as f:
+            f.write(b'x' * 200)
+
+        assert not analyzer._is_large_certificate_file(small_path)
+        assert analyzer._is_large_certificate_file(large_path)
+
+        # Same gate applies to the other JKS/PKCS12 extensions.
+        jks_path = os.path.join(temp_dir, "large.jks")
+        with open(jks_path, 'wb') as f:
+            f.write(b'x' * 200)
+        assert analyzer._is_large_certificate_file(jks_path)
+
     def test_small_file_processed_synchronously(self, analyzer, temp_dir):
         """A file at or below the threshold is processed inline, no background thread"""
         analyzer._large_file_cert_threshold = 3
@@ -409,6 +434,30 @@ class TestLargeFileBackgroundProcessing:
         self._wait_for_background_processing(analyzer, bundle_path)
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(bundle_path + ":")]
         assert len(matching) == 5
+
+    def test_large_pkcs12_routed_to_background_thread(self, analyzer, temp_dir):
+        """
+        A PKCS12 file over _large_file_byte_cap must not block process_event
+        on the sync path. Regression test for _count_pem_certs(...) == 0
+        always holding for JKS/PKCS12 (they have no cheap text marker to
+        count) and silently bypassing the background-thread gate — see
+        _is_large_certificate_file, which now gates these formats on size.
+        """
+        analyzer._large_file_byte_cap = 1024
+        root_ca, root_key = TestCertificateGeneration.generate_certificate("Root CA", 3650, is_ca=True)
+        leaf, leaf_key = TestCertificateGeneration.generate_certificate("leaf.example.com", 365)
+        p12_data = _make_pkcs12(leaf, leaf_key, chain_certs=[root_ca] * 3)
+        p12_path = os.path.join(temp_dir, "large.p12")
+        with open(p12_path, 'wb') as f:
+            f.write(p12_data)
+        assert len(p12_data) > analyzer._large_file_byte_cap  # sanity check on the fixture
+
+        analyzer.process_event(self._make_event(p12_path))
+
+        assert p12_path in analyzer._large_file_in_flight
+        self._wait_for_background_processing(analyzer, p12_path)
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(p12_path + ":")]
+        assert len(matching) == 4
 
     def test_background_threading_and_metrics_cap_are_independent(self, analyzer, temp_dir):
         """
