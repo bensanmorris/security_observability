@@ -802,9 +802,11 @@ class CertificateAnalyzer:
     def _is_large_certificate_file(self, cert_path: str) -> bool:
         """
         True if cert_path should be parsed on a background thread instead of
-        inline on the event-consumer thread. Covers every extension the
-        certificate-file-access Tetragon policy watches (.crt/.pem/.cert/.cer,
-        .jks/.keystore/.truststore, .p12/.pfx).
+        inline on the event-consumer thread. Covers every extension
+        is_cert_path() accepts: everything the certificate-file-access
+        Tetragon policy watches (.crt/.pem/.cert/.cer, .jks/.keystore/
+        .truststore, .p12/.pfx) plus .key, which periodic_scan can discover
+        even though no Tetragon policy watches it.
 
         PEM bundles: counted cheaply via _count_pem_certs (a BEGIN-marker
         scan capped at _large_file_byte_cap bytes) and compared against
@@ -826,6 +828,10 @@ class CertificateAnalyzer:
           markers in binary DER content, indistinguishable from a genuinely
           small file — without this fallback, a large DER blob would bypass
           the gate exactly like JKS/PKCS12 used to.
+
+        - .key files: contain a private key, not a certificate, so they
+          never contain a "-----BEGIN CERTIFICATE-----" marker either —
+          same zero-markers fallback as DER above, no special-casing needed.
 
         A real keystore or single cert (even a generous truststore with
         hundreds of certs, or DER cert with a large embedded chain) runs a

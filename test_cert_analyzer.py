@@ -428,6 +428,27 @@ class TestLargeFileBackgroundProcessing:
         assert not analyzer._is_large_certificate_file(small_der_path)
         assert analyzer._is_large_certificate_file(large_der_path)
 
+    def test_is_large_certificate_file_key_falls_back_to_byte_cap(self, analyzer, temp_dir):
+        """
+        .key files (private keys, discoverable via periodic_scan even though
+        no Tetragon policy watches them -- see is_cert_path) contain no
+        "-----BEGIN CERTIFICATE-----" marker either, only a private-key PEM
+        header. Same zero-markers fallback as the DER case above must apply
+        so a large .key file can't bypass the gate.
+        """
+        analyzer._large_file_byte_cap = 100
+        small_key_path = os.path.join(temp_dir, "small.key")
+        with open(small_key_path, 'wb') as f:
+            f.write(b'-----BEGIN PRIVATE KEY-----\n' + b'x' * 20)
+        large_key_path = os.path.join(temp_dir, "large.key")
+        with open(large_key_path, 'wb') as f:
+            f.write(b'-----BEGIN PRIVATE KEY-----\n' + b'x' * 300)
+
+        assert analyzer.is_cert_path(large_key_path)
+        assert analyzer._count_pem_certs(large_key_path) == 0  # no CERTIFICATE marker in a private key
+        assert not analyzer._is_large_certificate_file(small_key_path)
+        assert analyzer._is_large_certificate_file(large_key_path)
+
     def test_small_file_processed_synchronously(self, analyzer, temp_dir):
         """A file at or below the threshold is processed inline, no background thread"""
         analyzer._large_file_cert_threshold = 3
@@ -759,6 +780,35 @@ class TestPeriodicScan:
             time.sleep(0.01)
 
         assert calls == [bundle_path]
+
+    def test_large_key_file_routed_to_background_worker(self, analyzer, temp_dir):
+        """
+        A large .key file discovered by periodic_scan (the only path that can
+        reach .key -- no Tetragon policy watches it) must be routed to the
+        background worker like any other oversized cert-adjacent file, not
+        parsed inline. Regression test for the private-key zero-markers gap
+        -- see test_is_large_certificate_file_key_falls_back_to_byte_cap.
+        """
+        analyzer._large_file_byte_cap = 100
+        key_path = os.path.join(temp_dir, "large.key")
+        with open(key_path, 'wb') as f:
+            f.write(b'-----BEGIN PRIVATE KEY-----\n' + b'x' * 300)
+
+        real_async = analyzer._process_certificate_file_async
+        calls = []
+
+        def spy(cert_path, *args, **kwargs):
+            calls.append(cert_path)
+            return real_async(cert_path, *args, **kwargs)
+
+        analyzer._process_certificate_file_async = spy
+        analyzer.periodic_scan([temp_dir])
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and key_path in analyzer._large_file_in_flight:
+            time.sleep(0.01)
+
+        assert calls == [key_path]
 
     def test_already_known_file_is_not_reparsed_or_republished(self, analyzer, temp_dir):
         """A file already present in known_certs must be skipped entirely — no re-parse, no duplicate Kafka publish."""
