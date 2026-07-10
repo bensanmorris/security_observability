@@ -128,11 +128,23 @@ sudo vi /etc/certsight-test-server/test-server.conf   # set TEST_SERVER_KAFKA_HO
 sudo systemctl start certsight-test-server
 ```
 
-Until then it sits enabled-but-failed (`Restart=on-failure`, giving up
-after 5 attempts in 300s) -- `journalctl -u certsight-test-server` will
-show it exiting with the same "--kafka-host/--kafka-port are required"
-error `server.py` gives on the CLI. Check status/logs, or stop it, the
-usual way:
+**If it was already enabled before you configured it** -- e.g. it tried to
+start at boot, or you ran `systemctl start` before editing the conf file
+-- it burns through all 5 restart attempts (`Restart=on-failure`,
+`StartLimitBurst=5` in `StartLimitInterval=300`) in under a minute and
+lands in a rate-limited `failed` state. `journalctl -u certsight-test-server`
+will show the same "--kafka-host/--kafka-port are required" error
+`server.py` gives on the CLI, followed by `Start request repeated too
+quickly`. Editing the conf file alone won't fix this -- systemd won't
+even attempt another start until the rate limit is cleared:
+
+```bash
+sudo vi /etc/certsight-test-server/test-server.conf   # set TEST_SERVER_KAFKA_HOST / TEST_SERVER_KAFKA_PORT
+sudo systemctl reset-failed certsight-test-server
+sudo systemctl start certsight-test-server
+```
+
+Check status/logs, or stop it, the usual way:
 
 ```bash
 systemctl status certsight-test-server
