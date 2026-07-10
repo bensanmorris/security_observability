@@ -10,12 +10,15 @@ To add a use case: append a UseCase to USE_CASES with a run() callable that
 performs the action and returns a UseCaseResult. Nothing else needs to
 change -- server.py and the frontend both read this list at request time.
 """
+import queue
 import subprocess
+import sys
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Tuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -76,6 +79,31 @@ _ALLOWED_KEY_SIZES = ["1024", "2048", "3072", "4096"]
 _DEFAULT_KEY_SIZE = "2048"
 
 
+def _generate_self_signed_cert(cn: str, key_size: int) -> Tuple[bytes, bytes]:
+    """Returns (cert_pem, key_pem) for a fresh self-signed cert, 1yr validity, SAN=cn."""
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return cert_pem, key_pem
+
+
 def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
     key_size_str = params.get("key_size", _DEFAULT_KEY_SIZE)
     if key_size_str not in _ALLOWED_KEY_SIZES:
@@ -95,7 +123,7 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
     # a legitimate, informative outcome for a FIPS-focused test tool, not a
     # bug, so surface it as a normal use-case failure rather than a 500.
     try:
-        private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+        cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size)
     except Exception as e:
         return UseCaseResult(
             ok=False,
@@ -103,20 +131,6 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
             "if FIPS mode is enforced here, sub-2048-bit RSA keygen is likely blocked "
             "at the OpenSSL provider level",
         )
-
-    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
-    now = datetime.now(timezone.utc)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(private_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=365))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
-        .sign(private_key, hashes.SHA256())
-    )
 
     # cert-analyzer runs as its own unprivileged 'cert-analyzer' user (see
     # cert-analyzer.service), not as whoever runs this script -- it needs
@@ -127,7 +141,7 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
     # rather than trust the environment.
     _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
     _GENERATED_CERT_DIR.chmod(0o755)
-    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    path.write_bytes(cert_pem)
     path.chmod(0o644)
 
     try:
@@ -150,6 +164,105 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
             f"{path} and cat'd it{fips_note} -- unique path and serial number "
             "guarantee CertSight treats this as a first-time discovery, so a new "
             "Kafka event should always appear"
+        ),
+    )
+
+
+# tls_probe_helper.py runs as its own OS process (not a thread here) so that
+# Tetragon's security_socket_bind hook attributes the bind() call to a PID
+# that's independently visible and verifiable, rather than this test
+# server's own PID. Capped concurrency since, unlike the file-access use
+# case, this spins up a real listening socket + child process per click on
+# an endpoint that may have no authentication (see TEST-SERVER-README.md).
+_HELPER_SCRIPT = Path(__file__).resolve().parent / "tls_probe_helper.py"
+_MAX_CONCURRENT_TLS_PROBES = 2
+_TLS_PROBE_LIFETIME_SECONDS = 12.0
+_TLS_PROBE_READY_TIMEOUT_SECONDS = 5.0
+_active_tls_probe_lock = threading.Lock()
+_active_tls_probe_count = 0
+
+
+def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
+    global _active_tls_probe_count
+    with _active_tls_probe_lock:
+        if _active_tls_probe_count >= _MAX_CONCURRENT_TLS_PROBES:
+            return UseCaseResult(
+                ok=False,
+                detail=f"{_MAX_CONCURRENT_TLS_PROBES} TLS probe listener(s) are already "
+                "running -- wait a few seconds for one to finish and try again",
+            )
+        _active_tls_probe_count += 1
+
+    def _release():
+        global _active_tls_probe_count
+        with _active_tls_probe_lock:
+            _active_tls_probe_count -= 1
+
+    token = uuid.uuid4().hex[:12]
+    cn = f"certsight-test-bind-{token}.local"
+    cert_path = _GENERATED_CERT_DIR / f"bind-probe-{token}.crt"
+    key_path = _GENERATED_CERT_DIR / f"bind-probe-{token}.key"
+
+    cert_pem, key_pem = _generate_self_signed_cert(cn, key_size=2048)
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+    cert_path.write_bytes(cert_pem)
+    cert_path.chmod(0o644)
+    # The private key never leaves this host and is only ever read by the
+    # sibling helper process spawned below (same user) -- 0600 keeps it out
+    # of reach of anyone else who can list /dev/shm.
+    key_path.write_bytes(key_pem)
+    key_path.chmod(0o600)
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(_HELPER_SCRIPT), str(cert_path), str(key_path), str(_TLS_PROBE_LIFETIME_SECONDS)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as e:
+        _release()
+        return UseCaseResult(ok=False, detail=f"failed to spawn TLS probe helper: {e}")
+
+    # Read the helper's first line of stdout (its readiness signal) off the
+    # main thread via a background reader + queue, so a helper that never
+    # reports readiness (e.g. hangs) can't block this HTTP request forever.
+    ready_q: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: ready_q.put(proc.stdout.readline()), daemon=True).start()
+
+    try:
+        first_line = ready_q.get(timeout=_TLS_PROBE_READY_TIMEOUT_SECONDS).strip()
+    except queue.Empty:
+        proc.kill()
+        _release()
+        return UseCaseResult(ok=False, detail="TLS probe helper didn't report readiness in time")
+
+    if not first_line.startswith("PORT "):
+        proc.kill()
+        _release()
+        return UseCaseResult(ok=False, detail=f"TLS probe helper failed to start: {first_line or '(no output)'}")
+
+    port = first_line.split(" ", 1)[1]
+
+    # Reap the helper in the background once its lifetime elapses so the
+    # concurrency slot frees itself and no zombie process is left behind.
+    def _reap():
+        proc.wait()
+        _release()
+
+    threading.Thread(target=_reap, daemon=True).start()
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"spawned PID {proc.pid}, listening for a TLS handshake on 127.0.0.1:{port} "
+            f"for up to {int(_TLS_PROBE_LIFETIME_SECONDS)}s (CN={cn}) -- if cert-analyzer "
+            "has [port_probe] bind_probe_enabled = true and the tls-service-tracking.yaml "
+            "TracingPolicy loaded, it should connect within ~2s and pull this cert; check "
+            f"the Kafka pane for a tls-probe://127.0.0.1:{port} event and confirm its "
+            f"'pid' field reads {proc.pid} -- the same process that bound the socket"
         ),
     )
 
@@ -184,7 +297,7 @@ USE_CASES: List[UseCase] = [
             "When the kernel services that open(), it calls fd_install() to "
             "attach the new file descriptor to the cat process. Tetragon has a "
             "kprobe on fd_install, loaded system-wide via the "
-            "certificate-file-access.yaml TracingPolicy.",
+            "CertSight certificate-file-access.yaml TracingPolicy.",
 
             "That policy's selector matches the opened file's path against a "
             "list of certificate-like extensions (.crt, .pem, .jks, .p12, ...). "
@@ -214,6 +327,71 @@ USE_CASES: List[UseCase] = [
             "subscribed to that same topic, receives the message and pushes it "
             "to every connected browser over the Server-Sent Events stream, "
             "where it lands in the right-hand pane.",
+        ],
+    ),
+    UseCase(
+        id="tls-bind-probe",
+        label="bind a TLS service and let CertSight discover it",
+        description=(
+            "Spawns a separate process that generates a fresh self-signed "
+            "cert and binds a real TLS listener on 127.0.0.1 (a random high "
+            "port). Requires CertSight's [port_probe] bind_probe_enabled = "
+            "true and the tls-service-tracking.yaml TracingPolicy -- see "
+            "TEST-SERVER-README.md."
+        ),
+        run=_bind_tls_service_for_discovery,
+        pipeline=[
+            "This server generates a fresh self-signed X.509 cert + private "
+            "key in memory and writes both to /dev/shm/certsight-test-server/.",
+
+            "This server spawns tls_probe_helper.py as a separate OS "
+            "process (not a thread) specifically so the bind() call below "
+            "happens in a process with its own distinct PID, which this "
+            "use case then shows you so you can cross-check it against the "
+            "resulting Kafka event.",
+
+            "That helper process itself picks a random high port and binds "
+            "to it explicitly -- not 0/OS-assigned, since CertSight can "
+            "only see the literal port passed into bind() itself:\n"
+            "```python\n"
+            "candidate = random.randint(49152, 65535)\n"
+            "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "sock.bind((\"127.0.0.1\", candidate))\n"
+            "sock.listen(4)\n"
+            "```\n"
+            "(retried on collision) then listens for incoming TLS "
+            "connections using the generated cert/key -- full source: "
+            "[tls_probe_helper.py](/source/tls_probe_helper.py)",
+
+            "Tetragon has a kprobe on the security_socket_bind LSM hook, "
+            "loaded via the tls-service-tracking.yaml TracingPolicy, which "
+            "fires on that bind() call and emits a process/kprobe event.",
+
+            "CertSight's Tetragon gRPC client receives the event. If "
+            "[port_probe] bind_probe_enabled = true, it waits "
+            "connect_delay_seconds (default 2s) and then connects to "
+            "127.0.0.1:<port> itself, performing a real TLS handshake "
+            "with certificate verification intentionally disabled -- the "
+            "goal is certificate inventory, not trust validation.",
+
+            "The helper process's TLS handshake hands CertSight the "
+            "certificate as a normal part of the handshake; CertSight "
+            "parses it exactly like a file-discovered cert (subject, "
+            "issuer, SAN, key algorithm/size, FIPS compliance, etc).",
+
+            "Because the synthetic path 'tls-probe://127.0.0.1:<port>' "
+            "combined with this cert's serial number has never been seen "
+            "before, CertSight treats it as a first-time discovery and -- "
+            "since [kafka] enabled = true -- publishes a "
+            "'certificate_discovered' event to the cert-analyzer-events "
+            "Kafka topic, with a 'pid' field set to the helper process's "
+            "PID (from Tetragon's own report of who called bind()).",
+
+            "This test server's own background Kafka consumer thread "
+            "pushes that event to every connected browser over the "
+            "Server-Sent Events stream, where it lands in the right-hand "
+            "pane -- compare its 'pid' field against the PID shown in the "
+            "status line above.",
         ],
     ),
 ]

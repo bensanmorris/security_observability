@@ -67,6 +67,7 @@ trap 'rm -rf "$TMPDIR_SRC"' EXIT
 mkdir -p "$TMPDIR_SRC/$TARNAME"
 cp "$SCRIPT_DIR/server.py"                       "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/use_cases.py"                    "$TMPDIR_SRC/$TARNAME/"
+cp "$SCRIPT_DIR/tls_probe_helper.py"             "$TMPDIR_SRC/$TARNAME/"
 cp -r "$SCRIPT_DIR/static"                       "$TMPDIR_SRC/$TARNAME/static"
 cp "$SCRIPT_DIR/certsight-test-server.service"   "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/test-server.conf"                "$TMPDIR_SRC/$TARNAME/"
