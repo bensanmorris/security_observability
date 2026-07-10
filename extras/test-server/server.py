@@ -46,7 +46,7 @@ except ImportError:
     sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from use_cases import USE_CASES, USE_CASES_BY_ID  # noqa: E402
+from use_cases import USE_CASES, USE_CASES_BY_ID, UseCaseResult  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test-server")
@@ -181,7 +181,16 @@ def make_handler(broadcaster: EventBroadcaster):
                     return
 
             logger.info("running use case '%s' with params=%r", use_case_id, params)
-            result = use_case.run(params)
+            try:
+                result = use_case.run(params)
+            except Exception:
+                # An uncaught exception here would otherwise propagate out of
+                # do_POST with no response ever sent, which socketserver logs
+                # but the client just sees as a raw connection failure (e.g.
+                # browsers report a bare "NetworkError") instead of a readable
+                # error -- always return a clean 500 with the exception text.
+                logger.exception("use case '%s' raised", use_case_id)
+                result = UseCaseResult(ok=False, detail=f"use case raised an unhandled exception: {sys.exc_info()[1]}")
             body = json.dumps({"ok": result.ok, "detail": result.detail}).encode("utf-8")
             self.send_response(200 if result.ok else 500)
             self.send_header("Content-Type", "application/json")
