@@ -334,7 +334,7 @@ USE_CASES: List[UseCase] = [
         label="bind a TLS service and let CertSight discover it",
         description=(
             "Spawns a separate process that generates a fresh self-signed "
-            "cert and binds a real TLS listener on 127.0.0.1 (OS-assigned "
+            "cert and binds a real TLS listener on 127.0.0.1 (a random high "
             "port). Requires CertSight's [port_probe] bind_probe_enabled = "
             "true and the tls-service-tracking.yaml TracingPolicy -- see "
             "TEST-SERVER-README.md."
@@ -350,9 +350,11 @@ USE_CASES: List[UseCase] = [
             "use case then shows you so you can cross-check it against the "
             "resulting Kafka event.",
 
-            "That helper process itself calls socket.bind(('127.0.0.1', "
-            "0)) -- the kernel assigns a free port -- then listens for "
-            "incoming TLS connections using the generated cert/key.",
+            "That helper process itself picks a random high port and calls "
+            "socket.bind(('127.0.0.1', <port>)) -- a real, explicit port, "
+            "not 0/OS-assigned, since CertSight can only see the literal "
+            "port passed into bind() itself -- then listens for incoming "
+            "TLS connections using the generated cert/key.",
 
             "Tetragon has a kprobe on the security_socket_bind LSM hook, "
             "loaded via the tls-service-tracking.yaml TracingPolicy, which "

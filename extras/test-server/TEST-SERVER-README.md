@@ -174,7 +174,7 @@ RPM upgrade won't overwrite edits you've made to it.
 | Use case | Action | Detection exercised |
 |---|---|---|
 | generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
-| bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<OS-assigned port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
+| bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<random high port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
 
 The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
 next to the button, both in the UI and as a `{"key_size": "1024"}` JSON
@@ -291,9 +291,21 @@ The use case's result message shows you that PID so you can cross-check it
 against the one in the Kafka pane -- confirming CertSight saw the exact
 same process that bound the socket, not just *some* bind event.
 
-The helper binds `127.0.0.1:0` (an OS-assigned ephemeral port, so repeated
-clicks never collide on a fixed port and no privilege is needed for the
-bind itself), prints the chosen port back to `use_cases.py`, then keeps
+The helper picks a **random port from the dynamic/private range
+(49152-65535)** and binds to it explicitly, retrying on collision, rather
+than binding to port 0 and letting the kernel assign one --
+`security_socket_bind` is a pre-operation LSM hook, so it fires with the
+`sockaddr` exactly as passed to `bind()`, before the kernel picks a real
+port; `agent/analyzer.py`'s `_handle_tls_bind_event` treats a zero port as
+unusable and silently returns without probing (visible as repeated
+`TLS bind event: could not extract port from security_socket_bind event`
+DEBUG lines in cert-analyzer's own log if you hit this). A real, explicit,
+nonzero port in the `bind()` call itself is required for cert-analyzer to
+see anything at all -- confirmed against `probe_tests/test_tls_port_probe.py`,
+the repo's own reference test for this same detection path, which always
+binds a fixed port for the same reason.
+
+The helper prints its chosen port back to `use_cases.py`, then keeps
 listening for up to 12 seconds before exiting on its own -- long enough to
 cover cert-analyzer's `connect_delay_seconds` (default 2s) plus margin.
 cert-analyzer's bind-probe has no retry (`agent/analyzer.py`'s
