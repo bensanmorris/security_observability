@@ -22,11 +22,32 @@ async function loadUseCases() {
 
     const button = document.createElement('button');
     button.textContent = uc.label;
-    button.addEventListener('click', () => runUseCase(uc.id, button));
+    button.addEventListener('click', () => runUseCase(uc.id, button, li));
 
     const desc = document.createElement('p');
     desc.className = 'use-case-description';
     setTextWithBrandBold(desc, uc.description);
+
+    if (uc.params && uc.params.length > 0) {
+      const paramsDiv = document.createElement('div');
+      paramsDiv.className = 'use-case-params';
+      for (const param of uc.params) {
+        const label = document.createElement('label');
+        label.textContent = param.label;
+        const select = document.createElement('select');
+        select.dataset.paramName = param.name;
+        for (const option of param.options) {
+          const opt = document.createElement('option');
+          opt.value = option;
+          opt.textContent = option;
+          if (option === param.default) opt.selected = true;
+          select.appendChild(opt);
+        }
+        label.appendChild(select);
+        paramsDiv.appendChild(label);
+      }
+      li.appendChild(paramsDiv);
+    }
 
     li.appendChild(button);
     li.appendChild(desc);
@@ -54,13 +75,21 @@ async function loadUseCases() {
   }
 }
 
-async function runUseCase(id, button) {
+async function runUseCase(id, button, li) {
   const status = document.getElementById('run-status');
   button.disabled = true;
   status.className = '';
   status.textContent = `Running '${id}'...`;
+  const params = {};
+  for (const select of li.querySelectorAll('select[data-param-name]')) {
+    params[select.dataset.paramName] = select.value;
+  }
   try {
-    const res = await fetch(`/api/run/${encodeURIComponent(id)}`, { method: 'POST' });
+    const res = await fetch(`/api/run/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
     const result = await res.json();
     setTextWithBrandBold(status, result.detail);
     status.className = result.ok ? 'ok' : 'error';

@@ -1,0 +1,50 @@
+[Unit]
+Description=CertSight detection test console
+Documentation=https://github.com/your-org/cert-analyzer
+After=network.target cert-analyzer.service
+Wants=cert-analyzer.service
+
+[Service]
+Type=simple
+User=certsight-test-server
+Group=certsight-test-server
+
+# Configuration (Kafka broker, bind address, port) comes entirely from
+# TEST_SERVER_* environment variables -- see server.py's parse_args() and
+# /etc/certsight-test-server/test-server.conf. The leading '-' means a
+# missing file doesn't stop the unit from loading; the process itself
+# fails fast with a clear error if --kafka-host/--kafka-port are unset.
+EnvironmentFile=-/etc/certsight-test-server/test-server.conf
+
+ExecStart=/usr/bin/certsight-test-server
+
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=certsight-test-server
+
+# Security hardening. Every use case shells out to a real, hardcoded local
+# command (e.g. `cat`) on request from any HTTP client that can reach this
+# service, so it runs as its own unprivileged user with no elevated
+# capabilities and only /dev/shm writable.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# /dev/shm is bind-mounted through from the host even with PrivateDevices
+# enabled (unlike /tmp under PrivateTmp), which is exactly why use_cases.py
+# writes generated certs there instead of /tmp -- see TEST-SERVER-README.md.
+PrivateDevices=true
+ReadWritePaths=/dev/shm
+
+LimitNOFILE=65536
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

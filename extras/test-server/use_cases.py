@@ -30,12 +30,21 @@ class UseCaseResult:
 
 
 @dataclass
+class UseCaseParam:
+    name: str                # key in the JSON body POSTed to /api/run/<id>
+    label: str                # shown next to the <select> in the UI
+    options: List[str]        # values shown and sent as-is; run() is responsible for validating
+    default: str
+
+
+@dataclass
 class UseCase:
     id: str
     label: str
     description: str
-    run: Callable[[], UseCaseResult]
+    run: Callable[[dict], UseCaseResult]
     pipeline: List[str] = None  # ordered steps from click to Kafka event, shown as a disclosure in the UI
+    params: List[UseCaseParam] = None  # rendered as <select> controls; run() receives the chosen values as a dict
 
 
 # cert-analyzer's known-certs dedup key is "path:index:serial" (see
@@ -56,13 +65,45 @@ class UseCase:
 # this script and cert-analyzer, and world-writable like /tmp.
 _GENERATED_CERT_DIR = Path("/dev/shm/certsight-test-server")
 
+# CertSight's FIPS compliance checker (agent/fips_compliance_checker.py)
+# flags RSA keys under 2048 bits, so 1024 reliably triggers a
+# fips_compliant=false Kafka event; 2048+ stays compliant. Server-side
+# allowlist rather than trusting the raw client-supplied value: this
+# endpoint is reachable over the network with no authentication (see
+# TEST-SERVER-README.md), so an arbitrary key_size could be used to force
+# an expensive RSA keygen (mild CPU-DoS) or simply fail oddly.
+_ALLOWED_KEY_SIZES = ["1024", "2048", "3072", "4096"]
+_DEFAULT_KEY_SIZE = "2048"
 
-def _generate_and_read_fresh_cert() -> UseCaseResult:
+
+def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
+    key_size_str = params.get("key_size", _DEFAULT_KEY_SIZE)
+    if key_size_str not in _ALLOWED_KEY_SIZES:
+        return UseCaseResult(
+            ok=False,
+            detail=f"invalid key_size '{key_size_str}' -- must be one of {_ALLOWED_KEY_SIZES}",
+        )
+    key_size = int(key_size_str)
+
     token = uuid.uuid4().hex[:12]
     cn = f"certsight-test-{token}.local"
     path = _GENERATED_CERT_DIR / f"generated-{token}.crt"
 
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # On a host with FIPS mode actually enforced at the OpenSSL provider
+    # level, generating a sub-2048 RSA key can itself be refused (NIST SP
+    # 800-131A disallows RSA keygen below 2048 bits under FIPS) -- which is
+    # a legitimate, informative outcome for a FIPS-focused test tool, not a
+    # bug, so surface it as a normal use-case failure rather than a 500.
+    try:
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    except Exception as e:
+        return UseCaseResult(
+            ok=False,
+            detail=f"{key_size}-bit RSA key generation failed on this host ({e}) -- "
+            "if FIPS mode is enforced here, sub-2048-bit RSA keygen is likely blocked "
+            "at the OpenSSL provider level",
+        )
+
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
     now = datetime.now(timezone.utc)
     cert = (
@@ -96,12 +137,19 @@ def _generate_and_read_fresh_cert() -> UseCaseResult:
 
     if proc.returncode != 0:
         return UseCaseResult(ok=False, detail=f"cat {path} exited {proc.returncode}: {proc.stderr.strip()}")
+
+    fips_note = (
+        " -- undersized key, expect CertSight to flag this as FIPS non-compliant"
+        if key_size < 2048
+        else ""
+    )
     return UseCaseResult(
         ok=True,
         detail=(
-            f"generated a fresh self-signed cert (CN={cn}) at {path} and cat'd it -- "
-            "unique path and serial number guarantee CertSight treats this as a "
-            "first-time discovery, so a new Kafka event should always appear"
+            f"generated a fresh self-signed cert (CN={cn}, {key_size}-bit RSA) at "
+            f"{path} and cat'd it{fips_note} -- unique path and serial number "
+            "guarantee CertSight treats this as a first-time discovery, so a new "
+            "Kafka event should always appear"
         ),
     )
 
@@ -113,9 +161,18 @@ USE_CASES: List[UseCase] = [
         description=(
             "Generates a new self-signed certificate at a unique path under "
             "/dev/shm and cat's it. Guaranteed to be a first-time discovery "
-            "every click, so a new Kafka event always appears."
+            "every click, so a new Kafka event always appears. Pick a key size "
+            "below 2048 bits to trigger a FIPS non-compliance finding."
         ),
         run=_generate_and_read_fresh_cert,
+        params=[
+            UseCaseParam(
+                name="key_size",
+                label="RSA key size",
+                options=_ALLOWED_KEY_SIZES,
+                default=_DEFAULT_KEY_SIZE,
+            ),
+        ],
         pipeline=[
             "This server generates a self-signed X.509 certificate in memory "
             "and writes it to a brand-new path under /dev/shm/certsight-test-server/.",
@@ -142,7 +199,10 @@ USE_CASES: List[UseCase] = [
             "CertSight independently opens and reads that same file itself "
             "(a second, separate real file read, from its own process) to parse "
             "the X.509 structure: subject, issuer, SAN, validity dates, key "
-            "algorithm/size, FIPS compliance, etc.",
+            "algorithm/size, FIPS compliance, etc. Its FIPS checker "
+            "(agent/fips_compliance_checker.py) flags any RSA key under 2048 "
+            "bits, so picking a smaller key size above sets fips_compliant=false "
+            "and a fips_violations list on the resulting event.",
 
             "Because this exact path has never been seen before, CertSight's "
             "known-certs cache treats it as a first-time discovery: it records "

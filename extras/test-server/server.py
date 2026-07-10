@@ -28,6 +28,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -45,7 +46,7 @@ except ImportError:
     sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from use_cases import USE_CASES, USE_CASES_BY_ID  # noqa: E402
+from use_cases import USE_CASES, USE_CASES_BY_ID, UseCaseResult  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test-server")
@@ -142,6 +143,10 @@ def make_handler(broadcaster: EventBroadcaster):
                     "label": uc.label,
                     "description": uc.description,
                     "pipeline": uc.pipeline or [],
+                    "params": [
+                        {"name": p.name, "label": p.label, "options": p.options, "default": p.default}
+                        for p in (uc.params or [])
+                    ],
                 }
                 for uc in USE_CASES
             ]
@@ -157,8 +162,35 @@ def make_handler(broadcaster: EventBroadcaster):
             if use_case is None:
                 self.send_error(404, f"unknown use case '{use_case_id}'")
                 return
-            logger.info("running use case '%s'", use_case_id)
-            result = use_case.run()
+
+            params = {}
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length:
+                # Small cap on an unauthenticated, network-reachable endpoint --
+                # the body is only ever a handful of short param values.
+                if content_length > 4096:
+                    self.send_error(413, "request body too large")
+                    return
+                raw = self.rfile.read(content_length)
+                try:
+                    params = json.loads(raw)
+                    if not isinstance(params, dict):
+                        raise ValueError("params body must be a JSON object")
+                except (json.JSONDecodeError, ValueError) as e:
+                    self.send_error(400, f"invalid JSON body: {e}")
+                    return
+
+            logger.info("running use case '%s' with params=%r", use_case_id, params)
+            try:
+                result = use_case.run(params)
+            except Exception:
+                # An uncaught exception here would otherwise propagate out of
+                # do_POST with no response ever sent, which socketserver logs
+                # but the client just sees as a raw connection failure (e.g.
+                # browsers report a bare "NetworkError") instead of a readable
+                # error -- always return a clean 500 with the exception text.
+                logger.exception("use case '%s' raised", use_case_id)
+                result = UseCaseResult(ok=False, detail=f"use case raised an unhandled exception: {sys.exc_info()[1]}")
             body = json.dumps({"ok": result.ok, "detail": result.detail}).encode("utf-8")
             self.send_response(200 if result.ok else 500)
             self.send_header("Content-Type", "application/json")
@@ -191,23 +223,51 @@ def make_handler(broadcaster: EventBroadcaster):
 
 
 def parse_args() -> argparse.Namespace:
+    # Every flag also falls back to a TEST_SERVER_* environment variable, so
+    # the systemd unit can configure this via EnvironmentFile= without
+    # relying on shell-style $VAR substitution in ExecStart= (unsupported on
+    # older systemd). CLI flags still win when both are given.
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--port", type=int, default=8090, help="port for this test server (default: 8090)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("TEST_SERVER_PORT", 8090)),
+        help="port for this test server (default: 8090, env: TEST_SERVER_PORT)",
+    )
     parser.add_argument(
         "--bind",
-        default="127.0.0.1",
+        default=os.environ.get("TEST_SERVER_BIND", "127.0.0.1"),
         help=(
-            "address to bind to (default: 127.0.0.1) -- this server executes real "
-            "file/network actions on request, so do not expose it beyond localhost "
-            "or a trusted lab network"
+            "address to bind to (default: 127.0.0.1, env: TEST_SERVER_BIND) -- this "
+            "server executes real file/network actions on request, so do not expose "
+            "it beyond localhost or a trusted lab network"
         ),
     )
-    parser.add_argument("--kafka-host", required=True, help="Kafka broker hostname/IP cert-analyzer is publishing to")
-    parser.add_argument("--kafka-port", type=int, required=True, help="Kafka broker port")
-    parser.add_argument("--topic", default="cert-analyzer-events", help="Kafka topic to watch (default: cert-analyzer-events)")
-    return parser.parse_args()
+    parser.add_argument(
+        "--kafka-host",
+        default=os.environ.get("TEST_SERVER_KAFKA_HOST"),
+        help="Kafka broker hostname/IP cert-analyzer is publishing to (env: TEST_SERVER_KAFKA_HOST)",
+    )
+    parser.add_argument(
+        "--kafka-port",
+        type=int,
+        default=os.environ.get("TEST_SERVER_KAFKA_PORT"),
+        help="Kafka broker port (env: TEST_SERVER_KAFKA_PORT)",
+    )
+    parser.add_argument(
+        "--topic",
+        default=os.environ.get("TEST_SERVER_TOPIC", "cert-analyzer-events"),
+        help="Kafka topic to watch (default: cert-analyzer-events, env: TEST_SERVER_TOPIC)",
+    )
+    args = parser.parse_args()
+    if args.kafka_host is None or args.kafka_port is None:
+        parser.error(
+            "--kafka-host/--kafka-port are required "
+            "(pass as flags, or set TEST_SERVER_KAFKA_HOST/TEST_SERVER_KAFKA_PORT)"
+        )
+    return args
 
 
 def main() -> None:
