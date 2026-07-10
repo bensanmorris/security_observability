@@ -38,6 +38,9 @@ streamed live via Server-Sent Events as it arrives.
   exist yet; the experimental policy has no port/binary filter, so it
   fires on every bind() on the host, which is fine for local testing but
   worth knowing before loading it anywhere else)
+- For the "dial out to a TLS port" use case specifically: cert-analyzer
+  configured with `[port_probe] connect_probe_enabled = true`, and the
+  `tcp-connect-tls.yaml` TracingPolicy loaded (under `tetragon-policies/`)
 - For the "load a certificate straight into memory" use case specifically:
   the `openssl3-cert-load.yaml` (or `openssl3-cert-load-rhel8.yaml` on
   RHEL8) TracingPolicy loaded, and `/usr/lib64/libssl.so.3` present on
@@ -180,6 +183,7 @@ RPM upgrade won't overwrite edits you've made to it.
 |---|---|---|
 | generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
 | bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<random high port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
+| dial out to a TLS port and let CertSight discover it | Spawns `tcp_connect_probe_helper.py` as a separate process, which binds a real TLS listener on one of `tcp-connect-tls.yaml`'s TLS ports and then connects back to itself | Outbound connect detection via the `tcp-connect-tls.yaml` Tetragon policy (`tcp_connect` kprobe) plus cert-analyzer's `[port_probe]` TLS handshake probe |
 | load a certificate straight into memory (no file) | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
 
 The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
@@ -273,9 +277,8 @@ kprobe doesn't care about DAC permissions), but cert-analyzer's own
 follow-up read of the file content would fail, and no event would reach
 Kafka.
 
-More use cases (JKS/PKCS12 keystores, in-memory NSS certs, outbound
-`tcp_connect` probes, Java cert-agent operations) are intended to be added
-to `use_cases.py` over time -- see [What CertSight
+More use cases (JKS/PKCS12 keystores, in-memory NSS certs, Java cert-agent
+operations) are intended to be added to `use_cases.py` over time -- see [What CertSight
 detects](../../README.md#what-certsight-detects) for the full list this
 console is meant to eventually cover.
 
@@ -327,6 +330,66 @@ rather than spinning up unbounded listeners and child processes -- this
 endpoint may have no authentication (see the `--bind`/systemd warnings
 above), and unlike writing a file, this spins up a real process and a
 real listening socket per click.
+
+### dial out to a TLS port and let CertSight discover it
+
+This exercises cert-analyzer's *outbound* detection path -- the mirror
+image of the bind-probe case: a process connects out to a common TLS port,
+Tetragon's `tcp_connect` kprobe fires, and cert-analyzer connects to that
+same remote endpoint itself and performs a TLS handshake (verification
+disabled, same as the bind-probe and file-access cases) to pull the served
+certificate. Unlike the bind hook, `tcp_connect` fires on outbound
+connection attempts regardless of who's listening on the other end, so
+`tcp-connect-tls.yaml` narrows it with a `DPort` selector -- a fixed list
+of common TLS ports (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094) --
+rather than matching every outbound TCP connection on the host.
+
+`use_cases.py` spawns `tcp_connect_probe_helper.py` as a **separate OS
+process**, for the same PID-attribution reason as the bind-probe helper.
+Unlike that helper, this one plays *both* roles in the same process: it
+binds a real TLS listener on one of the DPort-filtered ports (a fixed
+subset that doesn't need root to bind -- 443 and 636 are in the policy too,
+but this helper never assumes the privilege to listen on either), then
+immediately makes a plain outbound `connect()` back to itself. That
+`connect()` is the actual trigger -- the kprobe fires on entry, before any
+TLS bytes are exchanged, so the client side of the helper doesn't need to
+negotiate TLS at all; only the server side does, since that's the half
+cert-analyzer's own follow-up probe talks to. This mirrors
+`probe_tests/test_tcp_connect_probe.py`, the repo's own reference test for
+this same detection path, which plays both roles for the identical reason.
+
+The helper prints its chosen port back to `use_cases.py` only *after* its
+own outbound connect has already happened, then keeps serving TLS for up
+to 12 seconds -- long enough for cert-analyzer's probe, which (unlike the
+bind-probe case) needs no startup delay, since the remote side is already
+running by the time the `tcp_connect` event arrives.
+
+cert-analyzer's outbound and inbound port probes each get their own dedup
+cache entry, keyed `connect:host:port` / `bind:host:port` respectively
+(`agent/analyzer.py`'s `_probed_endpoints`, with no expiry or eviction) --
+this use case's own helper both binds a listener *and* connects to it, so
+without the mechanism-scoped key a bind-triggered discovery of that exact
+socket would silently swallow the connect-triggered one (or vice versa,
+depending on which kprobe event cert-analyzer processed first). With the
+key scoped per mechanism, both fire and both publish independently, each
+under their own synthetic path (`tls-connect-probe://<host>:<port>` here,
+`tls-bind-probe://<host>:<port>` for the other use case) -- so you can
+click "bind a TLS service" and "dial out to a TLS port" against what would
+even be the identical address and see two separate Kafka events, one per
+mechanism.
+
+Within the connect mechanism alone, the per-endpoint dedup still applies
+with no expiry: a port *this specific use case* has already dialed
+successfully since cert-analyzer's last restart will be silently skipped
+on a later click -- the `tcp_connect` kprobe still fires and the PID in
+the result message is still real, but no second Kafka event appears. The
+helper picks randomly from its 7 candidate ports each click specifically
+to soften this: expect roughly 7 fresh discoveries before you start seeing
+repeats, at which point restarting cert-analyzer clears the cache.
+
+At most 2 of these can run concurrently
+(`_MAX_CONCURRENT_CONNECT_PROBES` in `use_cases.py`), for the same
+unauthenticated-endpoint reason as the bind-probe use case's own cap.
 
 ### load a certificate straight into memory (no file)
 

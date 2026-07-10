@@ -7488,7 +7488,7 @@ class TestPortProbe:
         finally:
             stop.set()
 
-        synthetic_path = f'tls-probe://127.0.0.1:{port}'
+        synthetic_path = f'tls-bind-probe://127.0.0.1:{port}'
         assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
         assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success')._value.get() == 1
 
@@ -7668,7 +7668,7 @@ class TestPortProbe:
     def test_bind_handler_skips_already_probed_endpoint(self, probe_analyzer):
         """No thread is spawned when the endpoint is already in _probed_endpoints."""
         from unittest.mock import patch
-        probe_analyzer._probed_endpoints.add('127.0.0.1:8443')
+        probe_analyzer._probed_endpoints.add('bind:127.0.0.1:8443')
         event = self._make_bind_event(
             'security_socket_bind',
             [self._make_sock_arg(8443, '0.0.0.0')],
@@ -7682,7 +7682,7 @@ class TestPortProbe:
     def test_bind_handler_skips_in_flight_endpoint(self, probe_analyzer):
         """No thread is spawned when a probe for the same endpoint is already running."""
         from unittest.mock import patch
-        probe_analyzer._probe_in_flight.add('127.0.0.1:8443')
+        probe_analyzer._probe_in_flight.add('bind:127.0.0.1:8443')
         event = self._make_bind_event(
             'security_socket_bind',
             [self._make_sock_arg(8443, '0.0.0.0')],
@@ -7696,7 +7696,7 @@ class TestPortProbe:
     def test_connect_handler_skips_already_probed_endpoint(self, probe_analyzer):
         """No thread is spawned when the endpoint is already in _probed_endpoints."""
         from unittest.mock import patch
-        probe_analyzer._probed_endpoints.add('1.2.3.4:443')
+        probe_analyzer._probed_endpoints.add('connect:1.2.3.4:443')
         event = self._make_connect_event('1.2.3.4', 443)
         with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
             probe_analyzer._handle_tls_connect_event(event)
@@ -7706,12 +7706,65 @@ class TestPortProbe:
     def test_connect_handler_skips_in_flight_endpoint(self, probe_analyzer):
         """No thread is spawned when a probe for the same endpoint is already running."""
         from unittest.mock import patch
-        probe_analyzer._probe_in_flight.add('1.2.3.4:443')
+        probe_analyzer._probe_in_flight.add('connect:1.2.3.4:443')
         event = self._make_connect_event('1.2.3.4', 443)
         with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
             probe_analyzer._handle_tls_connect_event(event)
             time.sleep(0.1)
         mock_probe.assert_not_called()
+
+    def test_bind_probe_not_blocked_by_prior_connect_probe_same_endpoint(self, probe_analyzer):
+        """A connect-sourced discovery of host:port must not block a later bind
+        discovery of the identical address -- the two are mechanism-scoped."""
+        from unittest.mock import patch
+        probe_analyzer._probed_endpoints.add('connect:127.0.0.1:8443')
+        event = self._make_bind_event(
+            'security_socket_bind',
+            [self._make_sock_arg(8443, '0.0.0.0')],
+        )
+        with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe, \
+             patch.object(probe_analyzer, '_resolve_pid_ip', return_value='127.0.0.1'):
+            probe_analyzer._handle_tls_bind_event(event)
+            time.sleep(0.1)
+        mock_probe.assert_called_once()
+
+    def test_connect_probe_not_blocked_by_prior_bind_probe_same_endpoint(self, probe_analyzer):
+        """A bind-sourced discovery of host:port must not block a later connect
+        discovery of the identical address -- the two are mechanism-scoped."""
+        from unittest.mock import patch
+        probe_analyzer._probed_endpoints.add('bind:1.2.3.4:443')
+        event = self._make_connect_event('1.2.3.4', 443)
+        with patch.object(probe_analyzer, '_probe_tls_endpoint') as mock_probe:
+            probe_analyzer._handle_tls_connect_event(event)
+            time.sleep(0.1)
+        mock_probe.assert_called_once()
+
+    def test_bind_and_connect_probes_of_same_endpoint_both_publish(self, probe_analyzer, temp_dir):
+        """Bind-probe and connect-probe discovering the identical host:port are
+        tracked and published as two independent findings, not deduped against
+        each other -- the actual end-to-end behavior the mechanism prefix exists for."""
+        from unittest.mock import MagicMock
+        mock_kafka = MagicMock()
+        probe_analyzer.kafka_publisher = mock_kafka
+
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop = self._start_tls_server(cert_path, key_path)
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/sbin/nginx', 1234, '', None, mechanism='bind'
+            )
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/bin/curl', 5678, '', None, mechanism='connect'
+            )
+        finally:
+            stop.set()
+
+        bind_path = f'tls-bind-probe://127.0.0.1:{port}'
+        connect_path = f'tls-connect-probe://127.0.0.1:{port}'
+        assert any(k.startswith(bind_path + ':') for k in probe_analyzer.known_certs)
+        assert any(k.startswith(connect_path + ':') for k in probe_analyzer.known_certs)
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success')._value.get() == 2
+        assert mock_kafka.publish.call_count == 2
 
     def test_probe_in_flight_cleared_after_successful_probe(self, probe_analyzer, temp_dir):
         """_probe_in_flight entry is removed after a successful probe."""
@@ -7745,7 +7798,7 @@ class TestPortProbe:
             )
         finally:
             stop.set()
-        assert f'127.0.0.1:{port}' in probe_analyzer._probed_endpoints
+        assert f'bind:127.0.0.1:{port}' in probe_analyzer._probed_endpoints
 
     def test_probe_endpoint_not_added_on_failed_probe(self, probe_analyzer):
         """A failed probe (connection refused) does not register the endpoint."""
@@ -7775,7 +7828,7 @@ class TestPortProbe:
             stop.set()
 
         assert in_flight_at_call_time, 'probe was never called'
-        assert f'127.0.0.1:{port}' in in_flight_at_call_time[0]
+        assert f'bind:127.0.0.1:{port}' in in_flight_at_call_time[0]
 
     # ── process_event routing ─────────────────────────────────────────────────
 
@@ -8108,7 +8161,7 @@ class TestPortProbe:
         finally:
             stop.set()
 
-        synthetic_path = f'tls-probe://127.0.0.1:{port}'
+        synthetic_path = f'tls-connect-probe://127.0.0.1:{port}'
         assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
 
 

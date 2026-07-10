@@ -262,8 +262,127 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
             f"for up to {int(_TLS_PROBE_LIFETIME_SECONDS)}s (CN={cn}) -- if cert-analyzer "
             "has [port_probe] bind_probe_enabled = true and the tls-service-tracking.yaml "
             "TracingPolicy loaded, it should connect within ~2s and pull this cert; check "
-            f"the Kafka pane for a tls-probe://127.0.0.1:{port} event and confirm its "
+            f"the Kafka pane for a tls-bind-probe://127.0.0.1:{port} event and confirm its "
             f"'pid' field reads {proc.pid} -- the same process that bound the socket"
+        ),
+    )
+
+
+# tcp_connect_probe_helper.py runs as its own OS process for the same PID-
+# attribution reason as the bind-probe helper above. Its candidate ports are
+# a fixed subset of tcp-connect-tls.yaml's DPort filter (see that helper's
+# module docstring for which, and why); cert-analyzer's outbound probe dedup
+# (agent/analyzer.py's _probed_endpoints, keyed 'connect:host:port') never
+# expires, so cycling across several candidate ports -- rather than always
+# dialing the same one -- keeps this use case producing fresh discoveries
+# across more than a single click. This dedup is scoped to the connect
+# mechanism only (as of the 'bind'/'connect' key-prefix fix in
+# agent/analyzer.py), so it no longer competes with the bind-probe use
+# case's own discoveries of the same host:port.
+_CONNECT_HELPER_SCRIPT = Path(__file__).resolve().parent / "tcp_connect_probe_helper.py"
+_MAX_CONCURRENT_CONNECT_PROBES = 2
+_CONNECT_PROBE_LIFETIME_SECONDS = 12.0
+_CONNECT_PROBE_READY_TIMEOUT_SECONDS = 5.0
+_active_connect_probe_lock = threading.Lock()
+_active_connect_probe_count = 0
+
+
+def _dial_outbound_tls_port(params: dict) -> UseCaseResult:
+    global _active_connect_probe_count
+    with _active_connect_probe_lock:
+        if _active_connect_probe_count >= _MAX_CONCURRENT_CONNECT_PROBES:
+            return UseCaseResult(
+                ok=False,
+                detail=f"{_MAX_CONCURRENT_CONNECT_PROBES} outbound connect probe(s) are "
+                "already running -- wait a few seconds for one to finish and try again",
+            )
+        _active_connect_probe_count += 1
+
+    def _release():
+        global _active_connect_probe_count
+        with _active_connect_probe_lock:
+            _active_connect_probe_count -= 1
+
+    token = uuid.uuid4().hex[:12]
+    cn = f"certsight-test-connect-{token}.local"
+    cert_path = _GENERATED_CERT_DIR / f"connect-probe-{token}.crt"
+    key_path = _GENERATED_CERT_DIR / f"connect-probe-{token}.key"
+
+    cert_pem, key_pem = _generate_self_signed_cert(cn, key_size=2048)
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+    cert_path.write_bytes(cert_pem)
+    cert_path.chmod(0o644)
+    # Never leaves this host, only read by the sibling helper process
+    # spawned below (same user) -- see the matching comment on the
+    # bind-probe use case above.
+    key_path.write_bytes(key_pem)
+    key_path.chmod(0o600)
+
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable, str(_CONNECT_HELPER_SCRIPT),
+                str(cert_path), str(key_path), str(_CONNECT_PROBE_LIFETIME_SECONDS),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as e:
+        _release()
+        return UseCaseResult(ok=False, detail=f"failed to spawn tcp_connect probe helper: {e}")
+
+    # Same background reader + queue pattern as the bind-probe use case:
+    # the helper's readiness line only arrives after its own outbound
+    # connect() has already happened, so a helper that hangs before that
+    # point can't block this HTTP request forever.
+    ready_q: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: ready_q.put(proc.stdout.readline()), daemon=True).start()
+
+    try:
+        first_line = ready_q.get(timeout=_CONNECT_PROBE_READY_TIMEOUT_SECONDS).strip()
+    except queue.Empty:
+        proc.kill()
+        _release()
+        return UseCaseResult(
+            ok=False, detail="tcp_connect probe helper didn't report its outbound connect in time",
+        )
+
+    if not first_line.startswith("PORT "):
+        proc.kill()
+        _release()
+        return UseCaseResult(ok=False, detail=f"tcp_connect probe helper failed to start: {first_line or '(no output)'}")
+
+    port = first_line.split(" ", 1)[1]
+
+    # Reap the helper in the background once its lifetime elapses so the
+    # concurrency slot frees itself and no zombie process is left behind.
+    def _reap():
+        proc.wait()
+        _release()
+
+    threading.Thread(target=_reap, daemon=True).start()
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"PID {proc.pid} made a real outbound connect() to 127.0.0.1:{port} (CN={cn}), "
+            f"a port tcp-connect-tls.yaml treats as TLS, then started serving TLS on that "
+            f"same port for up to {int(_CONNECT_PROBE_LIFETIME_SECONDS)}s -- if cert-analyzer "
+            "has [port_probe] connect_probe_enabled = true and the tcp-connect-tls.yaml "
+            "TracingPolicy loaded, it should probe that endpoint immediately; check the "
+            f"Kafka pane for a tls-connect-probe://127.0.0.1:{port} event and confirm its "
+            f"'pid' field reads {proc.pid} -- the same process that made the connect() call. "
+            "Note: cert-analyzer probes each destination host:port at most once ever per "
+            "mechanism (no cache expiry), so if this exact port was already dialed by an "
+            "earlier click of this same use case since cert-analyzer's last restart, this "
+            "click's connect() still fires the kprobe but the probe itself is silently "
+            "skipped -- the helper cycles across 7 candidate ports, so expect roughly that "
+            "many fresh events before you need to restart cert-analyzer to reset its dedup "
+            "cache. This is independent of the bind-probe use case's own dedup, even against "
+            "the identical 127.0.0.1:<port> -- each mechanism now tracks its own discoveries."
         ),
     )
 
@@ -460,13 +579,98 @@ USE_CASES: List[UseCase] = [
             "parses it exactly like a file-discovered cert (subject, "
             "issuer, SAN, key algorithm/size, FIPS compliance, etc).",
 
-            "Because the synthetic path 'tls-probe://127.0.0.1:<port>' "
+            "Because the synthetic path 'tls-bind-probe://127.0.0.1:<port>' "
             "combined with this cert's serial number has never been seen "
             "before, CertSight treats it as a first-time discovery and -- "
             "since [kafka] enabled = true -- publishes a "
             "'certificate_discovered' event to the cert-analyzer-events "
             "Kafka topic, with a 'pid' field set to the helper process's "
             "PID (from Tetragon's own report of who called bind()).",
+
+            "This test server's own background Kafka consumer thread "
+            "pushes that event to every connected browser over the "
+            "Server-Sent Events stream, where it lands in the right-hand "
+            "pane -- compare its 'pid' field against the PID shown in the "
+            "status line above.",
+        ],
+    ),
+    UseCase(
+        id="tcp-connect-probe",
+        label="dial out to a TLS port and let CertSight discover it",
+        description=(
+            "Spawns a separate process that binds a real TLS listener on one "
+            "of tcp-connect-tls.yaml's TLS ports, then makes a real outbound "
+            "connect() back to itself -- that connect() is the trigger, not "
+            "the bind(). Requires CertSight's [port_probe] "
+            "connect_probe_enabled = true and the tcp-connect-tls.yaml "
+            "TracingPolicy -- see TEST-SERVER-README.md."
+        ),
+        run=_dial_outbound_tls_port,
+        pipeline=[
+            "This server generates a fresh self-signed X.509 cert + private "
+            "key in memory and writes both to /dev/shm/certsight-test-server/.",
+
+            "This server spawns tcp_connect_probe_helper.py as a separate OS "
+            "process (not a thread) specifically so the connect() call below "
+            "happens in a process with its own distinct PID, which this use "
+            "case then shows you so you can cross-check it against the "
+            "resulting Kafka event.",
+
+            "That helper process binds a real TLS listener on 127.0.0.1, "
+            "picking one of a handful of ports that tcp-connect-tls.yaml's "
+            "DPort filter treats as TLS (8443, 6380, 8883, 5671, 5672, "
+            "9093, 9094 -- a subset that doesn't need root to bind), "
+            "retrying on collision, then immediately dials out to that same "
+            "port itself:\n"
+            "```python\n"
+            "sock.bind((\"127.0.0.1\", candidate))\n"
+            "sock.listen(4)\n"
+            "...\n"
+            "with socket.create_connection((\"127.0.0.1\", port), timeout=3):\n"
+            "    pass\n"
+            "```\n"
+            "(no TLS handshake needed on this side -- the kprobe fires on "
+            "connect() entry, before any bytes are exchanged) -- full "
+            "source: [tcp_connect_probe_helper.py](/source/tcp_connect_probe_helper.py)",
+
+            "Tetragon has a kprobe on the tcp_connect kernel function, "
+            "loaded via the tcp-connect-tls.yaml TracingPolicy, which fires "
+            "on that connect() call. The policy's DPort selector matches "
+            "the destination port against a fixed list of common TLS ports, "
+            "so it only fires for connections that look like outbound TLS.",
+
+            "CertSight's Tetragon gRPC client receives the event. If "
+            "[port_probe] connect_probe_enabled = true, it immediately "
+            "connects to that same 127.0.0.1:<port> itself -- no startup "
+            "delay is needed here, unlike the bind-probe case, since the "
+            "remote side is already running by the time the connect fires "
+            "-- and performs a real TLS handshake with certificate "
+            "verification intentionally disabled, exactly like the "
+            "bind-probe use case.",
+
+            "The helper process's TLS server hands CertSight the "
+            "certificate as a normal part of that handshake; CertSight "
+            "parses it exactly like a file- or bind-discovered cert "
+            "(subject, issuer, SAN, key algorithm/size, FIPS compliance, "
+            "etc).",
+
+            "CertSight builds its own synthetic path for this mechanism, "
+            "'tls-connect-probe://127.0.0.1:<port>' -- distinct from the "
+            "bind-probe case's 'tls-bind-probe://127.0.0.1:<port>' even "
+            "for the identical address, because agent/analyzer.py's probe "
+            "endpoint dedup cache is keyed on 'connect:host:port' /  "
+            "'bind:host:port' separately, so this use case's own discovery "
+            "never gets silently swallowed by the bind-probe use case (or "
+            "vice versa) even when both fire for the same 127.0.0.1:<port>. "
+            "Within this mechanism alone the dedup still applies with no "
+            "expiry, so a port this specific use case has already dialed "
+            "since cert-analyzer's last restart is silently skipped on a "
+            "later click. Since the port is fresh here, this is a "
+            "first-time discovery and -- since [kafka] enabled = true -- "
+            "CertSight publishes a 'certificate_discovered' event to the "
+            "cert-analyzer-events Kafka topic, with a 'pid' field set to "
+            "the helper process's PID (from Tetragon's own report of who "
+            "called connect()).",
 
             "This test server's own background Kafka consumer thread "
             "pushes that event to every connected browser over the "
