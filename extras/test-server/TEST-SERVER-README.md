@@ -51,30 +51,36 @@ that venv's `activate` instead.
 
 ### Option B: RPM (target host has no pip/internet access)
 
-```bash
-./build-rpm.sh --version 0.1.0 --release 1
-```
-
-Run this on any machine that *does* have normal pip/PyPI access -- it
-doesn't need to be the target host. It builds a self-contained RPM under
-`~/rpmbuild/RPMS/$(uname -m)/certsight-test-server-<version>-<release>.*.rpm`
-with `cryptography` and `kafka-python` already bundled into a relocatable
-virtualenv at `/opt/certsight-test-server/venv`, following the same
-pattern as `cert-analyzer.spec` (see there for why the debuginfo/build-id
-suppression macros at the top of the spec are needed). Copy that RPM to
-the target host and install it with zero pip/internet access required
-there:
+CI builds this RPM already, for both el8 and el9, with `cryptography` and
+`kafka-python` bundled into a relocatable virtualenv at
+`/opt/certsight-test-server/venv` -- no need to build it yourself. Grab
+`certsight-test-server-*.el8*.rpm` / `*.el9*.rpm` from a tagged
+[Release](../../releases) page, or -- for an untagged branch/PR -- from
+the `build-test-server-rpm` job's artifacts on its
+[Actions run](../../actions/workflows/build.yml) (also triggerable
+on-demand via `workflow_dispatch`). Copy it to the
+target host and install it with zero pip/internet access required there:
 
 ```bash
-sudo dnf install ./certsight-test-server-0.1.0-1.*.rpm
+sudo dnf install ./certsight-test-server-<version>-<release>.el9.*.rpm
 ```
+
+Only build it locally (`./build-rpm.sh --version 0.1.0 --release 1`) if
+you need a change that hasn't been through CI yet. Run that on any machine
+with normal pip/PyPI access -- it doesn't need to be the target host --
+and it produces the same RPM under
+`~/rpmbuild/RPMS/$(uname -m)/certsight-test-server-<version>-<release>.*.rpm`,
+following the same pattern as `cert-analyzer.spec` (see there for why the
+debuginfo/build-id suppression macros at the top of the spec are needed).
 
 This installs a `certsight-test-server` wrapper onto `$PATH` that runs
 `server.py` with the bundled venv's interpreter -- see "Run" below, just
 without the `source .venv/bin/activate` step and using `certsight-test-server`
-instead of `python3 server.py`. There's no systemd service or dedicated
-system user: this is an interactive foreground tool with environment-
-specific required arguments (`--kafka-host`/`--kafka-port`), not a daemon.
+instead of `python3 server.py`. It also installs a
+`certsight-test-server.service` systemd unit and a dedicated
+`certsight-test-server` system user, so it can be left running across
+reboots instead of started by hand every time -- see "Running under
+systemd" below.
 
 ## Run
 
@@ -92,12 +98,54 @@ Then open http://localhost:8090.
 broker is whatever you configured cert-analyzer's `[kafka] bootstrap_servers`
 to point at. `--topic` defaults to `cert-analyzer-events` (cert-analyzer's
 own default); pass `--port` to change this server's own listen port
-(default `8090`), and `--bind` to change its listen address (default
-`127.0.0.1`).
+(default `8090`).
+
+By default this only listens on `127.0.0.1`, so it's only reachable from a
+browser on the same host. If the target host is headless and you're
+browsing from elsewhere on a trusted lab network, pass `--bind 0.0.0.0` to
+listen on all interfaces, then open `http://<target-host>:8090` instead of
+`localhost`.
 
 **Do not** bind this beyond localhost or a trusted lab network: every use
 case executes a real, hardcoded action against this host on request from
 any browser that can reach it.
+
+## Running under systemd (RPM install only)
+
+The RPM installs `certsight-test-server.service`, enabled on install so it
+starts on every boot, running as a dedicated unprivileged
+`certsight-test-server` system user. Unlike the manual CLI (`--bind`
+defaults to `127.0.0.1`), the unit binds `0.0.0.0` by default, since a
+systemd-managed instance is typically left running on a headless lab host
+that you browse to from elsewhere -- **only do this on a trusted lab
+network behind a firewall**, per the warning above.
+
+It has no working default for `--kafka-host`/`--kafka-port`, so it won't
+actually come up until you configure it:
+
+```bash
+sudo vi /etc/certsight-test-server/test-server.conf   # set TEST_SERVER_KAFKA_HOST / TEST_SERVER_KAFKA_PORT
+sudo systemctl start certsight-test-server
+```
+
+Until then it sits enabled-but-failed (`Restart=on-failure`, giving up
+after 5 attempts in 300s) -- `journalctl -u certsight-test-server` will
+show it exiting with the same "--kafka-host/--kafka-port are required"
+error `server.py` gives on the CLI. Check status/logs, or stop it, the
+usual way:
+
+```bash
+systemctl status certsight-test-server
+journalctl -u certsight-test-server -f
+sudo systemctl stop certsight-test-server      # sudo systemctl disable ... to also stop it starting on boot
+```
+
+`test-server.conf` is a systemd `EnvironmentFile` (shell `KEY=VALUE`), not
+the same format as `cert-analyzer.conf` -- see the commented-out options
+in the shipped file for the full list (`TEST_SERVER_KAFKA_HOST`,
+`TEST_SERVER_KAFKA_PORT`, `TEST_SERVER_TOPIC`, `TEST_SERVER_PORT`,
+`TEST_SERVER_BIND`). It's marked `%config(noreplace)` in the spec, so an
+RPM upgrade won't overwrite edits you've made to it.
 
 ## Use cases
 

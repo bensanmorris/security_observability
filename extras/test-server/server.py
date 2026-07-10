@@ -28,6 +28,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -191,23 +192,51 @@ def make_handler(broadcaster: EventBroadcaster):
 
 
 def parse_args() -> argparse.Namespace:
+    # Every flag also falls back to a TEST_SERVER_* environment variable, so
+    # the systemd unit can configure this via EnvironmentFile= without
+    # relying on shell-style $VAR substitution in ExecStart= (unsupported on
+    # older systemd). CLI flags still win when both are given.
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--port", type=int, default=8090, help="port for this test server (default: 8090)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("TEST_SERVER_PORT", 8090)),
+        help="port for this test server (default: 8090, env: TEST_SERVER_PORT)",
+    )
     parser.add_argument(
         "--bind",
-        default="127.0.0.1",
+        default=os.environ.get("TEST_SERVER_BIND", "127.0.0.1"),
         help=(
-            "address to bind to (default: 127.0.0.1) -- this server executes real "
-            "file/network actions on request, so do not expose it beyond localhost "
-            "or a trusted lab network"
+            "address to bind to (default: 127.0.0.1, env: TEST_SERVER_BIND) -- this "
+            "server executes real file/network actions on request, so do not expose "
+            "it beyond localhost or a trusted lab network"
         ),
     )
-    parser.add_argument("--kafka-host", required=True, help="Kafka broker hostname/IP cert-analyzer is publishing to")
-    parser.add_argument("--kafka-port", type=int, required=True, help="Kafka broker port")
-    parser.add_argument("--topic", default="cert-analyzer-events", help="Kafka topic to watch (default: cert-analyzer-events)")
-    return parser.parse_args()
+    parser.add_argument(
+        "--kafka-host",
+        default=os.environ.get("TEST_SERVER_KAFKA_HOST"),
+        help="Kafka broker hostname/IP cert-analyzer is publishing to (env: TEST_SERVER_KAFKA_HOST)",
+    )
+    parser.add_argument(
+        "--kafka-port",
+        type=int,
+        default=os.environ.get("TEST_SERVER_KAFKA_PORT"),
+        help="Kafka broker port (env: TEST_SERVER_KAFKA_PORT)",
+    )
+    parser.add_argument(
+        "--topic",
+        default=os.environ.get("TEST_SERVER_TOPIC", "cert-analyzer-events"),
+        help="Kafka topic to watch (default: cert-analyzer-events, env: TEST_SERVER_TOPIC)",
+    )
+    args = parser.parse_args()
+    if args.kafka_host is None or args.kafka_port is None:
+        parser.error(
+            "--kafka-host/--kafka-port are required "
+            "(pass as flags, or set TEST_SERVER_KAFKA_HOST/TEST_SERVER_KAFKA_PORT)"
+        )
+    return args
 
 
 def main() -> None:

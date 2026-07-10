@@ -9,6 +9,12 @@
 
 %global app_home /opt/certsight-test-server
 %global app_venv %{app_home}/venv
+%global app_conf /etc/certsight-test-server
+
+# The service runs as a dedicated non-privileged user, same pattern as
+# cert-analyzer.spec
+%global svc_user  certsight-test-server
+%global svc_group certsight-test-server
 
 # ── Suppress rpmbuild post-processing that breaks bundled venvs ───────────────
 # Same rationale as cert-analyzer.spec: do not mangle shebangs inside the
@@ -39,8 +45,10 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  python3.11
 BuildRequires:  python3.11-devel
 BuildRequires:  gcc
+BuildRequires:  systemd-rpm-macros
 
 Requires:       python3.11
+Requires:       systemd
 
 
 %description
@@ -53,7 +61,10 @@ to a browser in real time via Server-Sent Events.
 
 This package bundles its own Python virtualenv (cryptography,
 kafka-python) so it can be installed and run with no pip/internet access
-on the target host. See TEST-SERVER-README.md for prerequisites, use
+on the target host. It installs both a standalone `certsight-test-server`
+CLI and a certsight-test-server.service systemd unit, enabled on install
+so it starts on boot, bound to 0.0.0.0 by default -- see
+TEST-SERVER-README.md for the required Kafka broker configuration, use
 cases, and how the detection pipeline works end to end.
 
 
@@ -108,10 +119,11 @@ sed -i "s|%{_builddir}/venv|%{app_venv}|g" \
 
 # ── Wrapper executable ────────────────────────────────────────────────────────
 # Runs server.py with the bundled venv's interpreter, so callers never need
-# to know the venv's path or activate it themselves. Not a systemd service:
-# this is an interactive test tool (--kafka-host/--kafka-port are required,
-# environment-specific arguments), meant to be run in the foreground and
-# stopped with Ctrl-C.
+# to know the venv's path or activate it themselves. Works both run
+# interactively from a terminal (--kafka-host/--kafka-port flags) and run
+# unattended by the systemd unit below (TEST_SERVER_KAFKA_HOST/
+# TEST_SERVER_KAFKA_PORT env vars via EnvironmentFile=) -- see
+# server.py's parse_args().
 install -d %{buildroot}%{_bindir}
 cat > %{buildroot}%{_bindir}/certsight-test-server << WRAPEOF
 #!/bin/sh
@@ -119,9 +131,46 @@ exec %{app_venv}/bin/python3.11 %{app_home}/server.py "\$@"
 WRAPEOF
 chmod 0755 %{buildroot}%{_bindir}/certsight-test-server
 
+# ── systemd unit ─────────────────────────────────────────────────────────────
+install -d %{buildroot}%{_unitdir}
+install -m 0644 certsight-test-server.service %{buildroot}%{_unitdir}/certsight-test-server.service
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+install -d %{buildroot}%{app_conf}
+install -m 0644 test-server.conf %{buildroot}%{app_conf}/test-server.conf
+
 # ── Licence ───────────────────────────────────────────────────────────────────
 install -d %{buildroot}%{_defaultlicensedir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
+
+
+%pre
+# Create the dedicated service user/group if they don't already exist.
+# --no-create-home: the service writes nothing under app_home, only
+# /dev/shm (see use_cases.py).
+getent group %{svc_group} > /dev/null || \
+    groupadd --system %{svc_group}
+getent passwd %{svc_user} > /dev/null || \
+    useradd --system \
+            --gid %{svc_group} \
+            --home-dir %{app_home} \
+            --no-create-home \
+            --shell /sbin/nologin \
+            --comment "certsight-test-server service account" \
+            %{svc_user}
+exit 0
+
+
+%post
+%systemd_post certsight-test-server.service
+
+
+%preun
+%systemd_preun certsight-test-server.service
+
+
+%postun
+%systemd_postun_with_restart certsight-test-server.service
 
 
 %files
@@ -132,8 +181,14 @@ install -m 0644 LICENSE %{buildroot}%{_defaultlicensedir}/%{name}/LICENSE
 %{app_home}/static/
 %{app_venv}/
 %{_bindir}/certsight-test-server
+%{_unitdir}/certsight-test-server.service
+%dir %{app_conf}
+%config(noreplace) %{app_conf}/test-server.conf
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add systemd service (enabled on install, binds 0.0.0.0 by default) and
+  environment-variable configuration alongside the existing CLI flags
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Initial RPM packaging
