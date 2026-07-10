@@ -51,12 +51,23 @@ from use_cases import USE_CASES, USE_CASES_BY_ID, UseCaseResult  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test-server")
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript"),
     "/app.css": ("app.css", "text/css"),
 }
+
+# Raw source files servable via /source/<name>, linked from a use case's
+# "How this works" pipeline text so the reader can see the full script
+# behind an inlined snippet. Explicit allowlist rather than a generic
+# ?file= path, since this endpoint may be reachable with no authentication
+# (see TEST-SERVER-README.md) -- an unbounded version would let any caller
+# read arbitrary files this process can access. Served from disk (not a
+# GitHub link) so it keeps working on an RPM install with zero internet
+# access, which is a supported deployment mode for this tool.
+SOURCE_FILES = {"tls_probe_helper.py"}
 
 
 class EventBroadcaster:
@@ -113,6 +124,8 @@ def make_handler(broadcaster: EventBroadcaster):
             path = urlparse(self.path).path
             if path in STATIC_FILES:
                 self._serve_static(path)
+            elif path.startswith("/source/"):
+                self._serve_source(path[len("/source/"):])
             elif path == "/api/use-cases":
                 self._serve_use_cases()
             elif path == "/api/events":
@@ -132,6 +145,17 @@ def make_handler(broadcaster: EventBroadcaster):
             data = (STATIC_DIR / filename).read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _serve_source(self, filename):
+            if filename not in SOURCE_FILES:
+                self.send_error(404, f"no such source file '{filename}'")
+                return
+            data = (APP_DIR / filename).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)

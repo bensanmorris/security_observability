@@ -350,11 +350,18 @@ USE_CASES: List[UseCase] = [
             "use case then shows you so you can cross-check it against the "
             "resulting Kafka event.",
 
-            "That helper process itself picks a random high port and calls "
-            "socket.bind(('127.0.0.1', <port>)) -- a real, explicit port, "
-            "not 0/OS-assigned, since CertSight can only see the literal "
-            "port passed into bind() itself -- then listens for incoming "
-            "TLS connections using the generated cert/key.",
+            "That helper process itself picks a random high port and binds "
+            "to it explicitly -- not 0/OS-assigned, since CertSight can "
+            "only see the literal port passed into bind() itself:\n"
+            "```python\n"
+            "candidate = random.randint(49152, 65535)\n"
+            "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "sock.bind((\"127.0.0.1\", candidate))\n"
+            "sock.listen(4)\n"
+            "```\n"
+            "(retried on collision) then listens for incoming TLS "
+            "connections using the generated cert/key -- full source: "
+            "[tls_probe_helper.py](/source/tls_probe_helper.py)",
 
             "Tetragon has a kprobe on the security_socket_bind LSM hook, "
             "loaded via the tls-service-tracking.yaml TracingPolicy, which "

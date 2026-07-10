@@ -342,3 +342,12 @@ works unmodified whether running from a git checkout or from the RPM's
 `certsight-test-server.spec` (`%install` and `%files`) and to
 `build-rpm.sh`'s source tarball list, or it'll work in a git checkout but
 silently be missing from the RPM.
+
+`description` and each `pipeline` string support a small markdown-lite
+syntax (`app.js`'s `setRichText`): `` ```lang\n...\n``` `` fenced blocks
+render as `<pre><code>`, and `[text](url)` renders as a link -- useful for
+inlining a short snippet of the real code a step describes. Link to
+`/source/<filename>` rather than an external URL (e.g. GitHub) if you want
+it to keep working on an RPM install with no internet access -- that route
+only serves filenames explicitly listed in `server.py`'s `SOURCE_FILES`
+allowlist, so add yours there too.

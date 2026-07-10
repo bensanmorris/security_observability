@@ -118,6 +118,25 @@ h2 {
   margin-bottom: 0.4rem;
 }
 
+.use-case-pipeline pre {
+  margin: 0.4rem 0;
+  padding: 0.5rem 0.6rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: #8881;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.use-case-pipeline code {
+  font-family: ui-monospace, monospace;
+}
+
+.use-case-pipeline a {
+  color: inherit;
+}
+
 #run-status {
   margin-top: 1rem;
   font-size: 0.9rem;

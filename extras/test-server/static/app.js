@@ -6,10 +6,26 @@ function escapeHtml(str) {
 
 // Server-supplied text is static/trusted (authored in use_cases.py, not
 // user input), so rendering it as HTML is safe -- escape first anyway as
-// defense in depth, then bold every mention of the product name so it
-// stands out against the surrounding description/pipeline copy.
-function setTextWithBrandBold(el, text) {
-  el.innerHTML = escapeHtml(text).replace(/CertSight/g, '<strong>CertSight</strong>');
+// defense in depth, then apply a small set of markdown-lite conventions:
+// CertSight gets bolded, fenced ```lang code``` blocks become <pre><code>,
+// and [text](url) becomes a link. Fenced blocks are pulled out before the
+// other substitutions run, so code content is never itself bolded/linkified.
+function setRichText(el, text) {
+  let escaped = escapeHtml(text);
+
+  const codeBlocks = [];
+  escaped = escaped.replace(/```[a-zA-Z]*\n([\s\S]*?)```/g, (_match, code) => {
+    codeBlocks.push(`<pre><code>${code.trim()}</code></pre>`);
+    return ` CODEBLOCK${codeBlocks.length - 1} `;
+  });
+
+  let html = escaped
+    .replace(/CertSight/g, '<strong>CertSight</strong>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  html = html.replace(/ CODEBLOCK(\d+) /g, (_match, i) => codeBlocks[Number(i)]);
+
+  el.innerHTML = html;
 }
 
 async function loadUseCases() {
@@ -26,7 +42,7 @@ async function loadUseCases() {
 
     const desc = document.createElement('p');
     desc.className = 'use-case-description';
-    setTextWithBrandBold(desc, uc.description);
+    setRichText(desc, uc.description);
 
     if (uc.params && uc.params.length > 0) {
       const paramsDiv = document.createElement('div');
@@ -63,7 +79,7 @@ async function loadUseCases() {
       const steps = document.createElement('ol');
       for (const step of uc.pipeline) {
         const item = document.createElement('li');
-        setTextWithBrandBold(item, step);
+        setRichText(item, step);
         steps.appendChild(item);
       }
       details.appendChild(steps);
@@ -91,7 +107,7 @@ async function runUseCase(id, button, li) {
       body: JSON.stringify(params),
     });
     const result = await res.json();
-    setTextWithBrandBold(status, result.detail);
+    setRichText(status, result.detail);
     status.className = result.ok ? 'ok' : 'error';
   } catch (err) {
     status.textContent = `Request failed: ${err}`;
