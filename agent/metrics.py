@@ -432,7 +432,7 @@ class PrometheusMetrics:
 
         self.tls_port_probes_total = Counter(
             'tls_port_probes_total',
-            'Total number of TLS port probe attempts triggered by bind events',
+            'Total number of TLS port probe attempts triggered by bind or outbound connect events',
             ['status'],  # success, failed, skipped
         )
 

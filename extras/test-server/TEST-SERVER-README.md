@@ -364,17 +364,28 @@ to 12 seconds -- long enough for cert-analyzer's probe, which (unlike the
 bind-probe case) needs no startup delay, since the remote side is already
 running by the time the `tcp_connect` event arrives.
 
-cert-analyzer's outbound and inbound port probes share one dedup cache
-(`agent/analyzer.py`'s `_probed_endpoints`, keyed on `host:port` with no
-expiry or eviction), and both build the same synthetic path,
-`tls-probe://<host>:<port>`. That means a port this use case has already
-probed successfully since cert-analyzer's last restart will be silently
-skipped on a later click -- the `tcp_connect` kprobe still fires and the
-PID in the result message is still real, but no second Kafka event
-appears. The helper picks randomly from its 7 candidate ports each click
-specifically to soften this: expect roughly 7 fresh discoveries before you
-start seeing repeats, at which point restarting cert-analyzer clears the
-cache.
+cert-analyzer's outbound and inbound port probes each get their own dedup
+cache entry, keyed `connect:host:port` / `bind:host:port` respectively
+(`agent/analyzer.py`'s `_probed_endpoints`, with no expiry or eviction) --
+this use case's own helper both binds a listener *and* connects to it, so
+without the mechanism-scoped key a bind-triggered discovery of that exact
+socket would silently swallow the connect-triggered one (or vice versa,
+depending on which kprobe event cert-analyzer processed first). With the
+key scoped per mechanism, both fire and both publish independently, each
+under their own synthetic path (`tls-connect-probe://<host>:<port>` here,
+`tls-bind-probe://<host>:<port>` for the other use case) -- so you can
+click "bind a TLS service" and "dial out to a TLS port" against what would
+even be the identical address and see two separate Kafka events, one per
+mechanism.
+
+Within the connect mechanism alone, the per-endpoint dedup still applies
+with no expiry: a port *this specific use case* has already dialed
+successfully since cert-analyzer's last restart will be silently skipped
+on a later click -- the `tcp_connect` kprobe still fires and the PID in
+the result message is still real, but no second Kafka event appears. The
+helper picks randomly from its 7 candidate ports each click specifically
+to soften this: expect roughly 7 fresh discoveries before you start seeing
+repeats, at which point restarting cert-analyzer clears the cache.
 
 At most 2 of these can run concurrently
 (`_MAX_CONCURRENT_CONNECT_PROBES` in `use_cases.py`), for the same

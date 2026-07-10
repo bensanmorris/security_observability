@@ -117,7 +117,7 @@ def main() -> None:
     print('Expected cert_analyzer log output:')
     print(f'  🔍 TLS probe: discovered cert at 127.0.0.1:{args.port} '
           f'CN=valid.example.com process=...')
-    print(f'  ✅ OK: tls-probe://127.0.0.1:{args.port} '
+    print(f'  ✅ OK: tls-bind-probe://127.0.0.1:{args.port} '
           f'(process=... CN=valid.example.com) valid for ...')
     print()
     print('Expected Prometheus metric (check on port 9090):')

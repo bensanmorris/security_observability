@@ -262,7 +262,7 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
             f"for up to {int(_TLS_PROBE_LIFETIME_SECONDS)}s (CN={cn}) -- if cert-analyzer "
             "has [port_probe] bind_probe_enabled = true and the tls-service-tracking.yaml "
             "TracingPolicy loaded, it should connect within ~2s and pull this cert; check "
-            f"the Kafka pane for a tls-probe://127.0.0.1:{port} event and confirm its "
+            f"the Kafka pane for a tls-bind-probe://127.0.0.1:{port} event and confirm its "
             f"'pid' field reads {proc.pid} -- the same process that bound the socket"
         ),
     )
@@ -272,10 +272,13 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
 # attribution reason as the bind-probe helper above. Its candidate ports are
 # a fixed subset of tcp-connect-tls.yaml's DPort filter (see that helper's
 # module docstring for which, and why); cert-analyzer's outbound probe dedup
-# (agent/analyzer.py's _probed_endpoints) is keyed on host:port only and
-# never expires, so cycling across several candidate ports -- rather than
-# always dialing the same one -- keeps this use case producing fresh
-# discoveries across more than a single click.
+# (agent/analyzer.py's _probed_endpoints, keyed 'connect:host:port') never
+# expires, so cycling across several candidate ports -- rather than always
+# dialing the same one -- keeps this use case producing fresh discoveries
+# across more than a single click. This dedup is scoped to the connect
+# mechanism only (as of the 'bind'/'connect' key-prefix fix in
+# agent/analyzer.py), so it no longer competes with the bind-probe use
+# case's own discoveries of the same host:port.
 _CONNECT_HELPER_SCRIPT = Path(__file__).resolve().parent / "tcp_connect_probe_helper.py"
 _MAX_CONCURRENT_CONNECT_PROBES = 2
 _CONNECT_PROBE_LIFETIME_SECONDS = 12.0
@@ -370,14 +373,16 @@ def _dial_outbound_tls_port(params: dict) -> UseCaseResult:
             f"same port for up to {int(_CONNECT_PROBE_LIFETIME_SECONDS)}s -- if cert-analyzer "
             "has [port_probe] connect_probe_enabled = true and the tcp-connect-tls.yaml "
             "TracingPolicy loaded, it should probe that endpoint immediately; check the "
-            f"Kafka pane for a tls-probe://127.0.0.1:{port} event and confirm its 'pid' field "
-            f"reads {proc.pid} -- the same process that made the connect() call. Note: "
-            "cert-analyzer probes each destination host:port at most once ever (no cache "
-            "expiry), so if this exact port was already probed by an earlier click since "
-            "cert-analyzer's last restart, this click's connect() still fires the kprobe but "
-            "the probe itself is silently skipped -- the helper cycles across 7 candidate "
-            "ports, so expect roughly that many fresh events before you need to restart "
-            "cert-analyzer to reset its dedup cache."
+            f"Kafka pane for a tls-connect-probe://127.0.0.1:{port} event and confirm its "
+            f"'pid' field reads {proc.pid} -- the same process that made the connect() call. "
+            "Note: cert-analyzer probes each destination host:port at most once ever per "
+            "mechanism (no cache expiry), so if this exact port was already dialed by an "
+            "earlier click of this same use case since cert-analyzer's last restart, this "
+            "click's connect() still fires the kprobe but the probe itself is silently "
+            "skipped -- the helper cycles across 7 candidate ports, so expect roughly that "
+            "many fresh events before you need to restart cert-analyzer to reset its dedup "
+            "cache. This is independent of the bind-probe use case's own dedup, even against "
+            "the identical 127.0.0.1:<port> -- each mechanism now tracks its own discoveries."
         ),
     )
 
@@ -574,7 +579,7 @@ USE_CASES: List[UseCase] = [
             "parses it exactly like a file-discovered cert (subject, "
             "issuer, SAN, key algorithm/size, FIPS compliance, etc).",
 
-            "Because the synthetic path 'tls-probe://127.0.0.1:<port>' "
+            "Because the synthetic path 'tls-bind-probe://127.0.0.1:<port>' "
             "combined with this cert's serial number has never been seen "
             "before, CertSight treats it as a first-time discovery and -- "
             "since [kafka] enabled = true -- publishes a "
@@ -649,15 +654,20 @@ USE_CASES: List[UseCase] = [
             "(subject, issuer, SAN, key algorithm/size, FIPS compliance, "
             "etc).",
 
-            "CertSight builds the same synthetic path used for the "
-            "bind-probe case, 'tls-probe://127.0.0.1:<port>' -- both share "
-            "one probe endpoint dedup cache (agent/analyzer.py's "
-            "_probed_endpoints), keyed on host:port with no expiry, so a "
-            "port this cache has already seen since cert-analyzer's last "
-            "restart is silently skipped even though the kprobe still "
-            "fires. Since the port is fresh here, this is a first-time "
-            "discovery and -- since [kafka] enabled = true -- CertSight "
-            "publishes a 'certificate_discovered' event to the "
+            "CertSight builds its own synthetic path for this mechanism, "
+            "'tls-connect-probe://127.0.0.1:<port>' -- distinct from the "
+            "bind-probe case's 'tls-bind-probe://127.0.0.1:<port>' even "
+            "for the identical address, because agent/analyzer.py's probe "
+            "endpoint dedup cache is keyed on 'connect:host:port' /  "
+            "'bind:host:port' separately, so this use case's own discovery "
+            "never gets silently swallowed by the bind-probe use case (or "
+            "vice versa) even when both fire for the same 127.0.0.1:<port>. "
+            "Within this mechanism alone the dedup still applies with no "
+            "expiry, so a port this specific use case has already dialed "
+            "since cert-analyzer's last restart is silently skipped on a "
+            "later click. Since the port is fresh here, this is a "
+            "first-time discovery and -- since [kafka] enabled = true -- "
+            "CertSight publishes a 'certificate_discovered' event to the "
             "cert-analyzer-events Kafka topic, with a 'pid' field set to "
             "the helper process's PID (from Tetragon's own report of who "
             "called connect()).",

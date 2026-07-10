@@ -1682,16 +1682,25 @@ class CertificateAnalyzer:
         pid: int,
         node_name: str,
         tetragon_pod,
+        mechanism: str = 'bind',
     ) -> None:
         """Connect to host:port, complete a TLS handshake, and ingest the leaf cert.
 
         Uses no-verify mode intentionally — the goal is certificate inventory,
         not validation. A short delay before calling (port_probe_connect_delay)
         gives the service time to finish TLS initialisation after binding.
-        """
-        synthetic_path = f'tls-probe://{host}:{port}'
 
-        if f'{host}:{port}' in self._probed_endpoints:
+        mechanism ('bind' or 'connect') identifies which kprobe triggered this
+        probe. It's folded into both the synthetic path and the dedup key so
+        that a service independently discoverable via both an inbound bind
+        and an outbound connect (the same literal host:port) is tracked and
+        published as two distinct findings rather than one silently
+        swallowing the other — see _handle_tls_bind_event/_handle_tls_connect_event.
+        """
+        synthetic_path = f'tls-{mechanism}-probe://{host}:{port}'
+        endpoint_key = f'{mechanism}:{host}:{port}'
+
+        if endpoint_key in self._probed_endpoints:
             logger.debug("TLS probe: already probed %s", synthetic_path)
             self.metrics.tls_port_probes_total.labels(status='skipped').inc()
             return
@@ -1742,7 +1751,7 @@ class CertificateAnalyzer:
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
-        self._probed_endpoints.add(f'{host}:{port}')
+        self._probed_endpoints.add(endpoint_key)
         self._update_cache_metrics()
 
         if tls_version and cipher_name:
@@ -1805,7 +1814,11 @@ class CertificateAnalyzer:
         self.last_event_time = time.time()
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
-        endpoint_key = f'{host}:{port}'
+        # Prefixed with the mechanism so an inbound bind and an outbound
+        # connect to the exact same host:port are tracked (and published)
+        # independently instead of racing for one shared dedup slot — see
+        # _probe_tls_endpoint's docstring.
+        endpoint_key = f'bind:{host}:{port}'
         with self._probe_in_flight_lock:
             if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
                 logger.debug("TLS bind probe: %s already probed or in flight, skipping", endpoint_key)
@@ -1816,13 +1829,13 @@ class CertificateAnalyzer:
             if delay:
                 time.sleep(delay)
             try:
-                self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod)
+                self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod, mechanism='bind')
             except Exception as e:
                 logger.debug(f"TLS probe thread error {host}:{port}: {e}")
             finally:
                 # discard-from-in-flight and add-to-probed must happen as one
                 # atomic step under the same lock — otherwise there's a window
-                # where endpoint_key is in neither set, and a bind/connect event
+                # where endpoint_key is in neither set, and a second bind event
                 # for the same endpoint landing in that window would see it as
                 # neither in-flight nor already-probed and spawn a duplicate
                 # probe (and duplicate Kafka publish, since _probe_tls_endpoint
@@ -1831,7 +1844,7 @@ class CertificateAnalyzer:
                     self._probe_in_flight.discard(endpoint_key)
                     self._probed_endpoints.add(endpoint_key)
 
-        started = self._start_background_thread(_probe, name=f'tls-probe-{host}-{port}')
+        started = self._start_background_thread(_probe, name=f'tls-bind-probe-{host}-{port}')
         if not started:
             # _probe's finally never ran, so undo the in-flight marker here —
             # this endpoint will be retried on its next qualifying event.
@@ -1874,7 +1887,11 @@ class CertificateAnalyzer:
         self.last_event_time = time.time()
         self.metrics.last_event_timestamp.labels(node_name=self.metrics._node_name).set(self.last_event_time)
 
-        endpoint_key = f'{daddr}:{dport}'
+        # Prefixed with the mechanism so an outbound connect and an inbound
+        # bind to the exact same host:port are tracked (and published)
+        # independently instead of racing for one shared dedup slot — see
+        # _probe_tls_endpoint's docstring.
+        endpoint_key = f'connect:{daddr}:{dport}'
         with self._probe_in_flight_lock:
             if endpoint_key in self._probed_endpoints or endpoint_key in self._probe_in_flight:
                 logger.debug("TLS connect probe: %s already probed or in flight, skipping", endpoint_key)
@@ -1883,22 +1900,23 @@ class CertificateAnalyzer:
 
         def _probe():
             try:
-                self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod)
+                self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod, mechanism='connect')
             except Exception as e:
                 logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
             finally:
                 # discard-from-in-flight and add-to-probed must happen as one
                 # atomic step under the same lock — otherwise there's a window
-                # where endpoint_key is in neither set, and a bind/connect event
-                # for the same endpoint landing in that window would see it as
-                # neither in-flight nor already-probed and spawn a duplicate
-                # probe (and duplicate Kafka publish, since _probe_tls_endpoint
-                # has no de-dupe of its own against known_certs).
+                # where endpoint_key is in neither set, and a second connect
+                # event for the same endpoint landing in that window would see
+                # it as neither in-flight nor already-probed and spawn a
+                # duplicate probe (and duplicate Kafka publish, since
+                # _probe_tls_endpoint has no de-dupe of its own against
+                # known_certs).
                 with self._probe_in_flight_lock:
                     self._probe_in_flight.discard(endpoint_key)
                     self._probed_endpoints.add(endpoint_key)
 
-        started = self._start_background_thread(_probe, name=f'tls-probe-out-{daddr}-{dport}')
+        started = self._start_background_thread(_probe, name=f'tls-connect-probe-{daddr}-{dport}')
         if not started:
             # _probe's finally never ran, so undo the in-flight marker here —
             # this endpoint will be retried on its next qualifying event.
