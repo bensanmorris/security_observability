@@ -38,6 +38,11 @@ streamed live via Server-Sent Events as it arrives.
   exist yet; the experimental policy has no port/binary filter, so it
   fires on every bind() on the host, which is fine for local testing but
   worth knowing before loading it anywhere else)
+- For the "load a certificate straight into memory" use case specifically:
+  the `openssl3-cert-load.yaml` (or `openssl3-cert-load-rhel8.yaml` on
+  RHEL8) TracingPolicy loaded, and `/usr/lib64/libssl.so.3` present on
+  this host -- that's the literal path both policies hook, and the one
+  this use case loads via `ctypes`
 
 ## Install
 
@@ -175,6 +180,7 @@ RPM upgrade won't overwrite edits you've made to it.
 |---|---|---|
 | generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
 | bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<random high port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
+| load a certificate straight into memory (no file) | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
 
 The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
 next to the button, both in the UI and as a `{"key_size": "1024"}` JSON
@@ -267,7 +273,7 @@ kprobe doesn't care about DAC permissions), but cert-analyzer's own
 follow-up read of the file content would fail, and no event would reach
 Kafka.
 
-More use cases (JKS/PKCS12 keystores, in-memory OpenSSL/NSS certs, outbound
+More use cases (JKS/PKCS12 keystores, in-memory NSS certs, outbound
 `tcp_connect` probes, Java cert-agent operations) are intended to be added
 to `use_cases.py` over time -- see [What CertSight
 detects](../../README.md#what-certsight-detects) for the full list this
@@ -321,6 +327,43 @@ rather than spinning up unbounded listeners and child processes -- this
 endpoint may have no authentication (see the `--bind`/systemd warnings
 above), and unlike writing a file, this spins up a real process and a
 real listening socket per click.
+
+### load a certificate straight into memory (no file)
+
+Unlike the other two use cases, this one exercises a **uprobe**, not a
+kprobe -- `openssl3-cert-load.yaml` hooks `SSL_CTX_use_certificate_ASN1`
+directly on `/usr/lib64/libssl.so.3`, so it fires on *any* process that
+maps that library and calls the symbol, no matter what language the
+caller is written in.
+
+`use_cases.py` generates a fresh self-signed cert with the `cryptography`
+library, encodes it to DER, then calls straight into that same system
+libssl via Python's `ctypes` -- `SSL_CTX_new()` /
+`SSL_CTX_use_certificate_ASN1()` / `SSL_CTX_free()` -- rather than writing
+a file and shelling out. This is the same libssl entry point a compiled
+C/C++ application uses to load a certificate embedded at compile time
+(see `probe_tests/test_openssl3_cert_load.cpp`, this repo's compiled
+reference test for the same three `openssl3-cert-load.yaml` hooks, which
+embeds its own DER cert as a byte array for the same reason). Loading
+libssl via `ctypes.util.find_library("ssl")` instead of the literal
+`/usr/lib64/libssl.so.3` path would still make the call succeed but the
+uprobe would silently never fire, since Tetragon's uprobe is attached to
+that specific file, not to "whatever the dynamic linker resolves libssl
+to" -- see `_LIBSSL_PATH`'s comment in `use_cases.py`.
+
+Because no certificate file exists anywhere, CertSight can't key its
+known-certs cache off a real path the way the other two use cases do. It
+instead builds a synthetic one out of the uprobe symbol name, the calling
+process's PID, and the cert's serial number:
+`uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` (see
+`agent/analyzer.py`'s `_handle_uprobe_in_memory_cert`). The serial is
+random and unique on every click, so -- like the other two use cases --
+every click is guaranteed to be a first-time discovery even though the
+PID (this test server's own) stays the same across clicks.
+
+This use case has no `--pause`/concurrency limit like the bind-probe one:
+it's a single in-process library call with no child process or listening
+socket, so nothing to bound.
 
 ## Adding a new use case
 

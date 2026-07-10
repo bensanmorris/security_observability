@@ -10,6 +10,7 @@ To add a use case: append a UseCase to USE_CASES with a run() callable that
 performs the action and returns a UseCaseResult. Nothing else needs to
 change -- server.py and the frontend both read this list at request time.
 """
+import ctypes
 import queue
 import subprocess
 import sys
@@ -267,6 +268,86 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
     )
 
 
+# Hardcoded to the literal path openssl3-cert-load.yaml / openssl3-cert-
+# load-rhel8.yaml hook (both RHEL8 and RHEL9 use this same soname). Tetragon
+# uprobes attach to a specific file, not to "whatever the dynamic linker
+# resolves libssl to" -- ctypes.util.find_library("ssl") can return a
+# different path/symlink depending on the host's OpenSSL packaging, which
+# would make the call below succeed while the uprobe silently never fires.
+_LIBSSL_PATH = "/usr/lib64/libssl.so.3"
+
+_libssl_lock = threading.Lock()
+_libssl = None  # lazily loaded and cached -- see _load_libssl()
+
+
+def _load_libssl():
+    """Loads libssl.so.3 and binds the handful of symbols this use case
+    needs, once. Done lazily (not at import time) so a host without this
+    exact path -- e.g. a dev machine with a different OpenSSL layout --
+    doesn't take down the whole test server at startup; it just makes this
+    one use case fail with a clear error the first time it's clicked."""
+    global _libssl
+    with _libssl_lock:
+        if _libssl is not None:
+            return _libssl
+        lib = ctypes.CDLL(_LIBSSL_PATH)
+        lib.TLS_client_method.restype = ctypes.c_void_p
+        lib.SSL_CTX_new.argtypes = [ctypes.c_void_p]
+        lib.SSL_CTX_new.restype = ctypes.c_void_p
+        lib.SSL_CTX_use_certificate_ASN1.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]
+        lib.SSL_CTX_use_certificate_ASN1.restype = ctypes.c_int
+        lib.SSL_CTX_free.argtypes = [ctypes.c_void_p]
+        _libssl = lib
+        return lib
+
+
+def _load_in_memory_cert_via_libssl(params: dict) -> UseCaseResult:
+    token = uuid.uuid4().hex[:12]
+    cn = f"certsight-test-asn1-{token}.local"
+    cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size=2048)
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    der_bytes = cert.public_bytes(serialization.Encoding.DER)
+
+    try:
+        lib = _load_libssl()
+    except OSError as e:
+        return UseCaseResult(
+            ok=False,
+            detail=f"could not load {_LIBSSL_PATH}: {e} -- this use case calls straight into "
+            "the system libssl that openssl3-cert-load.yaml hooks, so it only works on a host "
+            "with that exact library present (RHEL8/9-style layout)",
+        )
+
+    method = lib.TLS_client_method()
+    if not method:
+        return UseCaseResult(ok=False, detail="TLS_client_method() returned NULL")
+
+    ctx = lib.SSL_CTX_new(method)
+    if not ctx:
+        return UseCaseResult(ok=False, detail="SSL_CTX_new() returned NULL")
+
+    # DER bytes never touch disk -- this simulates an application that ships
+    # a certificate baked into its own binary (e.g. a pinned CA or bundled
+    # service identity cert) rather than reading one from the filesystem.
+    try:
+        rc = lib.SSL_CTX_use_certificate_ASN1(ctx, len(der_bytes), der_bytes)
+    finally:
+        lib.SSL_CTX_free(ctx)
+
+    if rc != 1:
+        return UseCaseResult(ok=False, detail=f"SSL_CTX_use_certificate_ASN1() returned {rc} (expected 1)")
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"called SSL_CTX_use_certificate_ASN1() directly against {_LIBSSL_PATH} with a "
+            f"fresh in-memory DER cert (CN={cn}, serial={cert.serial_number}) -- no file was "
+            "ever written to disk -- unique serial guarantees CertSight treats this as a "
+            "first-time discovery, so a new Kafka event should always appear"
+        ),
+    )
+
+
 USE_CASES: List[UseCase] = [
     UseCase(
         id="fresh-test-cert",
@@ -392,6 +473,72 @@ USE_CASES: List[UseCase] = [
             "Server-Sent Events stream, where it lands in the right-hand "
             "pane -- compare its 'pid' field against the PID shown in the "
             "status line above.",
+        ],
+    ),
+    UseCase(
+        id="in-memory-asn1-cert",
+        label="load a certificate straight into memory (no file)",
+        description=(
+            "Generates a fresh self-signed certificate as raw DER bytes and "
+            "hands them straight to libssl's SSL_CTX_use_certificate_ASN1() "
+            "via ctypes -- no file is ever written. Simulates an application "
+            "that ships a certificate baked into its own binary (e.g. a "
+            "pinned CA). Requires the openssl3-cert-load.yaml TracingPolicy "
+            "-- see TEST-SERVER-README.md."
+        ),
+        run=_load_in_memory_cert_via_libssl,
+        pipeline=[
+            "This server generates a fresh self-signed X.509 cert in "
+            "memory and encodes it straight to DER bytes -- at no point "
+            "does a certificate file exist on disk.",
+
+            "This server then calls into the real system "
+            "`/usr/lib64/libssl.so.3` via Python's `ctypes` -- the exact "
+            "same libssl entry point a C/C++ application calls to load a "
+            "certificate that's embedded at compile time rather than "
+            "read from a file:\n"
+            "```python\n"
+            "lib.SSL_CTX_use_certificate_ASN1.argtypes = [\n"
+            "    ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]\n"
+            "lib.SSL_CTX_use_certificate_ASN1.restype = ctypes.c_int\n"
+            "...\n"
+            "ctx = lib.SSL_CTX_new(method)\n"
+            "rc = lib.SSL_CTX_use_certificate_ASN1(ctx, len(der_bytes), der_bytes)\n"
+            "```\n"
+            "full source: [use_cases.py](/source/use_cases.py) "
+            "(`_load_in_memory_cert_via_libssl`)",
+
+            "Tetragon has a uprobe on that symbol, loaded via the "
+            "openssl3-cert-load.yaml TracingPolicy, which fires on entry "
+            "and reads the DER bytes directly out of this process's "
+            "memory via bpf_probe_read_user (arg 2, sized by arg 1) -- "
+            "before the real function body even runs.",
+
+            "CertSight's Tetragon gRPC client receives the resulting "
+            "process_uprobe event. Its bytes_arg field holds the raw DER "
+            "bytes, which CertSight parses with "
+            "load_der_x509_certificate() (agent/analyzer.py's "
+            "_handle_uprobe_in_memory_cert) exactly like a file-discovered "
+            "cert: subject, issuer, SAN, validity dates, key algorithm/"
+            "size, FIPS compliance, etc.",
+
+            "Because there's no real file path at all, CertSight builds a "
+            "synthetic one out of the uprobe symbol, this process's PID, "
+            "and the cert's serial number: "
+            "`uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>`. The "
+            "serial is fresh and random every click, so this is always a "
+            "first-time discovery in CertSight's known-certs cache.",
+
+            "CertSight records the cert, updates Prometheus metrics, and "
+            "-- since [kafka] enabled = true -- publishes a "
+            "'certificate_discovered' event to the cert-analyzer-events "
+            "Kafka topic.",
+
+            "This test server's own background Kafka consumer thread "
+            "pushes that event to every connected browser over the "
+            "Server-Sent Events stream, where it lands in the right-hand "
+            "pane -- with no file path anywhere in it, only the synthetic "
+            "uprobe:// one.",
         ],
     ),
 ]

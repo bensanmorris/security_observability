@@ -54,10 +54,12 @@ Requires:       systemd
 %description
 A small local HTTP server for manually exercising CertSight's certificate
 detections one at a time and watching the resulting Kafka event show up
-live. Its one built-in use case generates a fresh self-signed test
-certificate and reads it, triggering Tetragon's fd_install kprobe and
-CertSight's file-access detection, then streams the resulting Kafka event
-to a browser in real time via Server-Sent Events.
+live. Its built-in use cases generate a fresh self-signed test
+certificate and either read it from disk, bind it as a real TLS
+listener, or hand it straight to libssl in memory -- exercising
+Tetragon's fd_install kprobe, security_socket_bind LSM hook, and
+SSL_CTX_use_certificate_ASN1 uprobe respectively -- then stream the
+resulting Kafka event to a browser in real time via Server-Sent Events.
 
 This package bundles its own Python virtualenv (cryptography,
 kafka-python) so it can be installed and run with no pip/internet access
@@ -189,6 +191,11 @@ exit 0
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add in-memory-asn1-cert use case exercising CertSight's
+  SSL_CTX_use_certificate_ASN1 uprobe detection path (no new files --
+  implemented entirely via ctypes calls into the system libssl within
+  use_cases.py)
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add tls-bind-probe use case (tls_probe_helper.py) exercising CertSight's
   inbound [port_probe] bind_probe_enabled detection path
