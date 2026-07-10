@@ -143,6 +143,10 @@ def make_handler(broadcaster: EventBroadcaster):
                     "label": uc.label,
                     "description": uc.description,
                     "pipeline": uc.pipeline or [],
+                    "params": [
+                        {"name": p.name, "label": p.label, "options": p.options, "default": p.default}
+                        for p in (uc.params or [])
+                    ],
                 }
                 for uc in USE_CASES
             ]
@@ -158,8 +162,26 @@ def make_handler(broadcaster: EventBroadcaster):
             if use_case is None:
                 self.send_error(404, f"unknown use case '{use_case_id}'")
                 return
-            logger.info("running use case '%s'", use_case_id)
-            result = use_case.run()
+
+            params = {}
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length:
+                # Small cap on an unauthenticated, network-reachable endpoint --
+                # the body is only ever a handful of short param values.
+                if content_length > 4096:
+                    self.send_error(413, "request body too large")
+                    return
+                raw = self.rfile.read(content_length)
+                try:
+                    params = json.loads(raw)
+                    if not isinstance(params, dict):
+                        raise ValueError("params body must be a JSON object")
+                except (json.JSONDecodeError, ValueError) as e:
+                    self.send_error(400, f"invalid JSON body: {e}")
+                    return
+
+            logger.info("running use case '%s' with params=%r", use_case_id, params)
+            result = use_case.run(params)
             body = json.dumps({"ok": result.ok, "detail": result.detail}).encode("utf-8")
             self.send_response(200 if result.ok else 500)
             self.send_header("Content-Type", "application/json")

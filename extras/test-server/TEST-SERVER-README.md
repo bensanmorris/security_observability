@@ -163,7 +163,30 @@ RPM upgrade won't overwrite edits you've made to it.
 
 | Use case | Action | Detection exercised |
 |---|---|---|
-| generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe) |
+| generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
+
+The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
+next to the button, both in the UI and as a `{"key_size": "1024"}` JSON
+body to `POST /api/run/fresh-test-cert`. cert-analyzer's FIPS checker
+(`agent/fips_compliance_checker.py`) flags anything under 2048 bits, so
+1024 reliably produces a `fips_compliant: false` / `fips_violations: [...]`
+Kafka event; 2048 and up stay compliant. `key_size` is validated
+server-side against that fixed set of options (`use_cases.py`'s
+`_ALLOWED_KEY_SIZES`) rather than trusted as-is, since this endpoint has no
+authentication and may be reachable from the whole lab network (see the
+`--bind`/systemd warnings above) -- an arbitrary value could otherwise be
+used to force an expensive keygen or an odd failure.
+
+Note this only covers key-size violations, not weak signature hash
+algorithms (MD5/SHA1): the `cryptography` library refuses to sign a
+certificate with either outright (`UnsupportedAlgorithm`), and shelling
+out to the `openssl` CLI instead is inconsistent across hosts depending on
+their FIPS/crypto-policy state, so that option isn't offered here.
+
+If FIPS mode is actually enforced at the OpenSSL provider level on the
+host running this server, generating a sub-2048-bit RSA key can itself be
+refused -- the use case surfaces that as a normal (if slightly ironic)
+failure result rather than a crash.
 
 Every click generates a brand-new cert at a brand-new path, so it's always
 a first-time discovery from cert-analyzer's point of view (its known-certs
