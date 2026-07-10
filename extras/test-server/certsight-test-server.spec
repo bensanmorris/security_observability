@@ -104,6 +104,7 @@ install -d %{buildroot}%{app_home}/static
 
 install -m 0644 server.py             %{buildroot}%{app_home}/server.py
 install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
+install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
 install -m 0644 static/index.html     %{buildroot}%{app_home}/static/index.html
 install -m 0644 static/app.js         %{buildroot}%{app_home}/static/app.js
 install -m 0644 static/app.css        %{buildroot}%{app_home}/static/app.css
@@ -178,6 +179,7 @@ exit 0
 %dir %{app_home}
 %{app_home}/server.py
 %{app_home}/use_cases.py
+%{app_home}/tls_probe_helper.py
 %{app_home}/static/
 %{app_venv}/
 %{_bindir}/certsight-test-server
@@ -187,6 +189,9 @@ exit 0
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add tls-bind-probe use case (tls_probe_helper.py) exercising CertSight's
+  inbound [port_probe] bind_probe_enabled detection path
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add systemd service (enabled on install, binds 0.0.0.0 by default) and
   environment-variable configuration alongside the existing CLI flags
