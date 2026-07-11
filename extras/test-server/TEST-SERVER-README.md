@@ -187,6 +187,7 @@ RPM upgrade won't overwrite edits you've made to it.
 | bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<random high port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
 | dial out to a TLS port and let CertSight discover it | Spawns `tcp_connect_probe_helper.py` as a separate process, which binds a real TLS listener on one of `tcp-connect-tls.yaml`'s TLS ports and then connects back to itself | Outbound connect detection via the `tcp-connect-tls.yaml` Tetragon policy (`tcp_connect` kprobe) plus cert-analyzer's `[port_probe]` TLS handshake probe |
 | load a certificate straight into memory (no file) | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
+| load a certificate into a Java KeyStore (JCA) | Spawns a JVM (`CertAgentTest`), jattaches CertSight's cert-agent Java instrumentation into it, then watches it call `KeyStore.setCertificateEntry()` on a fresh in-memory cert every few seconds | In-memory JCA cert detection via the `java-non-fips-cert.yaml` Tetragon policy (`java_cert_agent_write` uprobe); cert-analyzer builds a synthetic `uprobe://java_cert_agent_write/<pid>/<serial>` path since there's no real file |
 
 The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
 next to the button, both in the UI and as a `{"key_size": "1024"}` JSON
@@ -429,6 +430,56 @@ PID (this test server's own) stays the same across clicks.
 This use case has no `--pause`/concurrency limit like the bind-probe one:
 it's a single in-process library call with no child process or listening
 socket, so nothing to bound.
+
+### load a certificate into a Java KeyStore (JCA)
+
+Unlike every other use case here, the certificate is never handled by this
+Python process at all -- it's loaded by a **separate JVM**, and detection
+depends on CertSight's own JVM bytecode-instrumentation agent
+(`probe_tests/java/cert-agent/`) being dynamically attached to it first.
+This use case requires the `cert-agent-jni` and `cert-agent-deployer`
+packages installed (or a local `probe_tests/java/cert-agent/build.sh`
+build) -- if either `/opt/cert-agent/cert-agent.jar` /
+`libcert_agent_stub.so` or the `jattach` binary can't be found, it fails
+with a clear message rather than a crash.
+
+Each click:
+
+1. Generates a fresh self-signed cert and writes it to
+   `/dev/shm/certsight-test-server/` with a `.seed` extension -- deliberately
+   *not* one of `certificate-file-access.yaml`'s matched suffixes (`.crt`,
+   `.pem`, `.cert`, `.cer`, `.jks`, `.keystore`, `.truststore`, `.p12`,
+   `.pfx`), so the JVM's own read of this seed file doesn't also fire an
+   unrelated file-access Kafka event -- this use case is meant to exercise
+   only the JCA uprobe path.
+2. Spawns [CertAgentTest.java](/source/CertAgentTest.java) as its own OS
+   process, for the same PID-attribution reason as the bind-probe/
+   connect-probe use cases. It loads that seed cert once, then loops
+   forever calling `KeyStore.setCertificateEntry()` on a fresh in-memory
+   `JKS` keystore every 3 seconds.
+3. Runs `jattach <pid> load instrument false
+   cert-agent.jar=libcert_agent_stub.so` against that JVM -- the same
+   command documented in `probe_tests/README.md`'s manual test procedure.
+   This loads CertSight's Java agent, which uses ASM to bytecode-instrument
+   `KeyStore.setCertificateEntry` in place so each call serialises the cert
+   to DER and passes it across a JNI boundary to a native stub function,
+   `java_cert_agent_write`.
+4. Tetragon's uprobe on that native symbol (`java-non-fips-cert.yaml`)
+   fires on entry and reads the DER bytes straight out of the JVM's memory.
+   That uprobe attaches to the agent `.so`'s file inode, not to a running
+   process, so -- unlike the FIPS/NSS uprobe case -- it doesn't matter
+   whether the Tetragon policy was loaded before or after the jattach
+   above.
+5. cert-analyzer parses the bytes with the same
+   `_handle_uprobe_in_memory_cert` handler as the in-memory ASN1 use case,
+   and builds a synthetic `uprobe://java_cert_agent_write/<pid>/<serial>`
+   path. Both the PID (a new JVM every click) and the serial (a fresh cert
+   every click) are unique, so every click is a first-time discovery.
+
+This use case kills the JVM a few seconds after jattaching (comfortably
+past one more loop iteration) so no stray process is left running, and
+caps itself at 2 concurrent JVMs for the same reason the bind-probe/
+connect-probe use cases cap their own concurrent child processes.
 
 ## Adding a new use case
 

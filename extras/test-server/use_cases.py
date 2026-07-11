@@ -12,14 +12,16 @@ change -- server.py and the frontend both read this list at request time.
 """
 import ctypes
 import queue
+import re
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -503,6 +505,205 @@ def _load_in_memory_cert_via_libssl(params: dict) -> UseCaseResult:
     )
 
 
+# CertAgentTest.java runs as its own OS process (not a thread) for the same
+# PID-attribution reason as the bind-probe/connect-probe helpers above.
+# Unlike those, the "cert-agent" side isn't cert-analyzer reaching back in --
+# it's a separate JVM bytecode-instrumentation agent (probe_tests/java/
+# cert-agent/) that has to be jattach'd into this specific JVM before its
+# KeyStore.setCertificateEntry() calls fire the java_cert_agent_write uprobe
+# (java-non-fips-cert.yaml). That uprobe attaches to the agent .so's file
+# inode, not to a running process, so -- unlike the FIPS/NSS uprobe case --
+# load order between the Tetragon policy and jattach doesn't matter here.
+#
+# Candidate paths cover both a production install (cert-agent-jni /
+# cert-agent-deployer RPMs, per their systemd units) and a bare dev checkout
+# that's only run probe_tests/java/cert-agent/build.sh locally.
+_CERT_AGENT_JAR_CANDIDATES = [
+    Path("/opt/cert-agent/cert-agent.jar"),
+    Path(__file__).resolve().parents[2] / "probe_tests" / "java" / "cert-agent" / "cert-agent.jar",
+]
+_CERT_AGENT_NATIVE_LIB_CANDIDATES = [
+    Path("/opt/cert-agent/libcert_agent_stub.so"),
+    Path(__file__).resolve().parents[2] / "probe_tests" / "java" / "cert-agent" / "native" / "libcert_agent_stub.so",
+]
+_JATTACH_CANDIDATES = [
+    Path("/opt/cert-agent-deployer/jattach"),
+    Path(__file__).resolve().parents[2] / "probe_tests" / "java" / "cert-agent" / "jattach-linux-x64" / "jattach",
+]
+
+_JAVA_TEST_DIR = Path(__file__).resolve().parent
+_JAVA_TEST_SRC = _JAVA_TEST_DIR / "CertAgentTest.java"
+_JAVA_TEST_CLASS = _JAVA_TEST_DIR / "CertAgentTest.class"
+_JAVA_KEYSTORE_LOOP_INTERVAL_MS = 3_000
+_JAVA_KEYSTORE_LIFETIME_SECONDS = 15.0
+_JAVA_KEYSTORE_READY_TIMEOUT_SECONDS = 10.0
+_MAX_CONCURRENT_JAVA_KEYSTORE_PROBES = 2
+_active_java_keystore_probe_lock = threading.Lock()
+_active_java_keystore_probe_count = 0
+
+
+def _first_existing(paths: List[Path]) -> Optional[Path]:
+    for p in paths:
+        if p.exists():
+            return p
+    return None
+
+
+def _ensure_cert_agent_test_compiled() -> None:
+    """Compiles the vendored CertAgentTest.java if its .class is missing or
+    stale. The RPM (%build) pre-compiles this so production installs never
+    hit this path -- it exists so a plain git checkout works with no
+    separate build step, like every other use case here."""
+    if _JAVA_TEST_CLASS.exists() and _JAVA_TEST_CLASS.stat().st_mtime >= _JAVA_TEST_SRC.stat().st_mtime:
+        return
+    subprocess.run(
+        ["javac", "-source", "11", "-target", "11", "-encoding", "UTF-8", "-d", str(_JAVA_TEST_DIR), str(_JAVA_TEST_SRC)],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _read_java_test_pid(proc: subprocess.Popen) -> Optional[int]:
+    # CertAgentTest's PID line is its second line of output (after a
+    # "=== CertAgentTest ===" banner), so this reads a few lines rather than
+    # just the first, unlike the single-readiness-line helpers above.
+    for _ in range(20):
+        line = proc.stdout.readline()
+        if not line:
+            return None
+        m = re.match(r"PID\s*:\s*(\d+)", line.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _run_java_keystore_cert(params: dict) -> UseCaseResult:
+    global _active_java_keystore_probe_count
+
+    jar = _first_existing(_CERT_AGENT_JAR_CANDIDATES)
+    native_lib = _first_existing(_CERT_AGENT_NATIVE_LIB_CANDIDATES)
+    jattach = _first_existing(_JATTACH_CANDIDATES)
+    if jar is None or native_lib is None:
+        return UseCaseResult(
+            ok=False,
+            detail="cert-agent.jar / libcert_agent_stub.so not found -- install the "
+            "cert-agent-jni package (or run probe_tests/java/cert-agent/build.sh) first",
+        )
+    if jattach is None:
+        return UseCaseResult(
+            ok=False,
+            detail="jattach binary not found -- install the cert-agent-deployer package "
+            "(or build probe_tests/java/cert-agent/jattach-linux-x64) first",
+        )
+
+    with _active_java_keystore_probe_lock:
+        if _active_java_keystore_probe_count >= _MAX_CONCURRENT_JAVA_KEYSTORE_PROBES:
+            return UseCaseResult(
+                ok=False,
+                detail=f"{_MAX_CONCURRENT_JAVA_KEYSTORE_PROBES} JVM(s) are already running for "
+                "this use case -- wait a few seconds for one to finish and try again",
+            )
+        _active_java_keystore_probe_count += 1
+
+    def _release():
+        global _active_java_keystore_probe_count
+        with _active_java_keystore_probe_lock:
+            _active_java_keystore_probe_count -= 1
+
+    try:
+        _ensure_cert_agent_test_compiled()
+    except subprocess.CalledProcessError as e:
+        _release()
+        return UseCaseResult(ok=False, detail=f"failed to compile CertAgentTest.java: {e.stderr.strip()}")
+
+    token = uuid.uuid4().hex[:12]
+    cn = f"certsight-test-jca-{token}.local"
+    cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size=2048)
+
+    # Named with a non-cert-like extension (".seed", not .crt/.pem/...) so
+    # this file's own open() by the JVM below doesn't also match
+    # certificate-file-access.yaml's Postfix selector -- this use case is
+    # meant to exercise only the in-memory JCA uprobe path, not produce an
+    # incidental second file-access event for the seed input.
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+    seed_path = _GENERATED_CERT_DIR / f"java-seed-{token}.seed"
+    seed_path.write_bytes(cert_pem)
+    seed_path.chmod(0o644)
+
+    try:
+        proc = subprocess.Popen(
+            ["java", "-cp", str(_JAVA_TEST_DIR), "CertAgentTest", str(seed_path), str(_JAVA_KEYSTORE_LOOP_INTERVAL_MS)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as e:
+        _release()
+        seed_path.unlink(missing_ok=True)
+        return UseCaseResult(ok=False, detail=f"failed to spawn CertAgentTest JVM: {e}")
+
+    # Same background reader + queue pattern as the bind-probe/connect-probe
+    # use cases: a JVM that never prints its PID line (e.g. java missing,
+    # bad classpath) can't block this HTTP request forever.
+    pid_q: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: pid_q.put(_read_java_test_pid(proc)), daemon=True).start()
+
+    try:
+        pid = pid_q.get(timeout=_JAVA_KEYSTORE_READY_TIMEOUT_SECONDS)
+    except queue.Empty:
+        proc.kill()
+        _release()
+        seed_path.unlink(missing_ok=True)
+        return UseCaseResult(ok=False, detail="CertAgentTest didn't report its PID in time")
+
+    if pid is None:
+        proc.kill()
+        _release()
+        seed_path.unlink(missing_ok=True)
+        return UseCaseResult(
+            ok=False,
+            detail="CertAgentTest exited before reporting its PID -- check 'java' is on PATH",
+        )
+
+    jattach_result = subprocess.run(
+        [str(jattach), str(pid), "load", "instrument", "false", f"{jar}={native_lib}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if jattach_result.returncode != 0:
+        proc.kill()
+        _release()
+        seed_path.unlink(missing_ok=True)
+        detail = (jattach_result.stderr or jattach_result.stdout).strip()
+        return UseCaseResult(ok=False, detail=f"jattach into PID {pid} failed (exit {jattach_result.returncode}): {detail}")
+
+    # Reap the JVM in the background once its lifetime elapses (comfortably
+    # more than one more loop iteration past the jattach above) so the
+    # concurrency slot frees itself and no stray JVM or seed file lingers.
+    def _reap():
+        try:
+            proc.wait(timeout=_JAVA_KEYSTORE_LIFETIME_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        finally:
+            seed_path.unlink(missing_ok=True)
+            _release()
+
+    threading.Thread(target=_reap, daemon=True).start()
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"spawned PID {pid}, jattached the cert-agent, and it's now calling "
+            f"KeyStore.setCertificateEntry() every {_JAVA_KEYSTORE_LOOP_INTERVAL_MS}ms on a "
+            f"fresh in-memory cert (CN={cn}) -- watch the Kafka pane for a "
+            f"uprobe://java_cert_agent_write/{pid}/<serial> event within the next "
+            f"~{int(_JAVA_KEYSTORE_LOOP_INTERVAL_MS / 1000) + 1}s; unique PID+serial guarantees "
+            "a first-time discovery"
+        ),
+    )
+
+
 USE_CASES: List[UseCase] = [
     UseCase(
         id="fresh-test-cert",
@@ -796,6 +997,80 @@ USE_CASES: List[UseCase] = [
             "Server-Sent Events stream, where it lands in the right-hand "
             "pane -- with no file path anywhere in it, only the synthetic "
             "uprobe:// one.",
+        ],
+    ),
+    UseCase(
+        id="java-jca-keystore",
+        label="load a certificate into a Java KeyStore (JCA)",
+        description=(
+            "Spawns a real JVM running CertAgentTest, jattaches CertSight's "
+            "cert-agent Java instrumentation into it, then watches it call "
+            "KeyStore.setCertificateEntry() on a fresh in-memory cert every "
+            "few seconds. No file is ever read by cert-analyzer -- the cert "
+            "bytes are captured straight off the JCA call itself. Requires "
+            "the cert-agent-jni and cert-agent-deployer packages (or a "
+            "local probe_tests/java/cert-agent/build.sh build) -- see "
+            "TEST-SERVER-README.md."
+        ),
+        run=_run_java_keystore_cert,
+        pipeline=[
+            "This server generates a fresh self-signed X.509 cert and "
+            "writes it to a throwaway path under "
+            "/dev/shm/certsight-test-server/ -- only as seed input for the "
+            "JVM below to load once at startup, not as something "
+            "cert-analyzer is meant to detect itself (its extension is "
+            "deliberately not one of certificate-file-access.yaml's "
+            "matched suffixes).",
+
+            "This server spawns "
+            "[CertAgentTest.java](/source/CertAgentTest.java) as a separate "
+            "OS process (not a thread), for the same PID-attribution reason "
+            "as the bind-probe/connect-probe use cases. It loads that seed "
+            "cert once, then loops forever calling "
+            "`KeyStore.setCertificateEntry()` on a fresh in-memory `JKS` "
+            "KeyStore every few seconds.",
+
+            "This server then runs `jattach <pid> load instrument false "
+            "cert-agent.jar=libcert_agent_stub.so` against that JVM's PID -- "
+            "the same dynamic-attach command documented in "
+            "probe_tests/README.md's manual test procedure. This loads "
+            "CertSight's cert-agent Java agent, which uses ASM to "
+            "bytecode-instrument `KeyStore.setCertificateEntry` in-place, "
+            "so every call from that point on serialises the certificate "
+            "to DER and passes it across a JNI boundary to a small native "
+            "stub function, `java_cert_agent_write`.",
+
+            "Tetragon has a uprobe on that native symbol, loaded via the "
+            "java-non-fips-cert.yaml TracingPolicy, which fires on entry "
+            "and reads the DER bytes directly out of the JVM process's "
+            "memory (arg 2, sized by arg 3) -- the uprobe attaches to the "
+            "agent .so's file inode, so it's already armed regardless of "
+            "whether the jattach above happened before or after the "
+            "policy was loaded.",
+
+            "CertSight's Tetragon gRPC client receives the resulting "
+            "process_uprobe event and parses the DER bytes with "
+            "load_der_x509_certificate() (agent/analyzer.py's "
+            "_handle_uprobe_in_memory_cert) -- the same handler used by "
+            "the in-memory ASN1 use case above.",
+
+            "CertSight builds a synthetic path out of the uprobe symbol, "
+            "this JVM's PID, and the cert's serial number: "
+            "`uprobe://java_cert_agent_write/<pid>/<serial>`. Both the PID "
+            "(a brand-new JVM every click) and the serial (a fresh cert "
+            "every click) are unique, so this is always a first-time "
+            "discovery in CertSight's known-certs cache.",
+
+            "CertSight records the cert, updates Prometheus metrics, and "
+            "-- since [kafka] enabled = true -- publishes a "
+            "'certificate_discovered' event to the cert-analyzer-events "
+            "Kafka topic.",
+
+            "This test server's own background Kafka consumer thread "
+            "pushes that event to every connected browser over the "
+            "Server-Sent Events stream, where it lands in the right-hand "
+            "pane. This server kills the JVM a few seconds later, once "
+            "its lifetime elapses, so no stray process is left running.",
         ],
     ),
 ]

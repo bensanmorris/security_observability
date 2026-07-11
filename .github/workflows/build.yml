@@ -346,7 +346,8 @@ jobs:
           git \
           gcc \
           findutils \
-          which
+          which \
+          java-11-openjdk-devel
 
     - name: Checkout code
       uses: actions/checkout@v4
