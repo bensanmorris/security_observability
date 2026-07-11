@@ -168,7 +168,15 @@ def make_handler(broadcaster: EventBroadcaster):
                     "description": uc.description,
                     "pipeline": uc.pipeline or [],
                     "params": [
-                        {"name": p.name, "label": p.label, "options": p.options, "default": p.default}
+                        {
+                            "name": p.name,
+                            "label": p.label,
+                            "type": p.type,
+                            "options": p.options,
+                            "default": p.default,
+                            "min": p.min,
+                            "max": p.max,
+                        }
                         for p in (uc.params or [])
                     ],
                 }

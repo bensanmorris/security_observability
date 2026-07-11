@@ -50,16 +50,29 @@ async function loadUseCases() {
       for (const param of uc.params) {
         const label = document.createElement('label');
         label.textContent = param.label;
-        const select = document.createElement('select');
-        select.dataset.paramName = param.name;
-        for (const option of param.options) {
-          const opt = document.createElement('option');
-          opt.value = option;
-          opt.textContent = option;
-          if (option === param.default) opt.selected = true;
-          select.appendChild(opt);
+        let control;
+        if (param.type === 'checkbox') {
+          control = document.createElement('input');
+          control.type = 'checkbox';
+          control.checked = param.default === 'true';
+        } else if (param.type === 'number') {
+          control = document.createElement('input');
+          control.type = 'number';
+          control.value = param.default;
+          if (param.min != null) control.min = param.min;
+          if (param.max != null) control.max = param.max;
+        } else {
+          control = document.createElement('select');
+          for (const option of param.options) {
+            const opt = document.createElement('option');
+            opt.value = option;
+            opt.textContent = option;
+            if (option === param.default) opt.selected = true;
+            control.appendChild(opt);
+          }
         }
-        label.appendChild(select);
+        control.dataset.paramName = param.name;
+        label.appendChild(control);
         paramsDiv.appendChild(label);
       }
       li.appendChild(paramsDiv);
@@ -97,8 +110,8 @@ async function runUseCase(id, button, li) {
   status.className = '';
   status.textContent = `Running '${id}'...`;
   const params = {};
-  for (const select of li.querySelectorAll('select[data-param-name]')) {
-    params[select.dataset.paramName] = select.value;
+  for (const el of li.querySelectorAll('[data-param-name]')) {
+    params[el.dataset.paramName] = el.type === 'checkbox' ? String(el.checked) : el.value;
   }
   try {
     const res = await fetch(`/api/run/${encodeURIComponent(id)}`, {
