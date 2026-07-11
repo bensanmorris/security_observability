@@ -258,7 +258,6 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 
 ## Further reading
 
-- [Production deployment guide](extras/DEPLOYMENT-README.md) - Standalone RHEL9 (RPM) and Kubernetes DaemonSet deployment
 - [OpenShift deployment guide](extras/OPENSHIFT-DEPLOYMENT-README.md) - SCC bindings and manifest changes needed on OpenShift
 - [Linux capabilities reference](linux-capabilities.md) - Required Linux capabilities for each component
 - [Uprobe hook tests](probe_tests/README.md) - Programs for verifying Tetragon uprobe policies fire correctly
