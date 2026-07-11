@@ -46,9 +46,18 @@ BuildRequires:  python3.11
 BuildRequires:  python3.11-devel
 BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
+# javac only -- CertAgentTest.java is pre-compiled at build time (see
+# %build) so the installed package only needs a JRE at runtime, not a JDK.
+BuildRequires:  java-11-openjdk-devel
 
 Requires:       python3.11
 Requires:       systemd
+# Runs `java -cp ... CertAgentTest` for the java-jca-keystore use case.
+Requires:       java-11-openjdk-headless
+# Provides /opt/cert-agent/{cert-agent.jar,libcert_agent_stub.so} and the
+# jattach binary the same use case jattaches with (also pulls in
+# cert-agent-jni transitively -- see that package's own Requires).
+Requires:       cert-agent-deployer
 
 
 %description
@@ -77,6 +86,11 @@ cases, and how the detection pipeline works end to end.
 %build
 # ── Clean any leftover artifacts from a previous build run ───────────────────
 rm -rf %{_builddir}/venv
+
+# ── Compile the java-jca-keystore use case's test JVM target ─────────────────
+# No ASM/JNI dependency (unlike cert-agent-jni's own CertAgent/
+# CertTransformer/NativeBridge classes) -- just the JDK for javac.
+javac -source 11 -target 11 -encoding UTF-8 -d %{_builddir} CertAgentTest.java
 
 # ── Bootstrap pip (not available as a separate package on UBI9) ──────────────
 python3.11 -m ensurepip --upgrade
@@ -108,6 +122,8 @@ install -m 0644 server.py             %{buildroot}%{app_home}/server.py
 install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
 install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
 install -m 0644 tcp_connect_probe_helper.py %{buildroot}%{app_home}/tcp_connect_probe_helper.py
+install -m 0644 CertAgentTest.java    %{buildroot}%{app_home}/CertAgentTest.java
+install -m 0644 %{_builddir}/CertAgentTest.class %{buildroot}%{app_home}/CertAgentTest.class
 install -m 0644 static/index.html     %{buildroot}%{app_home}/static/index.html
 install -m 0644 static/app.js         %{buildroot}%{app_home}/static/app.js
 install -m 0644 static/app.css        %{buildroot}%{app_home}/static/app.css
@@ -184,6 +200,8 @@ exit 0
 %{app_home}/use_cases.py
 %{app_home}/tls_probe_helper.py
 %{app_home}/tcp_connect_probe_helper.py
+%{app_home}/CertAgentTest.java
+%{app_home}/CertAgentTest.class
 %{app_home}/static/
 %{app_venv}/
 %{_bindir}/certsight-test-server
@@ -193,6 +211,11 @@ exit 0
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add java-jca-keystore use case (CertAgentTest.java, compiled at build
+  time) exercising CertSight's java_cert_agent_write uprobe detection path
+  via the cert-agent JVM instrumentation agent; adds Requires on
+  java-11-openjdk-headless and cert-agent-deployer
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add tcp-connect-probe use case (tcp_connect_probe_helper.py) exercising
   CertSight's outbound [port_probe] connect_probe_enabled detection path
