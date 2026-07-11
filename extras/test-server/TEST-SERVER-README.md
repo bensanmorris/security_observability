@@ -14,6 +14,8 @@ as they would in production.
 **Right pane:** every message cert-analyzer publishes to its Kafka topic,
 streamed live via Server-Sent Events as it arrives.
 
+![Test console](test_console.png)
+
 ---
 
 ## Prerequisites

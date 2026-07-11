@@ -2,6 +2,8 @@
 
 CertSight ships a pre-built Grafana dashboard at [`extras/examples/grafana-dashboard.json`](examples/grafana-dashboard.json). It requires **Grafana 9.0+** and a **Prometheus** instance scraping the cert-analyzer metrics endpoint.
 
+![CertSight dashboard](examples/dashboard.png)
+
 ---
 
 ## Quick setup (RHEL 9)
