@@ -35,10 +35,13 @@ class UseCaseResult:
 
 @dataclass
 class UseCaseParam:
-    name: str                # key in the JSON body POSTed to /api/run/<id>
-    label: str                # shown next to the <select> in the UI
-    options: List[str]        # values shown and sent as-is; run() is responsible for validating
+    name: str                 # key in the JSON body POSTed to /api/run/<id>
+    label: str                 # shown next to the control in the UI
     default: str
+    type: str = "select"       # "select" | "checkbox" | "number" -- which control the UI renders
+    options: List[str] = None  # values shown/sent as-is for type="select"; run() is responsible for validating
+    min: str = None            # type="number": HTML min hint only, run() still validates server-side
+    max: str = None            # type="number": HTML max hint only, run() still validates server-side
 
 
 @dataclass
@@ -79,20 +82,35 @@ _GENERATED_CERT_DIR = Path("/dev/shm/certsight-test-server")
 _ALLOWED_KEY_SIZES = ["1024", "2048", "3072", "4096"]
 _DEFAULT_KEY_SIZE = "2048"
 
+_DEFAULT_EXPIRED = "false"
+_DEFAULT_EXPIRED_DAYS = "30"
+# Bounds an unauthenticated, client-supplied integer (same rationale as
+# _ALLOWED_KEY_SIZES above) -- 10 years is more than enough range for testing
+# either a barely-expired or a long-expired cert.
+_MIN_EXPIRED_DAYS = 1
+_MAX_EXPIRED_DAYS = 3650
 
-def _generate_self_signed_cert(cn: str, key_size: int) -> Tuple[bytes, bytes]:
-    """Returns (cert_pem, key_pem) for a fresh self-signed cert, 1yr validity, SAN=cn."""
+
+def _generate_self_signed_cert(cn: str, key_size: int, expired_days: int = 0) -> Tuple[bytes, bytes]:
+    """Returns (cert_pem, key_pem) for a self-signed cert, SAN=cn.
+
+    With expired_days=0 (default), the cert is valid for 1yr starting now, as
+    before. With expired_days=N>0, the cert instead covers the 1yr window
+    ending N days ago, so it's already expired.
+    """
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
     now = datetime.now(timezone.utc)
+    not_valid_after = now - timedelta(days=expired_days) if expired_days else now + timedelta(days=365)
+    not_valid_before = not_valid_after - timedelta(days=365)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=365))
+        .not_valid_before(not_valid_before)
+        .not_valid_after(not_valid_after)
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
         .sign(private_key, hashes.SHA256())
     )
@@ -114,6 +132,19 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
         )
     key_size = int(key_size_str)
 
+    expired_days = 0
+    if params.get("expired", _DEFAULT_EXPIRED) == "true":
+        expired_days_str = params.get("expired_days", _DEFAULT_EXPIRED_DAYS)
+        try:
+            expired_days = int(expired_days_str)
+        except (TypeError, ValueError):
+            return UseCaseResult(ok=False, detail=f"invalid expired_days '{expired_days_str}' -- must be an integer")
+        if not (_MIN_EXPIRED_DAYS <= expired_days <= _MAX_EXPIRED_DAYS):
+            return UseCaseResult(
+                ok=False,
+                detail=f"expired_days must be between {_MIN_EXPIRED_DAYS} and {_MAX_EXPIRED_DAYS}",
+            )
+
     token = uuid.uuid4().hex[:12]
     cn = f"certsight-test-{token}.local"
     path = _GENERATED_CERT_DIR / f"generated-{token}.crt"
@@ -124,7 +155,7 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
     # a legitimate, informative outcome for a FIPS-focused test tool, not a
     # bug, so surface it as a normal use-case failure rather than a 500.
     try:
-        cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size)
+        cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size, expired_days)
     except Exception as e:
         return UseCaseResult(
             ok=False,
@@ -158,11 +189,16 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
         if key_size < 2048
         else ""
     )
+    expiry_note = (
+        f" -- expired {expired_days}d ago, expect CertSight to flag this in the Kafka event"
+        if expired_days
+        else ""
+    )
     return UseCaseResult(
         ok=True,
         detail=(
             f"generated a fresh self-signed cert (CN={cn}, {key_size}-bit RSA) at "
-            f"{path} and cat'd it{fips_note} -- unique path and serial number "
+            f"{path} and cat'd it{fips_note}{expiry_note} -- unique path and serial number "
             "guarantee CertSight treats this as a first-time discovery, so a new "
             "Kafka event should always appear"
         ),
@@ -475,15 +511,32 @@ USE_CASES: List[UseCase] = [
             "Generates a new self-signed certificate at a unique path under "
             "/dev/shm and cat's it. Guaranteed to be a first-time discovery "
             "every click, so a new Kafka event always appears. Pick a key size "
-            "below 2048 bits to trigger a FIPS non-compliance finding."
+            "below 2048 bits to trigger a FIPS non-compliance finding, or check "
+            "'expired' to generate a cert that's already past its validity "
+            "window and verify CertSight flags that in the Kafka event."
         ),
         run=_generate_and_read_fresh_cert,
         params=[
             UseCaseParam(
                 name="key_size",
                 label="RSA key size",
+                type="select",
                 options=_ALLOWED_KEY_SIZES,
                 default=_DEFAULT_KEY_SIZE,
+            ),
+            UseCaseParam(
+                name="expired",
+                label="expired",
+                type="checkbox",
+                default=_DEFAULT_EXPIRED,
+            ),
+            UseCaseParam(
+                name="expired_days",
+                label="days ago",
+                type="number",
+                default=_DEFAULT_EXPIRED_DAYS,
+                min=str(_MIN_EXPIRED_DAYS),
+                max=str(_MAX_EXPIRED_DAYS),
             ),
         ],
         pipeline=[
