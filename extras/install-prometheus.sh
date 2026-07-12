@@ -59,6 +59,10 @@ global:
 
 scrape_configs:
   - job_name: cert-analyzer
+    # Matches [metrics] min_scrape_interval_seconds in cert-analyzer.conf (60s) --
+    # scraping faster than that just re-polls a replayed response and renders
+    # as a staircase in Grafana instead of a smooth line.
+    scrape_interval: 60s
     static_configs:
       - targets: ['localhost:${CERT_ANALYZER_PORT}']
 EOF

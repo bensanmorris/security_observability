@@ -71,7 +71,6 @@ sed -i \
     -e 's/^enabled = false/enabled = true/' \
     -e 's/^bind_probe_enabled = false/bind_probe_enabled = true/' \
     -e 's/^connect_probe_enabled = false/connect_probe_enabled = true/' \
-    -e 's/^demo_mode = false/demo_mode = true/' \
     "${CONF}"
 
 echo "=== [8/9] Kafka (single-node, throwaway, KRaft mode) ==="

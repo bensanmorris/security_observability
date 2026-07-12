@@ -53,9 +53,8 @@ LimitNOFILE=65536
 # CertificateAnalyzer._deindex_known_cert). A single first-time scan of the
 # system CA trust bundle alone added ~32M in one burst; 256M had already been
 # touched (systemd reported peak == max) before that eviction-cleanup fix
-# existed. Revisit this number after that fix has had time to bound growth
-# for real, rather than treating 384M as the new steady-state ceiling.
-MemoryMax=384M
+# existed. Raised again from 384M to 512M for extra headroom.
+MemoryMax=512M
 CPUQuota=200%
 
 [Install]
