@@ -113,16 +113,71 @@ done
 bash "${WORKDIR}/certsight-src/extras/install-prometheus.sh"
 
 echo "=== Test console ==="
+# Bound to localhost only -- nginx (below) is the public-facing side on 8090,
+# so it can rate-limit before requests ever reach this unauthenticated server.
 TSCONF=/etc/certsight-test-server/test-server.conf
 cat <<'EOF' > "${TSCONF}"
 TEST_SERVER_KAFKA_HOST=localhost
 TEST_SERVER_KAFKA_PORT=9092
 TEST_SERVER_TOPIC=cert-analyzer-events
-TEST_SERVER_PORT=8090
-TEST_SERVER_BIND=0.0.0.0
+TEST_SERVER_PORT=8091
+TEST_SERVER_BIND=127.0.0.1
 EOF
 systemctl reset-failed certsight-test-server || true
 systemctl enable --now certsight-test-server
+
+echo "=== nginx reverse proxy in front of the test console (rate limiting) ==="
+# The test console has no auth and executes real actions (spawn JVMs, generate
+# certs, bind ports) on request -- with the link shared publicly, this caps
+# how hard any one client can hit it. /api/run/* (the actual action endpoints)
+# gets the tightest limit; /api/events (the SSE live-event stream) is exempted
+# from request-rate limiting since it's one long-lived connection per visitor,
+# but still capped on concurrent connections per IP.
+dnf -y install nginx || true
+cat <<'EOF' > /etc/nginx/conf.d/certsight-test-console.conf
+limit_req_zone $binary_remote_addr zone=tc_general:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=tc_actions:10m rate=12r/m;
+limit_conn_zone $binary_remote_addr zone=tc_conn:10m;
+limit_req_status 429;
+limit_conn_status 429;
+
+server {
+    listen 8090 default_server;
+    server_name _;
+
+    location /api/run/ {
+        limit_req zone=tc_actions burst=3 nodelay;
+        limit_conn tc_conn 3;
+        proxy_pass http://127.0.0.1:8091;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /api/events {
+        limit_conn tc_conn 5;
+        proxy_pass http://127.0.0.1:8091;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_set_header Connection '';
+    }
+
+    location / {
+        limit_req zone=tc_general burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8091;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+EOF
+restorecon -v /etc/nginx/conf.d/certsight-test-console.conf || true
+setsebool -P httpd_can_network_connect on || true
+# SELinux only pre-labels standard ports (80, 443, 8080, ...) as httpd-bindable;
+# 8090 needs an explicit label or nginx's bind() fails with EACCES.
+semanage port -l | grep -qw 8090 || semanage port -a -t http_port_t -p tcp 8090 || true
+systemctl enable --now nginx
+nginx -t && systemctl reload nginx
 
 echo "=== Java JCA warm-up (fixes policy-load-timing issue on the java-non-fips-cert uprobe) ==="
 # Tetragon only attaches the java-non-fips-cert uprobe to libcert_agent_stub.so

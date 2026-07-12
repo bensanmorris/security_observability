@@ -13,7 +13,9 @@ What gets installed on the instance:
 - A throwaway single-node Kafka broker (KRaft mode) feeding the test
   console's live event pane
 - Prometheus + Grafana, with the CertSight dashboard auto-imported
-- `certsight-test-server` (the test console), listening on `0.0.0.0:8090`
+- `certsight-test-server` (the test console), bound to `127.0.0.1:8091`
+  behind an nginx reverse proxy on `0.0.0.0:8090` that rate-limits requests
+  (see [Rate limiting](#rate-limiting) below)
 
 ---
 
@@ -32,6 +34,23 @@ means:
   running longer than you need it, and tear it down afterwards.
 - SSH (port 22) is restricted to your current public IP at deploy time, not
   opened to the internet.
+
+### Rate limiting
+
+nginx sits in front of the test console on port 8090 (the test console
+itself only listens on `127.0.0.1:8091`) and rate-limits per client IP:
+
+| Path | Limit | Why |
+|---|---|---|
+| `/api/run/*` (the actual action endpoints -- spawn JVM, generate cert, bind port, etc.) | 12/min, burst 3 | These are the expensive ones (real subprocess/JVM/crypto work); this is the main cost/load control |
+| `/api/events` (the SSE live-event stream) | not request-rate-limited, capped at 5 concurrent connections/IP | It's one long-lived connection per page load, not a request to throttle |
+| everything else (static assets, `/api/use-cases`) | 10 req/s, burst 20 | Generous -- just guards against a naive scraper/bot loop |
+
+Exceeding a limit gets a `429`, not a dropped connection. This bounds load
+per client but doesn't prevent many *different* IPs hammering it
+simultaneously (e.g. a link going viral) -- combined with `CpuCredits=standard`
+(see [Cost](#cost)) that degrades to "the demo gets slow" rather than
+"surprise bill," which is the actual goal here.
 
 If you'd rather restrict the dashboard/console to specific IPs instead of
 the whole internet, edit the `authorize-security-group-ingress` call in
