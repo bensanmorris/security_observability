@@ -9,6 +9,8 @@
 
 CertSight provides real-time certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes in **cloud native, bare metal and openshift / k8s environments.**
 
+**Live AWS demo:** [Dashboard](http://certsight-demo.com:3000/d/certsight-v1) · [Test console](http://certsight-demo.com:8090)
+
 ---
 
 ## The problem
