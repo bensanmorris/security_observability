@@ -59,6 +59,14 @@ until either the instance is running again or the address is released.
 Tear the instance down when you're done demoing -- `teardown-demo.sh`
 removes everything the deploy script created, including releasing the EIP.
 
+The instance launches with `CpuCredits=standard` rather than the t3 default
+of `unlimited` -- with the dashboard/test console open to the internet,
+`unlimited` would bill per vCPU-hour for any sustained load beyond the
+baseline (e.g. a traffic spike after sharing the link publicly) instead of
+throttling. `standard` caps the cost risk: under heavy load the instance
+just gets slower rather than racking up a surprise charge. A billing
+alert/budget in your AWS account is still worth setting up as a backstop.
+
 ---
 
 ## Deploy

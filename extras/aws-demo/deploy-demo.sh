@@ -121,7 +121,13 @@ INSTANCE_ID="$(aws ec2 run-instances --region "${AWS_REGION}" \
     --user-data "file://${USER_DATA_FILE}" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=certsight-demo}]" \
     --metadata-options "HttpTokens=required" \
+    --credit-specification "CpuCredits=standard" \
     --query 'Instances[0].InstanceId' --output text)"
+# CpuCredits=standard: t3 instances default to "unlimited" bursting, which
+# bills per vCPU-hour for sustained CPU beyond the baseline instead of
+# throttling. With the dashboard/test-console open to the internet, a burst
+# of traffic could otherwise turn into a surprise charge -- "standard" caps
+# cost by throttling the instance back to baseline CPU under sustained load.
 echo "    Instance: ${INSTANCE_ID}"
 
 cat > "${STATE_FILE}" <<EOF
