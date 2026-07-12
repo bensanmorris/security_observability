@@ -134,9 +134,21 @@ EOF
 
 echo "==> Waiting for instance to enter 'running' state..."
 aws ec2 wait instance-running --region "${AWS_REGION}" --instance-ids "${INSTANCE_ID}"
-PUBLIC_IP="$(aws ec2 describe-instances --region "${AWS_REGION}" --instance-ids "${INSTANCE_ID}" \
-    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"
-echo "PUBLIC_IP=${PUBLIC_IP}" >> "${STATE_FILE}"
+
+echo "==> Allocating Elastic IP (so the dashboard/test-console link is stable, e.g. for a README)..."
+ALLOCATION_ID="$(aws ec2 allocate-address --region "${AWS_REGION}" --domain vpc \
+    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=certsight-demo}]" \
+    --query 'AllocationId' --output text)"
+aws ec2 associate-address --region "${AWS_REGION}" \
+    --instance-id "${INSTANCE_ID}" --allocation-id "${ALLOCATION_ID}" >/dev/null
+PUBLIC_IP="$(aws ec2 describe-addresses --region "${AWS_REGION}" --allocation-ids "${ALLOCATION_ID}" \
+    --query 'Addresses[0].PublicIp' --output text)"
+echo "    Elastic IP: ${PUBLIC_IP} (allocation ${ALLOCATION_ID})"
+
+cat >> "${STATE_FILE}" <<EOF
+ALLOCATION_ID=${ALLOCATION_ID}
+PUBLIC_IP=${PUBLIC_IP}
+EOF
 
 echo ""
 echo "============================================================"

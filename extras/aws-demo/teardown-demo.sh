@@ -24,6 +24,13 @@ aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids "${INSTANCE_
 aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids "${INSTANCE_ID}"
 echo "    Terminated."
 
+if [[ -n "${ALLOCATION_ID:-}" ]]; then
+    echo "==> Releasing Elastic IP (allocation ${ALLOCATION_ID})..."
+    # Termination auto-disassociates the EIP but doesn't release it -- an
+    # unattached EIP keeps billing hourly until explicitly released.
+    aws ec2 release-address --region "${AWS_REGION}" --allocation-id "${ALLOCATION_ID}" || true
+fi
+
 echo "==> Deleting security group ${SG_ID}..."
 # Can take a few seconds after termination for the ENI to detach.
 for i in $(seq 1 12); do

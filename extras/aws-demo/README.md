@@ -52,8 +52,12 @@ No Terraform, no CloudFormation -- just the AWS CLI.
 ## Cost
 
 `t3.medium` on-demand is roughly $0.04/hr (region-dependent) plus a 20 GB
-gp3 EBS volume (~$0.002/hr). Tear the instance down when you're done demoing
--- `teardown-demo.sh` removes everything the deploy script created.
+gp3 EBS volume (~$0.002/hr). An Elastic IP is allocated for a stable link
+(see below) -- free while attached to a running instance, but note that if
+you ever stop (not terminate) the instance, the EIP starts billing hourly
+until either the instance is running again or the address is released.
+Tear the instance down when you're done demoing -- `teardown-demo.sh`
+removes everything the deploy script created, including releasing the EIP.
 
 ---
 
@@ -73,6 +77,10 @@ Grafana, test console) to finish via cloud-init. On success it prints:
 Dashboard:     http://<public-ip>:3000/d/certsight-v1
 Test console:  http://<public-ip>:8090
 ```
+
+`<public-ip>` is an Elastic IP allocated by the script, so it stays fixed
+for the life of the instance -- safe to link to from a README or share
+elsewhere, unlike a plain EC2 public IP (which changes on stop/start).
 
 Useful overrides (env vars):
 
