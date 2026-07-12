@@ -101,13 +101,18 @@ the full stack install (Tetragon, cert-analyzer, Kafka, Prometheus,
 Grafana, test console) to finish via cloud-init. On success it prints:
 
 ```
-Dashboard:     http://<public-ip>:3000/d/certsight-v1
-Test console:  http://<public-ip>:8090
+Dashboard:     http://certsight-demo.com:3000/d/certsight-v1
+Test console:  http://certsight-demo.com:8090
 ```
 
-`<public-ip>` is an Elastic IP allocated by the script, so it stays fixed
-for the life of the instance -- safe to link to from a README or share
-elsewhere, unlike a plain EC2 public IP (which changes on stop/start).
+The instance gets an Elastic IP (stays fixed for the life of the instance,
+unlike a plain EC2 public IP which changes on stop/start), and the script
+also points `certsight-demo.com` at it via Route 53 -- a hosted zone for
+that domain already exists in this account. `teardown-demo.sh` removes the
+DNS record before releasing the IP, so it never dangles pointing at an
+address AWS could later hand to someone else. Set `DOMAIN_NAME=""` to skip
+DNS entirely and just use the raw IP, or point at a different domain (must
+already have a hosted zone in this account) via `DOMAIN_NAME=other.com`.
 
 Useful overrides (env vars):
 
@@ -115,6 +120,7 @@ Useful overrides (env vars):
 |---|---|---|
 | `AWS_REGION` | `us-east-1` | |
 | `INSTANCE_TYPE` | `t3.medium` | `t3.small` (2 GB RAM) is too tight for Tetragon + cert-analyzer + Kafka + Prometheus + Grafana + test console running together |
+| `DOMAIN_NAME` | `certsight-demo.com` | Route 53 hosted zone must already exist for this domain; set empty to skip DNS |
 | `CERTSIGHT_VERSION` | `v0.73` | Must be a tagged [release](../../releases) with RPM assets |
 | `TETRAGON_VERSION` | `1.7.0` | Any [Tetragon release](https://github.com/cilium/tetragon/releases) with a `tetragon-vX.Y.Z-amd64.tar.gz` asset |
 | `KEY_NAME` | `certsight-demo` | Reused across runs if it already exists in AWS |

@@ -29,6 +29,10 @@ SG_NAME="${SG_NAME:-certsight-demo-sg}"
 VOLUME_SIZE_GB="${VOLUME_SIZE_GB:-20}"
 CERTSIGHT_VERSION="${CERTSIGHT_VERSION:-v0.73}"
 TETRAGON_VERSION="${TETRAGON_VERSION:-1.7.0}"
+# Route 53 domain to point at the instance's Elastic IP -- set empty to skip
+# DNS entirely and just use the raw IP. Requires a hosted zone for this
+# domain to already exist in the account (true for certsight-demo.com).
+DOMAIN_NAME="${DOMAIN_NAME:-certsight-demo.com}"
 # CIDR allowed to SSH in -- defaults to your current public IP. The dashboard
 # (3000) and test console (8090) are intentionally opened to 0.0.0.0/0
 # separately, per the access-control choice this script assumes was made
@@ -151,9 +155,30 @@ PUBLIC_IP="$(aws ec2 describe-addresses --region "${AWS_REGION}" --allocation-id
     --query 'Addresses[0].PublicIp' --output text)"
 echo "    Elastic IP: ${PUBLIC_IP} (allocation ${ALLOCATION_ID})"
 
+HOSTED_ZONE_ID=""
+LINK_HOST="${PUBLIC_IP}"
+if [[ -n "${DOMAIN_NAME}" ]]; then
+    echo "==> Pointing ${DOMAIN_NAME} at ${PUBLIC_IP}..."
+    HOSTED_ZONE_ID="$(aws route53 list-hosted-zones \
+        --query "HostedZones[?Name=='${DOMAIN_NAME}.'].Id | [0]" --output text)"
+    if [[ -z "${HOSTED_ZONE_ID}" || "${HOSTED_ZONE_ID}" == "None" ]]; then
+        echo "    WARNING: no Route 53 hosted zone found for ${DOMAIN_NAME} -- skipping DNS, using the raw IP instead."
+        HOSTED_ZONE_ID=""
+    else
+        CHANGE_ID="$(aws route53 change-resource-record-sets --hosted-zone-id "${HOSTED_ZONE_ID}" \
+            --change-batch "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"${DOMAIN_NAME}\",\"Type\":\"A\",\"TTL\":300,\"ResourceRecords\":[{\"Value\":\"${PUBLIC_IP}\"}]}}]}" \
+            --query 'ChangeInfo.Id' --output text)"
+        aws route53 wait resource-record-sets-changed --id "${CHANGE_ID}"
+        echo "    ${DOMAIN_NAME} -> ${PUBLIC_IP} (DNS change in sync)"
+        LINK_HOST="${DOMAIN_NAME}"
+    fi
+fi
+
 cat >> "${STATE_FILE}" <<EOF
 ALLOCATION_ID=${ALLOCATION_ID}
 PUBLIC_IP=${PUBLIC_IP}
+DOMAIN_NAME=${DOMAIN_NAME}
+HOSTED_ZONE_ID=${HOSTED_ZONE_ID}
 EOF
 
 echo ""
@@ -206,8 +231,8 @@ else
     echo "   sudo tail -100 /var/log/certsight-demo-install.log"
 fi
 echo ""
-echo " Dashboard:     http://${PUBLIC_IP}:3000/d/certsight-v1  (up: ${GRAFANA_UP})"
-echo " Test console:  http://${PUBLIC_IP}:8090                (up: ${CONSOLE_UP})"
+echo " Dashboard:     http://${LINK_HOST}:3000/d/certsight-v1  (up: ${GRAFANA_UP})"
+echo " Test console:  http://${LINK_HOST}:8090                (up: ${CONSOLE_UP})"
 echo ""
 echo " Both are open to the internet with no authentication."
 echo " Tear down when done:  ./teardown-demo.sh"

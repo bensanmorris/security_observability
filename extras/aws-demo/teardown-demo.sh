@@ -24,6 +24,16 @@ aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids "${INSTANCE_
 aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids "${INSTANCE_ID}"
 echo "    Terminated."
 
+if [[ -n "${HOSTED_ZONE_ID:-}" && -n "${DOMAIN_NAME:-}" && -n "${PUBLIC_IP:-}" ]]; then
+    echo "==> Removing DNS record ${DOMAIN_NAME} -> ${PUBLIC_IP}..."
+    # Once the EIP is released it can be reassigned to a different AWS
+    # customer -- leaving the A record in place would point the domain at
+    # whoever gets it next, so this always runs before releasing the address.
+    aws route53 change-resource-record-sets --hosted-zone-id "${HOSTED_ZONE_ID}" \
+        --change-batch "{\"Changes\":[{\"Action\":\"DELETE\",\"ResourceRecordSet\":{\"Name\":\"${DOMAIN_NAME}\",\"Type\":\"A\",\"TTL\":300,\"ResourceRecords\":[{\"Value\":\"${PUBLIC_IP}\"}]}}]}" \
+        >/dev/null 2>&1 || echo "    (record already gone or didn't match -- skipping)"
+fi
+
 if [[ -n "${ALLOCATION_ID:-}" ]]; then
     echo "==> Releasing Elastic IP (allocation ${ALLOCATION_ID})..."
     # Termination auto-disassociates the EIP but doesn't release it -- an
