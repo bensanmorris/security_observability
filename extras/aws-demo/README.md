@@ -7,7 +7,7 @@ over public URLs, without touching any existing infrastructure.
 What gets installed on the instance:
 
 - Tetragon (standalone systemd install) + CertSight's Tetragon policies
-- cert-analyzer + the Java cert-agent (JNI + deployer), so all five
+- CertSight cert-analyzer + the CertSight Java cert-agent (JNI + deployer), so all five
   [test console use cases](../test-server/TEST-SERVER-README.md#use-cases)
   work, including the JCA/Java one
 - A throwaway single-node Kafka broker (KRaft mode) feeding the test
