@@ -268,3 +268,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Presentation Q&A](extras/PRESENTATION-QA.md) - Questions and answers covering architecture, deployment, Java JCA/JNI hooking, and roadmap
 - [Local Kafka testing](extras/kafka/KAFKA-README.md) - Install a throwaway Kafka broker and view published events
 - [Detection test console](extras/test-server/TEST-SERVER-README.md) - Local web UI for triggering individual certificate detections and watching the resulting Kafka events live
+- [AWS deployment demo](extras/aws-demo/README.md) - Stand up the full CertSight stack on a single EC2 instance with public dashboard and test console URLs
