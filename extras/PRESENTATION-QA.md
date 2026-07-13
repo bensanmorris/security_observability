@@ -137,7 +137,7 @@ ASM is the lower-level choice and is appropriate here because the target (`java.
 **Why `COMPUTE_MAXS` and not `COMPUTE_FRAMES`?**
 `COMPUTE_FRAMES` causes ASM to call `getCommonSuperClass` to compute stack-map frames, which internally uses `Class.forName`. Under Java 11's module system, resolving types across named/unnamed module boundaries during dynamic retransformation fails because the bootstrap `ClassWriter` can't resolve types that live in the application's module graph. `COMPUTE_MAXS` avoids this entirely — it only recomputes max-stack and max-locals while preserving the existing stack-map frames from the `ClassReader`. Inserting a single `invokestatic` call at method entry doesn't invalidate any existing frames, so this is sufficient.
 
-**Does this still hold on JDK 17, which makes strong module encapsulation the permanent default?** Yes — validated end-to-end with the unmodified JDK-11-built agent JAR attached to a JDK 17 target JVM: `retransformClasses(KeyStore.class)` succeeded and events flowed through to `cert_analyzer` with no code changes. `COMPUTE_MAXS`'s whole point is avoiding `getCommonSuperClass`/`Class.forName` entirely, so it was never actually exposed to JDK 17's stricter default — the fix generalizes for free rather than needing a JDK-17-specific variant.
+**Does this still hold on JDK 17, which makes strong module encapsulation the permanent default?** Yes — validated end-to-end with the unmodified JDK-11-built agent JAR attached to a JDK 17 target JVM: `retransformClasses(KeyStore.class)` succeeded and events flowed through to `cert_analyzer` with no code changes. `COMPUTE_MAXS`'s whole point is avoiding `getCommonSuperClass`/`Class.forName` entirely, so it was never actually exposed to JDK 17's stricter default — the fix generalizes for free rather than needing a JDK-17-specific variant. **Also validated on JDK 21** the same way, with the same result — retransform succeeded unmodified.
 
 **Why does the transformer call `inst.retransformClasses(KeyStore.class)`?**
 When the agent is injected dynamically via `jattach`, `KeyStore` is already loaded. Without retransformation the instrumentation only applies to classes loaded after the agent attaches. Calling `retransformClasses` forces the JVM to re-run the transformer against the already-loaded `KeyStore` bytecode so the hook is active immediately, not just for future class loads.
@@ -152,7 +152,7 @@ When the agent is injected dynamically via `jattach`, `KeyStore` is already load
 **Why can't `NativeBridge.loadLibrary()` be called from `CertAgent.setup()`?**
 The JVM only allows a native library to be associated with one classloader. If `CertAgent.setup()` (running in the agent classloader) calls `System.load(libPath)`, then when the bootstrap classloader later initialises `NativeBridge` (triggered by the first `setCertificateEntry` call), its attempt to load the same library fails with "already loaded in another classloader" — leaving `loaded = false` in the bootstrap copy. The fix is to not load the library in the agent classloader at all. Instead, `CertAgent.setup()` writes the path into the system property `com.security.certagent.lib`, and `NativeBridge`'s static initialiser (which runs in the bootstrap context) reads the property and calls `System.load` — so the library is owned exclusively by the bootstrap classloader.
 
-**Is this trick JDK-version-specific?** No — `appendToBootstrapClassLoaderSearch` and classloader/native-library association semantics have been stable since Java 9, well before either of this project's supported versions. Confirmed by direct testing: the unmodified Java-11-built agent's classloader split worked without any `UnsatisfiedLinkError` when attached to a JDK 17 target JVM.
+**Is this trick JDK-version-specific?** No — `appendToBootstrapClassLoaderSearch` and classloader/native-library association semantics have been stable since Java 9, well before any of this project's supported versions. Confirmed by direct testing: the unmodified Java-11-built agent's classloader split worked without any `UnsatisfiedLinkError` when attached to Java 17 and Java 21 target JVMs alike.
 
 ---
 
@@ -202,7 +202,7 @@ jattach <pid> load instrument false /opt/cert-agent/cert-agent.jar=/opt/cert-age
 **When does static injection apply and how do you use it?**
 Static injection is required when:
 - The JVM was started with `-XX:+DisableAttachMechanism`, which prevents any runtime attach
-- Java 21+ with `-XX:-EnableDynamicAgentLoading` (the default on JDK 21 is a warning; future versions may enforce it) — confirmed this restriction does *not* apply to Java 17, which dynamically attaches without any warning or rejection
+- A JVM explicitly started with `-XX:-EnableDynamicAgentLoading` (not yet the default on JDK 21 — see below; a future JDK release may flip the default and make this bullet apply out of the box)
 - The JVM process owner cannot be matched by the deployer (e.g. a heavily sandboxed container)
 - Short-lived JVM processes that may not survive the 30-second scan window
 
@@ -214,6 +214,14 @@ java -javaagent:/opt/cert-agent/cert-agent.jar=/opt/cert-agent/libcert_agent_stu
 ```
 
 The `premain` entry point runs before `main`, so `KeyStore` is instrumented before any application code executes — there is no coverage gap.
+
+**What actually happens on a stock JDK 21 target, given `-XX:-EnableDynamicAgentLoading` is mentioned above?** Confirmed by direct testing (attaching via the real `cert-agent-deployer` service, not just manual `jattach`): dynamic attach *still succeeds* on a default JDK 21 install. The target JVM prints a warning to its own stdout/stderr —
+```
+WARNING: A Java agent has been loaded dynamically (/opt/cert-agent/cert-agent.jar)
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+```
+— but `retransformClasses`, the classloader split, and the full Tetragon/Kafka event chain all worked identically to Java 11 and 17, no code or deployment changes needed. This warning is cosmetic today; it becomes an actual blocker only if a JVM is explicitly started with `-XX:-EnableDynamicAgentLoading`, or once a future JDK release flips the *default* to disallow (the warning text itself says this is coming) — at that point the static-injection fallback below becomes the only option for that JVM.
 
 **How does the deployer surface the static flag when dynamic attach fails?**
 When `jattach` returns a non-zero exit code, the deployer reads `/proc/<pid>/cmdline` to reconstruct the original command line and logs:

@@ -8,7 +8,7 @@
 # The JAR is compiled at -source/-target 11 regardless of which JDK's javac
 # builds it, producing a classfile-version-55 JAR that's forward-compatible
 # with newer JVMs -- one build artifact serves multiple target JVM versions.
-# Validated end-to-end (unmodified, no rebuild) on both Java 11 and Java 17
+# Validated end-to-end (unmodified, no rebuild) on Java 11, 17, and 21
 # target JVMs; see probe_tests/README.md and extras/PRESENTATION-QA.md.
 #
 # The build downloads asm-9.7.jar and asm-commons-9.7.jar from Maven Central

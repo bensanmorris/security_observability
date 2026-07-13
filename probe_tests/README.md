@@ -151,9 +151,9 @@ needed for local testing.
 **Supported target JDKs:** the agent is built once, against JDK 11
 (`-source 11 -target 11`), producing a classfile-version-55 JAR that's
 forward-compatible with newer JVMs. Validated end-to-end (retransform,
-classloader-split native load, and a real Tetragon event) on **both Java 11
-and Java 17** target JVMs — no rebuild or per-version artifact needed to run
-the same `cert-agent.jar`/`libcert_agent_stub.so` against a JDK 17 target:
+classloader-split native load, and a real Tetragon event) on **Java 11, 17,
+and 21** target JVMs — no rebuild or per-version artifact needed to attach
+the same `cert-agent.jar`/`libcert_agent_stub.so` to any of them:
 
 ```bash
 # Run the target JVM under a specific JDK by invoking its java binary
@@ -165,13 +165,29 @@ java -cp probe_tests/java CertAgentTest test-certs/valid.crt 5000
 # Java 17 (adjust path to the installed JDK 17 home)
 /usr/lib/jvm/java-17-openjdk-*/bin/java -cp probe_tests/java CertAgentTest \
     test-certs/valid.crt 5000
+
+# Java 21 (adjust path to the installed JDK 21 home)
+/usr/lib/jvm/java-21-openjdk-*/bin/java -cp probe_tests/java CertAgentTest \
+    test-certs/valid.crt 5000
 ```
 
 The `jattach` attach command below is identical regardless of the target
-JVM's version. Success looks the same on both: `[cert-agent] Initialized —
-intercepting KeyStore.setCertificateEntry` in the target JVM's output, and a
-`🔍 Detected in-memory certificate: uprobe://java_cert_agent_write/...` line
-in `cert_analyzer`'s log.
+JVM's version. Success looks the same on all three: `[cert-agent]
+Initialized — intercepting KeyStore.setCertificateEntry` in the target JVM's
+output, and a `🔍 Detected in-memory certificate:
+uprobe://java_cert_agent_write/...` line in `cert_analyzer`'s log.
+
+**One JDK 21-specific difference:** dynamic agent attach prints a JVM-level
+warning there —
+```
+WARNING: A Java agent has been loaded dynamically (...)
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+```
+This is only a warning on 21 (attach still succeeds); it's the same
+mechanism `-XX:-EnableDynamicAgentLoading` controls. Don't mistake this
+warning for a failure — check for the `[cert-agent] Initialized` line and a
+real Tetragon/Kafka event, not just the absence of warnings.
 
 **End-to-end test procedure:**
 
