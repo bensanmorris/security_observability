@@ -147,6 +147,7 @@ unique per certificate, and rotated when the cert at a path changes.
 
 ```json
 {
+  "schema_version":    1,
   "event_type":        "certificate_discovered",
   "detected_at":       "2026-06-10T10:00:00.000000",
 
@@ -210,6 +211,7 @@ unique per certificate, and rotated when the cert at a path changes.
 
 | Field | Type | Description |
 |---|---|---|
+| `schema_version` | int | Bumped only on breaking schema changes (renamed/removed field, changed type) — not on every release |
 | `event_type` | string | Always `"certificate_discovered"` |
 | `detected_at` | ISO 8601 | UTC timestamp when the event was processed |
 | `path` | string | Filesystem path of the certificate file |

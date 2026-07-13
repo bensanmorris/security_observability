@@ -5454,6 +5454,24 @@ class TestKafkaPublisher:
             msg = send_kwargs['value']
             assert msg['event_type'] == 'certificate_discovered'
 
+    def test_publish_sends_schema_version(self, monkeypatch, sample_cert_info):
+        """Published message contains schema_version, currently 1."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            publisher.publish(sample_cert_info)
+
+            _, send_kwargs = mock_producer.send.call_args
+            msg = send_kwargs['value']
+            assert msg['schema_version'] == _ca.KAFKA_SCHEMA_VERSION == 1
+
     def test_publish_message_contains_all_fields(self, monkeypatch, sample_cert_info):
         """Published message contains all expected CertificateInfo fields."""
         import agent.kafka as _ca

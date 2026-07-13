@@ -31,6 +31,12 @@ _kafka_delivery_errors = Counter(
     ['node_name'],
 )
 
+# Bumped only when the message schema itself breaks compatibility (a field is
+# renamed, removed, or changes type) -- not on every release. Deliberately
+# separate from CERT_ANALYZER_VERSION, which bumps on every release whether
+# or not the payload shape changed; consumers should gate on this instead.
+KAFKA_SCHEMA_VERSION = 1
+
 
 class KafkaPublisher:
     """
@@ -66,6 +72,7 @@ class KafkaPublisher:
 
     Message schema (all fields present, empty string when not applicable):
     {
+        "schema_version":   1,
         "event_type":       "certificate_discovered",
         "detected_at":      "2026-03-31T10:00:00.000000",   # ISO 8601 UTC
         "path":             "/etc/pki/tls/certs/ca-bundle.crt",
@@ -231,6 +238,7 @@ class KafkaPublisher:
             return
 
         message = {
+            'schema_version':    KAFKA_SCHEMA_VERSION,
             'event_type':        'certificate_discovered',
             'detected_at':       datetime.utcnow().isoformat(),
             'path':              cert_info.path,
