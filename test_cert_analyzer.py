@@ -850,6 +850,59 @@ class TestPeriodicScan:
         assert len(matching) == 1
         analyzer.kafka_publisher.publish.assert_called_once()
 
+    def test_symlinked_cert_is_not_double_counted(self, analyzer, temp_dir):
+        """A symlink pointing at an already-scanned cert file is skipped, not re-parsed.
+
+        Trust stores like /etc/pki/ca-trust/extracted/pem/directory-hash/ re-expose
+        the same certs under extra symlinked paths (individually and as whole-bundle
+        aliases) purely for OpenSSL CApath lookups -- without a skip, periodic_scan
+        would parse and metrics-track the same cert multiple times over.
+        """
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("linked.example.com", 365)
+        real_path = os.path.join(temp_dir, "real.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, real_path)
+        link_path = os.path.join(temp_dir, "alias.pem")
+        os.symlink(real_path, link_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer.periodic_scan([temp_dir])
+
+        real_matching = [k for k in analyzer.known_certs.keys() if k.startswith(real_path + ":")]
+        link_matching = [k for k in analyzer.known_certs.keys() if k.startswith(link_path + ":")]
+        assert len(real_matching) == 1
+        assert len(link_matching) == 0
+        analyzer.kafka_publisher.publish.assert_called_once()
+
+    def test_directory_hash_subdir_is_skipped_entirely(self, analyzer, temp_dir):
+        """Anything under a directory-hash/ subdir is skipped, not just symlinks.
+
+        update-ca-trust's extracted/pem/directory-hash/ mixes genuine duplicate
+        regular files (one per CA, alongside the symlinked hash lookup for it)
+        with symlinks -- a symlink-only skip misses the regular-file duplicates,
+        so periodic_scan must skip the whole directory by name instead.
+        """
+        from unittest.mock import Mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("hashdir.example.com", 365)
+        real_path = os.path.join(temp_dir, "real.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, real_path)
+
+        hash_dir = os.path.join(temp_dir, "directory-hash")
+        os.makedirs(hash_dir)
+        dup_path = os.path.join(hash_dir, "real.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, dup_path)
+
+        analyzer.kafka_publisher = Mock()
+        analyzer.periodic_scan([temp_dir])
+
+        real_matching = [k for k in analyzer.known_certs.keys() if k.startswith(real_path + ":")]
+        dup_matching = [k for k in analyzer.known_certs.keys() if k.startswith(dup_path + ":")]
+        assert len(real_matching) == 1
+        assert len(dup_matching) == 0
+        analyzer.kafka_publisher.publish.assert_called_once()
+
     def test_new_file_gets_analyzer_node_name_not_empty(self, analyzer, temp_dir):
         """
         A cert discovered via periodic_scan must carry the analyzer's own
@@ -4117,6 +4170,41 @@ class TestScrapeIntervalMetric:
         """
         collector = self._collector(analyzer)
         assert collector._last_scrape is None
+
+
+class TestScanConfigMetrics:
+    """
+    Tests for scan_paths/scan_interval_seconds surfacing in Prometheus:
+    scan_paths as a cert_analyzer_config_info label (Grafana's Analyzer
+    Configuration table), scan_interval_seconds as its own graphable Gauge
+    (cert_analyzer_scan_interval_seconds) since it's a real number rather
+    than a string config value.
+    """
+
+    def _make_analyzer(self, **kwargs):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        return CertificateAnalyzer(tetragon_address='unix:///dev/null', **kwargs)
+
+    def test_scan_paths_appears_in_config_info(self):
+        a = self._make_analyzer(scan_paths=['/etc/pki/ca-trust/extracted/pem/', '/etc/ssl'])
+        samples = list(a.metrics.config_info.collect())[0].samples
+        assert samples[0].labels['scan_paths'] == '/etc/pki/ca-trust/extracted/pem/,/etc/ssl'
+
+    def test_no_scan_paths_yields_empty_config_info_field(self):
+        a = self._make_analyzer()
+        samples = list(a.metrics.config_info.collect())[0].samples
+        assert samples[0].labels['scan_paths'] == ''
+
+    def test_scan_interval_seconds_gauge_reflects_configured_value(self):
+        a = self._make_analyzer(scan_interval_seconds=1800)
+        samples = list(a.metrics.scan_interval_seconds.collect())[0].samples
+        assert samples[0].value == 1800
+        assert samples[0].labels['node_name'] == a.metrics._node_name
 
 
 class TestScrapeThrottleMiddleware:

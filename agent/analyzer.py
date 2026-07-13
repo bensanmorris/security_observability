@@ -91,7 +91,9 @@ class CertificateAnalyzer:
                  large_file_metrics_cap: int = 300,
                  large_file_byte_cap: int = 2 * 1024 * 1024,
                  max_concurrent_background_threads: int = 20,
-                 max_processes_per_cert: int = 20):
+                 max_processes_per_cert: int = 20,
+                 scan_paths: Optional[list] = None,
+                 scan_interval_seconds: int = 3600):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -126,6 +128,8 @@ class CertificateAnalyzer:
         # forever — unbounded regardless of known_certs cache size, since the
         # cert entry itself may never be evicted. See _record_cert_process_access.
         self._max_processes_per_cert = max_processes_per_cert
+        self._scan_paths = list(scan_paths) if scan_paths else []
+        self._scan_interval_seconds = scan_interval_seconds
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.metrics.config_info.labels(node_name=_NODE_NAME).info({
             'checksum_enabled':                  str(checksum_enabled).lower(),
@@ -144,7 +148,9 @@ class CertificateAnalyzer:
             'max_concurrent_background_threads':   str(max_concurrent_background_threads),
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
+            'scan_paths':                          ','.join(self._scan_paths),
         })
+        self.metrics.scan_interval_seconds.labels(node_name=_NODE_NAME).set(scan_interval_seconds)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
         # entry in known_certs (which used to cost real, sustained CPU once the
@@ -2412,7 +2418,17 @@ class CertificateAnalyzer:
 
                 cert_count = 0
                 for cert_file in path_obj.rglob('*'):
-                    if not cert_file.is_file() or not self.is_cert_path(str(cert_file)):
+                    # Skip symlinks and directory-hash/ -- update-ca-trust's
+                    # extracted/pem/directory-hash/ re-exposes the same certs
+                    # under extra paths purely for OpenSSL CApath subject-hash
+                    # lookups: some entries are symlinks (bundle aliases,
+                    # per-CA hash-named lookups) but others are genuine
+                    # duplicate regular files (one per CA, alongside the
+                    # symlinked hash lookup for it) -- either way it's the same
+                    # cert content already covered by the parent bundle file,
+                    # so skip the whole directory rather than just symlinks.
+                    if (cert_file.is_symlink() or 'directory-hash' in cert_file.parts
+                            or not cert_file.is_file() or not self.is_cert_path(str(cert_file))):
                         continue
 
                     cert_path = str(cert_file)

@@ -604,7 +604,7 @@
           "type": "table",
           "gridPos": {
             "h": 6,
-            "w": 24,
+            "w": 18,
             "x": 0,
             "y": 7
           },
@@ -652,7 +652,8 @@
                   "large_file_byte_cap": 13,
                   "max_concurrent_background_threads": 14,
                   "max_processes_per_cert": 15,
-                  "alert_threshold_days": 16
+                  "alert_threshold_days": 16,
+                  "scan_paths": 17
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -671,7 +672,8 @@
                   "large_file_byte_cap": "Large File Byte Cap",
                   "max_concurrent_background_threads": "Max Concurrent Background Threads",
                   "max_processes_per_cert": "Max Processes Per Cert",
-                  "alert_threshold_days": "Alert Threshold (days)"
+                  "alert_threshold_days": "Alert Threshold (days)",
+                  "scan_paths": "Scan Paths"
                 }
               }
             }
@@ -688,6 +690,52 @@
               }
             },
             "overrides": []
+          }
+        },
+        {
+          "id": 50,
+          "title": "Scan Interval",
+          "type": "stat",
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 18,
+            "y": 7
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "cert_analyzer_scan_interval_seconds{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "time_series",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {}
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "colorMode": "none",
+            "graphMode": "none"
           }
         }
       ]
