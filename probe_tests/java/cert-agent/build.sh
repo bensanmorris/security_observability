@@ -5,22 +5,42 @@
 #   - Any JDK 11+ devel package (javac, jar, java) -- e.g. java-11-openjdk-devel
 #   - gcc
 #
-# The JAR is compiled at -source/-target 11 regardless of which JDK's javac
-# builds it, producing a classfile-version-55 JAR that's forward-compatible
-# with newer JVMs -- one build artifact serves multiple target JVM versions.
-# Validated end-to-end on Java 11, 17, 21, and 25 target JVMs (11/17/21
-# unmodified; 25 required bumping ASM_VERSION below -- see the note further
-# down); see probe_tests/README.md and extras/PRESENTATION-QA.md.
+# The JAR is compiled at --release 8 regardless of which JDK's javac builds
+# it, producing a classfile-version-52 JAR that's forward-compatible with
+# newer JVMs -- one build artifact serves multiple target JVM versions.
+# Validated end-to-end on Java 8, 11, 17, 21, and 25 target JVMs (11/17/21
+# unmodified from the original target-11 build; 8 required lowering the
+# build target from 11 to 8 -- see the note further down; 25 required
+# bumping ASM_VERSION -- see the note further down); see
+# probe_tests/README.md and extras/PRESENTATION-QA.md.
 #
-# NOTE: this is about the *target* JVM's bytecode, which CertTransformer
-# must parse with ASM at retransform time -- ASM's own supported-classfile
-# ceiling is a SEPARATE constraint from the agent's own -source/-target 11.
-# ASM 9.7 could not parse Java 25's own classfile major version (69) when
-# retransforming java.security.KeyStore on a JDK 25 target, silently
-# failing the transform (retransformClasses() itself doesn't throw, so
-# "[cert-agent] Initialized" printed anyway with no working hook -- confirm
-# any future JDK bump by checking for a real Kafka/Tetragon event, not just
-# that log line). Bumped to ASM 9.10.1, which parses major version 69 fine.
+# NOTE ON THE BUILD TARGET: the agent JAR's own classfile version and the
+# *target* JVM's classfile version are two different axes. A JVM can only
+# load classfiles at or below its own version -- unlike 11->25, which is
+# all forward compatible from an 11-built JAR, an unmodified Java-8 target
+# JVM cannot load a classfile-version-55 (Java 11) JAR at all:
+# UnsupportedClassVersionError on the agent's own CertAgent.class. Since
+# the agent source has no post-Java-8 API dependency (confirmed: compiles
+# clean at --release 8) and the bundled ASM 9.10.1 classes are themselves
+# classfile version 49 (Java 5), building at --release 8 instead of 11
+# costs nothing on newer targets and is what makes Java 8 targets work
+# with the same single artifact, rather than needing a separate JDK-8-only
+# build. Use --release (not -source/-target), which sets the bootstrap
+# classpath automatically -- plain -source 8 -target 8 on a JDK 9+ javac
+# compiles against the current JDK's newer standard library classes while
+# only checking bytecode-level target compatibility, so it would silently
+# allow calling a post-8 stdlib API that doesn't exist on a real Java 8 JRE.
+#
+# NOTE ON ASM: this is about the *target* JVM's bytecode, which
+# CertTransformer must parse with ASM at retransform time -- ASM's own
+# supported-classfile ceiling is a SEPARATE constraint from the agent's own
+# build target above. ASM 9.7 could not parse Java 25's own classfile major
+# version (69) when retransforming java.security.KeyStore on a JDK 25
+# target, silently failing the transform (retransformClasses() itself
+# doesn't throw, so "[cert-agent] Initialized" printed anyway with no
+# working hook -- confirm any future JDK bump by checking for a real
+# Kafka/Tetragon event, not just that log line). Bumped to ASM 9.10.1,
+# which parses major version 69 fine.
 #
 # The build downloads asm-${ASM_VERSION}.jar and asm-commons-${ASM_VERSION}.jar
 # from Maven Central on first run and caches them in .deps/. Set OFFLINE=1 to
@@ -52,7 +72,7 @@ fi
 
 # ── Compile Java sources ────────────────────────────────────────────────────
 mkdir -p "$CLASSES_DIR"
-javac -source 11 -target 11 -encoding UTF-8 \
+javac --release 8 -encoding UTF-8 \
     -cp "$ASM_JAR:$ASM_COMMONS_JAR" \
     -d "$CLASSES_DIR" \
     src/com/security/certagent/*.java

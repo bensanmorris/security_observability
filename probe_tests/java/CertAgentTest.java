@@ -25,6 +25,7 @@
  */
 
 import java.io.*;
+import java.lang.management.ManagementFactory;
 import java.nio.file.*;
 import java.security.*;
 import java.security.cert.*;
@@ -55,8 +56,12 @@ public class CertAgentTest {
             }
         }
 
+        // ManagementFactory (not ProcessHandle, Java 9+) so this compiles and
+        // runs unmodified on a JDK 8 javac/target too -- see probe_tests/README.md.
+        String pid = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
+
         System.out.println("=== CertAgentTest ===");
-        System.out.printf("PID      : %d%n", ProcessHandle.current().pid());
+        System.out.printf("PID      : %s%n", pid);
         System.out.printf("cert     : %s%n", certPath);
         System.out.printf("interval : %d ms%n", intervalMs);
         System.out.println();

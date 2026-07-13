@@ -148,16 +148,22 @@ cd java/cert-agent && ./build.sh
 same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
 needed for local testing.
 
-**Supported target JDKs:** the agent is built once, against JDK 11
-(`-source 11 -target 11`), producing a classfile-version-55 JAR that's
-forward-compatible with newer JVMs. Validated end-to-end (retransform,
-classloader-split native load, and a real Tetragon event) on **Java 11, 17,
-21, and 25** target JVMs — no rebuild or per-version artifact needed to
-attach the same `cert-agent.jar`/`libcert_agent_stub.so` to any of them:
+**Supported target JDKs:** the agent is built once, against `--release 8`,
+producing a classfile-version-52 JAR that's forward-compatible with newer
+JVMs. Validated end-to-end (retransform, classloader-split native load,
+and a real Tetragon event) on **Java 8, 11, 17, 21, and 25** target JVMs —
+no rebuild or per-version artifact needed to attach the same
+`cert-agent.jar`/`libcert_agent_stub.so` to any of them:
 
 ```bash
 # Run the target JVM under a specific JDK by invoking its java binary
 # directly, without touching the system default `java`/`javac`:
+
+# Java 8 (adjust path to the installed JDK 8 home; recompile CertAgentTest.java
+# with this javac first -- a classfile built by JDK 11+'s javac can't load on 8)
+/usr/lib/jvm/java-1.8.0-openjdk*/bin/javac -d /tmp/jdk8test probe_tests/java/CertAgentTest.java
+/usr/lib/jvm/java-1.8.0-openjdk*/bin/java -cp /tmp/jdk8test CertAgentTest \
+    test-certs/valid.crt 5000
 
 # Java 11
 java -cp probe_tests/java CertAgentTest test-certs/valid.crt 5000
@@ -176,10 +182,27 @@ java -cp probe_tests/java CertAgentTest test-certs/valid.crt 5000
 ```
 
 The `jattach` attach command below is identical regardless of the target
-JVM's version. Success looks the same on all four: `[cert-agent]
+JVM's version. Success looks the same on all five: `[cert-agent]
 Initialized — intercepting KeyStore.setCertificateEntry` in the target JVM's
 output, and a `🔍 Detected in-memory certificate:
 uprobe://java_cert_agent_write/...` line in `cert_analyzer`'s log.
+
+**JDK 8 needed a rebuild, not just validation — the opposite direction from
+JDK 25's fix.** Unlike 11→17→21→25, which are all forward compatible from
+an 11-built JAR, an unmodified Java 8 target JVM cannot load a
+classfile-version-55 (built at `--release 11`) JAR at all:
+`UnsupportedClassVersionError` on the agent's own `CertAgent.class`, thrown
+straight out of `sun.instrument.InstrumentationImpl`, agent fails to start
+outright (no silent partial failure like JDK 25's ASM issue — this one is
+loud). The agent source has no post-Java-8 API dependency (confirmed:
+compiles clean at `--release 8`) and bundled ASM 9.10.1's own classes are
+classfile version 49 (Java 5), so lowering the build target from 11 to 8 in
+`build.sh` costs nothing on newer targets while making Java 8 work — one
+artifact now covers 8 through 25 instead of needing a separate JDK-8-only
+build. `CertAgentTest.java` itself also used `ProcessHandle` (Java 9+) for
+its PID, which doesn't compile under a JDK 8 javac at all regardless of
+`--release`; switched to `ManagementFactory.getRuntimeMXBean().getName()`,
+which works unmodified on 8 through 25.
 
 **One JDK 21-specific difference:** dynamic agent attach prints a JVM-level
 warning there —
