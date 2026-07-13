@@ -152,8 +152,8 @@ needed for local testing.
 (`-source 11 -target 11`), producing a classfile-version-55 JAR that's
 forward-compatible with newer JVMs. Validated end-to-end (retransform,
 classloader-split native load, and a real Tetragon event) on **Java 11, 17,
-and 21** target JVMs — no rebuild or per-version artifact needed to attach
-the same `cert-agent.jar`/`libcert_agent_stub.so` to any of them:
+21, and 25** target JVMs — no rebuild or per-version artifact needed to
+attach the same `cert-agent.jar`/`libcert_agent_stub.so` to any of them:
 
 ```bash
 # Run the target JVM under a specific JDK by invoking its java binary
@@ -169,10 +169,14 @@ java -cp probe_tests/java CertAgentTest test-certs/valid.crt 5000
 # Java 21 (adjust path to the installed JDK 21 home)
 /usr/lib/jvm/java-21-openjdk-*/bin/java -cp probe_tests/java CertAgentTest \
     test-certs/valid.crt 5000
+
+# Java 25 (adjust path to the installed JDK 25 home)
+/usr/lib/jvm/java-25-openjdk/bin/java -cp probe_tests/java CertAgentTest \
+    test-certs/valid.crt 5000
 ```
 
 The `jattach` attach command below is identical regardless of the target
-JVM's version. Success looks the same on all three: `[cert-agent]
+JVM's version. Success looks the same on all four: `[cert-agent]
 Initialized — intercepting KeyStore.setCertificateEntry` in the target JVM's
 output, and a `🔍 Detected in-memory certificate:
 uprobe://java_cert_agent_write/...` line in `cert_analyzer`'s log.
@@ -188,6 +192,33 @@ This is only a warning on 21 (attach still succeeds); it's the same
 mechanism `-XX:-EnableDynamicAgentLoading` controls. Don't mistake this
 warning for a failure — check for the `[cert-agent] Initialized` line and a
 real Tetragon/Kafka event, not just the absence of warnings.
+
+**JDK 25 required a real fix, not just validation.** The bundled ASM
+library (was 9.7) couldn't parse Java 25's own classfile major version
+(69) — `CertTransformer`'s retransform of `java.security.KeyStore` failed
+silently (`retransformClasses()` itself doesn't throw just because one
+registered transformer's `transform()` call fails, so `[cert-agent]
+Initialized` printed anyway with **no working hook** — no
+`uprobe://java_cert_agent_write` event ever fired). Fixed by bumping
+`ASM_VERSION` to `9.10.1` in `build.sh` (confirmed to parse major version
+69 correctly); re-verified 11/17/21 still work unmodified with the newer
+ASM. **Lesson for testing future JDKs:** always confirm a real
+Tetragon/Kafka event fires, not just the `[cert-agent] Initialized` log
+line — that line prints regardless of whether the transform actually
+succeeded.
+
+JDK 25 also produces its own new warning on attach, in addition to the
+JDK 21-style dynamic-agent-loading one:
+```
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.security.certagent.NativeBridge in an unnamed module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+```
+Also just a warning today (`System.load` still succeeds) — this is the
+JNI native-access restriction (JEP 472-era), separate from the dynamic-attach
+one. Same caveat applies: a future JDK may enforce `--enable-native-access`
+by default, at which point this becomes a real blocker requiring the flag
+to be added to the target JVM's startup command.
 
 **End-to-end test procedure:**
 

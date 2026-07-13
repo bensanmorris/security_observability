@@ -137,10 +137,12 @@ ASM is the lower-level choice and is appropriate here because the target (`java.
 **Why `COMPUTE_MAXS` and not `COMPUTE_FRAMES`?**
 `COMPUTE_FRAMES` causes ASM to call `getCommonSuperClass` to compute stack-map frames, which internally uses `Class.forName`. Under Java 11's module system, resolving types across named/unnamed module boundaries during dynamic retransformation fails because the bootstrap `ClassWriter` can't resolve types that live in the application's module graph. `COMPUTE_MAXS` avoids this entirely — it only recomputes max-stack and max-locals while preserving the existing stack-map frames from the `ClassReader`. Inserting a single `invokestatic` call at method entry doesn't invalidate any existing frames, so this is sufficient.
 
-**Does this still hold on JDK 17, which makes strong module encapsulation the permanent default?** Yes — validated end-to-end with the unmodified JDK-11-built agent JAR attached to a JDK 17 target JVM: `retransformClasses(KeyStore.class)` succeeded and events flowed through to `cert_analyzer` with no code changes. `COMPUTE_MAXS`'s whole point is avoiding `getCommonSuperClass`/`Class.forName` entirely, so it was never actually exposed to JDK 17's stricter default — the fix generalizes for free rather than needing a JDK-17-specific variant. **Also validated on JDK 21** the same way, with the same result — retransform succeeded unmodified.
-
 **Why does the transformer call `inst.retransformClasses(KeyStore.class)`?**
 When the agent is injected dynamically via `jattach`, `KeyStore` is already loaded. Without retransformation the instrumentation only applies to classes loaded after the agent attaches. Calling `retransformClasses` forces the JVM to re-run the transformer against the already-loaded `KeyStore` bytecode so the hook is active immediately, not just for future class loads.
+
+**What broke on JDK 25, if `COMPUTE_MAXS` already sidesteps the JPMS issue?** A completely different failure, caught by testing rather than assumed away: ASM 9.7 (the version bundled at the time) throws `IllegalArgumentException: Unsupported class file major version 69` when it tries to *parse* `KeyStore`'s own bytecode on a JDK 25 target — major version 69 is Java 25's classfile format, and ASM 9.7's `ClassReader` only recognized versions through Java 22 (major 66). This is an ASM library ceiling, unrelated to `COMPUTE_MAXS`/JPMS or the classloader split. The dangerous part: `ClassFileTransformer.transform()` throwing is swallowed by the JVM per the `java.lang.instrument` spec (the original, unmodified bytecode is kept for that class, and `retransformClasses()` itself doesn't throw) — so `[cert-agent] Initialized` printed anyway, with **no working hook**, and no `uprobe://java_cert_agent_write` event ever fired. Only visible via a `[cert-agent] Transformation failed for java/security/KeyStore: ...` line the transformer itself logs, or by checking for a real Kafka event rather than trusting the initialization log line. Fixed by bumping to ASM 9.10.1 (confirmed to parse major version 69 correctly) in `probe_tests/java/cert-agent/build.sh`.
+
+**Does the JPMS-avoidance argument (`COMPUTE_MAXS`) still hold on JDK 17, 21, and 25?** Yes on all three, once the ASM ceiling above is separately accounted for — validated end-to-end with the same JDK-11-built agent JAR attached to JDK 17, 21, and 25 target JVMs: `retransformClasses(KeyStore.class)` succeeded and events flowed through to `cert_analyzer` with no source changes to `CertTransformer.java` itself. `COMPUTE_MAXS`'s whole point is avoiding `getCommonSuperClass`/`Class.forName` entirely, so it's never actually exposed to any of these JDKs' stricter module defaults — that fix generalizes for free. The ASM *library version* is the separate, real constraint that needed bumping for JDK 25.
 
 ---
 
@@ -222,6 +224,15 @@ WARNING: If a serviceability tool is not in use, please run with -Djdk.instrumen
 WARNING: Dynamic loading of agents will be disallowed by default in a future release
 ```
 — but `retransformClasses`, the classloader split, and the full Tetragon/Kafka event chain all worked identically to Java 11 and 17, no code or deployment changes needed. This warning is cosmetic today; it becomes an actual blocker only if a JVM is explicitly started with `-XX:-EnableDynamicAgentLoading`, or once a future JDK release flips the *default* to disallow (the warning text itself says this is coming) — at that point the static-injection fallback below becomes the only option for that JVM.
+
+**JDK 25 adds a second, separate warning on top of the one above** — the JNI native-access restriction (part of the JEP 472-era phase-out of unrestricted native access), triggered by `NativeBridge`'s `System.load` call:
+```
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.security.certagent.NativeBridge in an unnamed module
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+```
+Also just a warning today — confirmed `System.load` still succeeds and the full event chain still fires. Same shape of risk as the JDK 21 dynamic-agent-loading warning: harmless now, but a future JDK enforcing `--enable-native-access` by default would need that flag added to the target JVM's startup command (an operator-side change, not something the deployer or agent can add after the fact for an already-running JVM it doesn't control the launch command of).
 
 **How does the deployer surface the static flag when dynamic attach fails?**
 When `jattach` returns a non-zero exit code, the deployer reads `/proc/<pid>/cmdline` to reconstruct the original command line and logs:

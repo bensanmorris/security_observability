@@ -8,17 +8,28 @@
 # The JAR is compiled at -source/-target 11 regardless of which JDK's javac
 # builds it, producing a classfile-version-55 JAR that's forward-compatible
 # with newer JVMs -- one build artifact serves multiple target JVM versions.
-# Validated end-to-end (unmodified, no rebuild) on Java 11, 17, and 21
-# target JVMs; see probe_tests/README.md and extras/PRESENTATION-QA.md.
+# Validated end-to-end on Java 11, 17, 21, and 25 target JVMs (11/17/21
+# unmodified; 25 required bumping ASM_VERSION below -- see the note further
+# down); see probe_tests/README.md and extras/PRESENTATION-QA.md.
 #
-# The build downloads asm-9.7.jar and asm-commons-9.7.jar from Maven Central
-# on first run and caches them in .deps/. Set OFFLINE=1 to skip the download
-# if they are already present.
+# NOTE: this is about the *target* JVM's bytecode, which CertTransformer
+# must parse with ASM at retransform time -- ASM's own supported-classfile
+# ceiling is a SEPARATE constraint from the agent's own -source/-target 11.
+# ASM 9.7 could not parse Java 25's own classfile major version (69) when
+# retransforming java.security.KeyStore on a JDK 25 target, silently
+# failing the transform (retransformClasses() itself doesn't throw, so
+# "[cert-agent] Initialized" printed anyway with no working hook -- confirm
+# any future JDK bump by checking for a real Kafka/Tetragon event, not just
+# that log line). Bumped to ASM 9.10.1, which parses major version 69 fine.
+#
+# The build downloads asm-${ASM_VERSION}.jar and asm-commons-${ASM_VERSION}.jar
+# from Maven Central on first run and caches them in .deps/. Set OFFLINE=1 to
+# skip the download if they are already present.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 JAVA_HOME="${JAVA_HOME:-$(java -XshowSettings:all -version 2>&1 | grep 'java.home' | awk '{print $3}')}"
-ASM_VERSION="9.7"
+ASM_VERSION="9.10.1"
 DEPS_DIR=".deps"
 ASM_JAR="$DEPS_DIR/asm-${ASM_VERSION}.jar"
 ASM_COMMONS_JAR="$DEPS_DIR/asm-commons-${ASM_VERSION}.jar"

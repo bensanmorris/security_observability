@@ -12,11 +12,14 @@
 # Note this only affects which JDK's <jni.h> the native stub compiles
 # against -- JNI ABI is stable across JDK versions, so the resulting
 # cert-agent.jar/libcert_agent_stub.so built here are validated to run
-# unmodified against Java 11, 17, and 21 *target* JVMs (the JVM the agent
-# gets attached to). No per-version subpackages needed unless that
-# assumption is ever disproven. Note JDK 21 targets print a cosmetic
-# "Dynamic loading of agents" warning on attach but still succeed --
-# see extras/PRESENTATION-QA.md's "Dynamic vs Static Injection" section.
+# against Java 11, 17, 21, and 25 *target* JVMs (the JVM the agent gets
+# attached to). No per-version subpackages needed unless that assumption
+# is ever disproven. Note JDK 21/25 targets print cosmetic warnings on
+# attach (dynamic agent loading / restricted native access respectively)
+# but still succeed -- see extras/PRESENTATION-QA.md's "Dynamic vs Static
+# Injection" section. JDK 25 target support requires the bundled ASM
+# version to be 9.8+ (its ClassReader can't parse Java 25's own classfile
+# major version otherwise) -- see probe_tests/java/cert-agent/build.sh.
 #
 # SPDX-License-Identifier: Apache-2.0
 
