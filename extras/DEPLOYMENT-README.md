@@ -78,7 +78,7 @@ The RPM stamps two read-only version constants into a systemd drop-in at build t
 ```ini
 # /usr/lib/systemd/system/cert-analyzer.service.d/version.conf
 [Service]
-Environment=TETRAGON_BUILD_VERSION=v1.1.0
+Environment=TETRAGON_BUILD_VERSION=v1.7.0
 Environment=CERT_ANALYZER_VERSION=1.0.0
 ```
 
@@ -112,14 +112,14 @@ sudo dnf install python3.11 python3.11-devel rpm-build git gcc
 Run the build script from the repository root:
 
 ```bash
-# Build against the default Tetragon version (v1.1.0)
-./rpm/build-rpm.sh
+# Build against the default Tetragon version (v1.7.0)
+./extras/build-rpm.sh
 
 # Build against a specific Tetragon version
-./rpm/build-rpm.sh --tetragon-version v1.2.0
+./extras/build-rpm.sh --tetragon-version v1.2.0
 
 # Build with an explicit version string
-./rpm/build-rpm.sh --version 1.0.0 --release 1
+./extras/build-rpm.sh --version 1.0.0 --release 1
 ```
 
 The version is auto-detected from the git tag if building from a tagged commit, or set to `0.0.0~git<sha>` for snapshot builds. The resulting RPM is written to `~/rpmbuild/RPMS/<arch>/`.
@@ -322,7 +322,7 @@ sudo dnf upgrade ~/rpmbuild/RPMS/x86_64/cert-analyzer-<new-version>.<arch>.rpm
 If rebuilding without a new git commit (i.e. the version string is unchanged), increment the release number to ensure dnf recognises it as a newer package:
 
 ```bash
-./build-rpm.sh --release 2
+./extras/build-rpm.sh --release 2
 sudo dnf upgrade ~/rpmbuild/RPMS/x86_64/cert-analyzer-0.0.0~git<sha>-2.el9.x86_64.rpm
 ```
 
@@ -362,9 +362,11 @@ Confirm each node meets the requirements before proceeding:
 
 ### 2. Build and Push the cert-analyzer Image
 
-Run the following on your build machine:
+Run the following on your build machine (the scripts assume `extras/` as the working directory):
 
 ```bash
+cd extras/
+
 # Generate Tetragon gRPC protobuf bindings (must match your Tetragon version)
 chmod +x generate_tetragon_protos.sh
 ./generate_tetragon_protos.sh
@@ -421,8 +423,10 @@ Ensure all nodes can pull from your internal registry. On each node:
 
 ```bash
 helm repo add cilium https://helm.cilium.io
-helm install tetragon cilium/tetragon -n kube-system
+helm install tetragon cilium/tetragon --version 1.7.0 -n kube-system
 ```
+
+Pin `--version` to match the `TETRAGON_VERSION` the cert-analyzer image was built against (see step 2) — the two must stay in lockstep or the `TetragonVersionMismatch` alert will fire.
 
 Review the default RBAC and security context — Tetragon requires elevated privileges to load eBPF programs.
 
@@ -437,14 +441,22 @@ sudo systemctl status tetragon
 
 ### 5. Load Tetragon Tracing Policies
 
-These policies tell Tetragon what to intercept. All three must be loaded or certificate events will not be captured.
+These policies tell Tetragon what to intercept. The two top-level policies are required for core certificate-file-access and TLS-connection detection; the `experimental/` policies add in-memory OpenSSL/Java cert detection and depend on host-specific library paths (see caveat below).
+
+`tetragon-policies/apply-policies.sh` automates loading the right set for the current host — including picking the correct OpenSSL variant (`openssl3-cert-load.yaml`, `openssl3-cert-load-rhel8.yaml`, or `openssl1_1-cert-load.yaml`) based on what's actually installed — and is the recommended way to load policies rather than applying files by hand:
+
+```bash
+sudo tetragon-policies/apply-policies.sh
+```
+
+To apply individual files by hand instead:
 
 **Kubernetes:**
 
 ```bash
 kubectl apply -f tetragon-policies/certificate-file-access.yaml
-kubectl apply -f tetragon-policies/openssl-cert-load.yaml
-kubectl apply -f tetragon-policies/tls-service-tracking.yaml
+kubectl apply -f tetragon-policies/tcp-connect-tls.yaml
+kubectl apply -f tetragon-policies/experimental/tls-service-tracking.yaml
 
 # Verify
 kubectl get tracingpolicies
@@ -454,12 +466,14 @@ kubectl get tracingpolicies
 
 ```bash
 sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tcp-connect-tls.yaml
+sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/experimental/tls-service-tracking.yaml
 
 # Verify
 sudo /usr/local/bin/tetra tracingpolicy list
 ```
+
+**Known gap on containerized/RHCOS nodes**: the `openssl3-cert-load`, `java-fips-nss-cert`, and `java-non-fips-cert` experimental policies are host-uprobe policies that hook a specific absolute host library/agent path. If that path doesn't exist on the node (e.g. a bare RHCOS/minimal node with no host-level OpenSSL 3 or Java agent installed), Tetragon logs `adding tracing policy failed: open <path>: no such file or directory` and the policy simply doesn't attach — expected, not a misconfiguration, unless those libraries/agents are actually present at those exact host paths.
 
 Confirm that tracing policies survive node reboots — configure them to load automatically via systemd or your configuration management tooling.
 
@@ -468,7 +482,7 @@ Confirm that tracing policies survive node reboots — configure them to load au
 Required on RHEL9 nodes running SELinux in enforcing mode. Skipping this step may cause silent failures when the analyzer attempts to access the Tetragon socket or certificate directories.
 
 ```bash
-cd selinux/
+cd extras/selinux/
 sudo checkmodule -M -m -o cert-analyzer.mod cert-analyzer.te
 sudo semodule_package -o cert-analyzer.pp -m cert-analyzer.mod
 sudo semodule -i cert-analyzer.pp
@@ -479,10 +493,10 @@ sudo semodule -l | grep cert-analyzer
 
 ### 7. Deploy cert-analyzer as a DaemonSet
 
-Update `kubernetes/deployment.yaml` to reference your internal registry image, then apply:
+Update `extras/kubernetes/deployment.yaml` to reference your internal registry image, then apply:
 
 ```bash
-kubectl apply -f kubernetes/deployment.yaml
+kubectl apply -f extras/kubernetes/deployment.yaml
 
 # Verify one pod per node
 kubectl get pods -n kube-system -l app=cert-expiry-monitor -o wide
@@ -554,7 +568,7 @@ scrape_configs:
 Apply the pre-built alerting rules:
 
 ```bash
-kubectl apply -f kubernetes/prometheus-rules.yaml
+kubectl apply -f extras/kubernetes/prometheus-rules.yaml
 ```
 
 This creates the following alerts:
@@ -586,7 +600,7 @@ Configure `alertmanager.yml` to route notifications to your chosen channel (Slac
 
 1. Open Grafana
 2. Go to Dashboards → Import
-3. Upload `examples/grafana-dashboard.json`
+3. Upload `extras/examples/grafana-dashboard.json`
 4. Select your Prometheus datasource
 
 ---
@@ -894,7 +908,7 @@ cert_analyzer_cache_password_failed_size
 cert_analyzer_cache_max_size
 ```
 
-The `CertAnalyzerCacheNearCapacity` alert in `kubernetes/prometheus-rules.yaml` fires when `known_certs` exceeds 90% of its cap for more than 10 minutes. If this alert fires, increase `CACHE_MAX_SIZE` in `deployment.yaml` and raise the container memory limit proportionally.
+The `CertAnalyzerCacheNearCapacity` alert in `extras/kubernetes/prometheus-rules.yaml` fires when `known_certs` exceeds 90% of its cap for more than 10 minutes. If this alert fires, increase `CACHE_MAX_SIZE` in `deployment.yaml` and raise the container memory limit proportionally.
 
 ---
 
@@ -904,7 +918,7 @@ Before going live, validate the full pipeline end to end in a staging environmen
 
 ```bash
 # Generate test certificates with various expiry dates
-python3 test_analyzer.py
+python3 extras/test_analyzer.py
 
 # Manually trigger detection
 openssl req -x509 -newkey rsa:2048 -nodes \
