@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Build the cert-agent JAR and native stub library.
 #
-# Requires:
-#   - java-11-openjdk-devel (javac, jar, java)
+# Requires (build toolchain):
+#   - Any JDK 11+ devel package (javac, jar, java) -- e.g. java-11-openjdk-devel
 #   - gcc
+#
+# The JAR is compiled at -source/-target 11 regardless of which JDK's javac
+# builds it, producing a classfile-version-55 JAR that's forward-compatible
+# with newer JVMs -- one build artifact serves multiple target JVM versions.
+# Validated end-to-end (unmodified, no rebuild) on both Java 11 and Java 17
+# target JVMs; see probe_tests/README.md and extras/PRESENTATION-QA.md.
 #
 # The build downloads asm-9.7.jar and asm-commons-9.7.jar from Maven Central
 # on first run and caches them in .deps/. Set OFFLINE=1 to skip the download

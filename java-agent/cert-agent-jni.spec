@@ -7,8 +7,14 @@
 # (libcert_agent_stub.so) is compiled during %%build because it links against
 # JNI headers and must target the correct JDK ABI.
 #
-# To target a different JDK, rebuild with:
+# To target a different JDK's devel headers at build time, rebuild with:
 #   rpmbuild --define '_java_version 17' ...
+# Note this only affects which JDK's <jni.h> the native stub compiles
+# against -- JNI ABI is stable across JDK versions, so the resulting
+# cert-agent.jar/libcert_agent_stub.so built here are validated to run
+# unmodified against both Java 11 and Java 17 *target* JVMs (the JVM
+# the agent gets attached to). No per-version subpackages needed unless
+# that assumption is ever disproven.
 #
 # SPDX-License-Identifier: Apache-2.0
 

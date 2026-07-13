@@ -137,6 +137,8 @@ ASM is the lower-level choice and is appropriate here because the target (`java.
 **Why `COMPUTE_MAXS` and not `COMPUTE_FRAMES`?**
 `COMPUTE_FRAMES` causes ASM to call `getCommonSuperClass` to compute stack-map frames, which internally uses `Class.forName`. Under Java 11's module system, resolving types across named/unnamed module boundaries during dynamic retransformation fails because the bootstrap `ClassWriter` can't resolve types that live in the application's module graph. `COMPUTE_MAXS` avoids this entirely — it only recomputes max-stack and max-locals while preserving the existing stack-map frames from the `ClassReader`. Inserting a single `invokestatic` call at method entry doesn't invalidate any existing frames, so this is sufficient.
 
+**Does this still hold on JDK 17, which makes strong module encapsulation the permanent default?** Yes — validated end-to-end with the unmodified JDK-11-built agent JAR attached to a JDK 17 target JVM: `retransformClasses(KeyStore.class)` succeeded and events flowed through to `cert_analyzer` with no code changes. `COMPUTE_MAXS`'s whole point is avoiding `getCommonSuperClass`/`Class.forName` entirely, so it was never actually exposed to JDK 17's stricter default — the fix generalizes for free rather than needing a JDK-17-specific variant.
+
 **Why does the transformer call `inst.retransformClasses(KeyStore.class)`?**
 When the agent is injected dynamically via `jattach`, `KeyStore` is already loaded. Without retransformation the instrumentation only applies to classes loaded after the agent attaches. Calling `retransformClasses` forces the JVM to re-run the transformer against the already-loaded `KeyStore` bytecode so the hook is active immediately, not just for future class loads.
 
@@ -149,6 +151,8 @@ When the agent is injected dynamically via `jattach`, `KeyStore` is already load
 
 **Why can't `NativeBridge.loadLibrary()` be called from `CertAgent.setup()`?**
 The JVM only allows a native library to be associated with one classloader. If `CertAgent.setup()` (running in the agent classloader) calls `System.load(libPath)`, then when the bootstrap classloader later initialises `NativeBridge` (triggered by the first `setCertificateEntry` call), its attempt to load the same library fails with "already loaded in another classloader" — leaving `loaded = false` in the bootstrap copy. The fix is to not load the library in the agent classloader at all. Instead, `CertAgent.setup()` writes the path into the system property `com.security.certagent.lib`, and `NativeBridge`'s static initialiser (which runs in the bootstrap context) reads the property and calls `System.load` — so the library is owned exclusively by the bootstrap classloader.
+
+**Is this trick JDK-version-specific?** No — `appendToBootstrapClassLoaderSearch` and classloader/native-library association semantics have been stable since Java 9, well before either of this project's supported versions. Confirmed by direct testing: the unmodified Java-11-built agent's classloader split worked without any `UnsatisfiedLinkError` when attached to a JDK 17 target JVM.
 
 ---
 
@@ -198,7 +202,7 @@ jattach <pid> load instrument false /opt/cert-agent/cert-agent.jar=/opt/cert-age
 **When does static injection apply and how do you use it?**
 Static injection is required when:
 - The JVM was started with `-XX:+DisableAttachMechanism`, which prevents any runtime attach
-- Java 21+ with `-XX:-EnableDynamicAgentLoading` (the default on JDK 21 is a warning; future versions may enforce it)
+- Java 21+ with `-XX:-EnableDynamicAgentLoading` (the default on JDK 21 is a warning; future versions may enforce it) — confirmed this restriction does *not* apply to Java 17, which dynamically attaches without any warning or rejection
 - The JVM process owner cannot be matched by the deployer (e.g. a heavily sandboxed container)
 - Short-lived JVM processes that may not survive the 30-second scan window
 

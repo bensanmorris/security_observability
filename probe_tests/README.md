@@ -148,6 +148,31 @@ cd java/cert-agent && ./build.sh
 same path `java-non-fips-cert.yaml` expects in production, so no yaml edits are
 needed for local testing.
 
+**Supported target JDKs:** the agent is built once, against JDK 11
+(`-source 11 -target 11`), producing a classfile-version-55 JAR that's
+forward-compatible with newer JVMs. Validated end-to-end (retransform,
+classloader-split native load, and a real Tetragon event) on **both Java 11
+and Java 17** target JVMs — no rebuild or per-version artifact needed to run
+the same `cert-agent.jar`/`libcert_agent_stub.so` against a JDK 17 target:
+
+```bash
+# Run the target JVM under a specific JDK by invoking its java binary
+# directly, without touching the system default `java`/`javac`:
+
+# Java 11
+java -cp probe_tests/java CertAgentTest test-certs/valid.crt 5000
+
+# Java 17 (adjust path to the installed JDK 17 home)
+/usr/lib/jvm/java-17-openjdk-*/bin/java -cp probe_tests/java CertAgentTest \
+    test-certs/valid.crt 5000
+```
+
+The `jattach` attach command below is identical regardless of the target
+JVM's version. Success looks the same on both: `[cert-agent] Initialized —
+intercepting KeyStore.setCertificateEntry` in the target JVM's output, and a
+`🔍 Detected in-memory certificate: uprobe://java_cert_agent_write/...` line
+in `cert_analyzer`'s log.
+
 **End-to-end test procedure:**
 
 **Step 1 — Load the Tetragon policy** (from the repo root):
