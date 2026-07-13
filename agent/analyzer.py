@@ -2412,7 +2412,17 @@ class CertificateAnalyzer:
 
                 cert_count = 0
                 for cert_file in path_obj.rglob('*'):
-                    if not cert_file.is_file() or not self.is_cert_path(str(cert_file)):
+                    # Skip symlinks and directory-hash/ -- update-ca-trust's
+                    # extracted/pem/directory-hash/ re-exposes the same certs
+                    # under extra paths purely for OpenSSL CApath subject-hash
+                    # lookups: some entries are symlinks (bundle aliases,
+                    # per-CA hash-named lookups) but others are genuine
+                    # duplicate regular files (one per CA, alongside the
+                    # symlinked hash lookup for it) -- either way it's the same
+                    # cert content already covered by the parent bundle file,
+                    # so skip the whole directory rather than just symlinks.
+                    if (cert_file.is_symlink() or 'directory-hash' in cert_file.parts
+                            or not cert_file.is_file() or not self.is_cert_path(str(cert_file))):
                         continue
 
                     cert_path = str(cert_file)
