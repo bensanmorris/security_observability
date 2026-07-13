@@ -300,7 +300,9 @@ def main():
                                    large_file_metrics_cap=large_file_metrics_cap,
                                    large_file_byte_cap=large_file_byte_cap,
                                    max_concurrent_background_threads=max_concurrent_background_threads,
-                                   max_processes_per_cert=max_processes_per_cert)
+                                   max_processes_per_cert=max_processes_per_cert,
+                                   scan_paths=scan_paths,
+                                   scan_interval_seconds=scan_interval)
 
     health = HealthServer(
         analyzer=analyzer,

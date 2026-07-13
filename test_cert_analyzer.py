@@ -4172,6 +4172,41 @@ class TestScrapeIntervalMetric:
         assert collector._last_scrape is None
 
 
+class TestScanConfigMetrics:
+    """
+    Tests for scan_paths/scan_interval_seconds surfacing in Prometheus:
+    scan_paths as a cert_analyzer_config_info label (Grafana's Analyzer
+    Configuration table), scan_interval_seconds as its own graphable Gauge
+    (cert_analyzer_scan_interval_seconds) since it's a real number rather
+    than a string config value.
+    """
+
+    def _make_analyzer(self, **kwargs):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        return CertificateAnalyzer(tetragon_address='unix:///dev/null', **kwargs)
+
+    def test_scan_paths_appears_in_config_info(self):
+        a = self._make_analyzer(scan_paths=['/etc/pki/ca-trust/extracted/pem/', '/etc/ssl'])
+        samples = list(a.metrics.config_info.collect())[0].samples
+        assert samples[0].labels['scan_paths'] == '/etc/pki/ca-trust/extracted/pem/,/etc/ssl'
+
+    def test_no_scan_paths_yields_empty_config_info_field(self):
+        a = self._make_analyzer()
+        samples = list(a.metrics.config_info.collect())[0].samples
+        assert samples[0].labels['scan_paths'] == ''
+
+    def test_scan_interval_seconds_gauge_reflects_configured_value(self):
+        a = self._make_analyzer(scan_interval_seconds=1800)
+        samples = list(a.metrics.scan_interval_seconds.collect())[0].samples
+        assert samples[0].value == 1800
+        assert samples[0].labels['node_name'] == a.metrics._node_name
+
+
 class TestScrapeThrottleMiddleware:
     """
     Tests for _ScrapeThrottleMiddleware, which enforces a minimum interval

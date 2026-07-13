@@ -91,7 +91,9 @@ class CertificateAnalyzer:
                  large_file_metrics_cap: int = 300,
                  large_file_byte_cap: int = 2 * 1024 * 1024,
                  max_concurrent_background_threads: int = 20,
-                 max_processes_per_cert: int = 20):
+                 max_processes_per_cert: int = 20,
+                 scan_paths: Optional[list] = None,
+                 scan_interval_seconds: int = 3600):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -126,6 +128,8 @@ class CertificateAnalyzer:
         # forever — unbounded regardless of known_certs cache size, since the
         # cert entry itself may never be evicted. See _record_cert_process_access.
         self._max_processes_per_cert = max_processes_per_cert
+        self._scan_paths = list(scan_paths) if scan_paths else []
+        self._scan_interval_seconds = scan_interval_seconds
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.metrics.config_info.labels(node_name=_NODE_NAME).info({
             'checksum_enabled':                  str(checksum_enabled).lower(),
@@ -144,7 +148,9 @@ class CertificateAnalyzer:
             'max_concurrent_background_threads':   str(max_concurrent_background_threads),
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
+            'scan_paths':                          ','.join(self._scan_paths),
         })
+        self.metrics.scan_interval_seconds.labels(node_name=_NODE_NAME).set(scan_interval_seconds)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
         # "already known" check do an O(1) dict lookup instead of scanning every
         # entry in known_certs (which used to cost real, sustained CPU once the

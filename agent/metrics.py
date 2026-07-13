@@ -368,6 +368,16 @@ class PrometheusMetrics:
             ['node_name'],
         )
 
+        # Separate Gauge rather than another config_info label: it's a real
+        # number (seconds), so it's directly graphable/alertable on its own,
+        # unlike the string-valued fields folded into the info metric above.
+        # Also populated by CertificateAnalyzer.__init__, same reason as above.
+        self.scan_interval_seconds = Gauge(
+            'cert_analyzer_scan_interval_seconds',
+            'Configured periodic filesystem scan interval, in seconds',
+            ['node_name'],
+        )
+
         # Registered directly with the registry rather than stored as a Gauge
         # attribute: its value is computed at scrape time (see collect()
         # above), not set imperatively like the other metrics here.
