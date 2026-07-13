@@ -93,6 +93,30 @@ sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 EOF
 dnf -y install grafana
 
+# Generated fresh per-instance so the admin account is never left on Grafana's
+# well-known admin/admin factory default while port 3000 is open to 0.0.0.0/0
+# in the security group. Only takes effect on first start (Grafana seeds the
+# admin user from grafana.ini once, into its own sqlite DB) -- re-running this
+# script by hand against an already-initialized box will NOT reset it.
+set +x
+GRAFANA_ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -d '=+/' | cut -c1-24)
+cat <<EOF >> /etc/grafana/grafana.ini
+
+[security]
+admin_user = admin
+admin_password = ${GRAFANA_ADMIN_PASSWORD}
+EOF
+CREDFILE=/root/.grafana-admin-credentials
+cat <<EOF > "${CREDFILE}"
+# Grafana admin credentials, generated at provisioning time by user-data.sh.
+username: admin
+password: ${GRAFANA_ADMIN_PASSWORD}
+EOF
+chmod 600 "${CREDFILE}"
+unset GRAFANA_ADMIN_PASSWORD
+set -x
+echo "Grafana admin password generated -- see ${CREDFILE} (root-only) on this instance"
+
 cat <<'EOF' >> /etc/grafana/grafana.ini
 
 [auth.anonymous]
