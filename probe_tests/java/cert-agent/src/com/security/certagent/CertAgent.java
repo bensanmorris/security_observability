@@ -54,24 +54,44 @@ public class CertAgent {
 
         // KeyStore is a bootstrap class; NativeBridge must be on the bootstrap
         // classpath so it is visible from instrumented KeyStore methods.
-        addAgentJarToBootstrap(inst);
+        if (!addAgentJarToBootstrap(inst)) {
+            System.err.println("[cert-agent] INSTRUMENTATION FAILURE: could not add agent JAR to "
+                + "bootstrap classpath -- aborting, this JVM will NOT be monitored");
+            return;
+        }
 
         inst.addTransformer(new CertTransformer(), true /* canRetransform */);
 
         // Retransform KeyStore if it was already loaded before the agent attached.
+        boolean retransformFailed = false;
         for (Class<?> cls : inst.getAllLoadedClasses()) {
             if ("java.security.KeyStore".equals(cls.getName())) {
                 try {
                     inst.retransformClasses(cls);
                     System.out.println("[cert-agent] Retransformed java.security.KeyStore");
                 } catch (Exception e) {
-                    System.err.println("[cert-agent] Retransform failed: " + e.getMessage());
+                    retransformFailed = true;
+                    System.err.println("[cert-agent] INSTRUMENTATION FAILURE: retransform of "
+                        + "java.security.KeyStore failed -- " + e.getMessage());
                 }
                 break;
             }
         }
 
-        System.out.println("[cert-agent] Initialized — intercepting KeyStore.setCertificateEntry");
+        // Report a truthful status instead of an unconditional success message:
+        // only claim "Initialized" if nothing observable has already failed.
+        // CertTransformer.transform() can still fail later on a fresh KeyStore
+        // load after this point -- that path emits its own distinct
+        // "[cert-agent] INSTRUMENTATION FAILURE" line via CertTransformer
+        // itself when it happens, since there's nothing more to verify here
+        // synchronously.
+        if (retransformFailed || CertTransformer.hasFailed()) {
+            System.err.println("[cert-agent] Initialized WITH ERRORS -- certificate monitoring "
+                + "for this JVM may be incomplete. Search this log for "
+                + "'[cert-agent] INSTRUMENTATION FAILURE' for details.");
+        } else {
+            System.out.println("[cert-agent] Initialized — intercepting KeyStore.setCertificateEntry");
+        }
     }
 
     private static String resolveLibPath(String agentArgs) {
@@ -88,13 +108,15 @@ public class CertAgent {
         return null;
     }
 
-    private static void addAgentJarToBootstrap(Instrumentation inst) {
+    private static boolean addAgentJarToBootstrap(Instrumentation inst) {
         try {
             URL loc = CertAgent.class.getProtectionDomain().getCodeSource().getLocation();
             File agentJar = Paths.get(loc.toURI()).toFile();
             inst.appendToBootstrapClassLoaderSearch(new JarFile(agentJar));
+            return true;
         } catch (IOException | RuntimeException | java.net.URISyntaxException e) {
             System.err.println("[cert-agent] Could not add agent JAR to bootstrap classpath: " + e);
+            return false;
         }
     }
 }

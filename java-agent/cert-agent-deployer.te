@@ -13,8 +13,8 @@ module cert_agent_deployer 1.0;
 #   5. Loads the agent JAR over that socket
 
 require {
-    attribute domain;
     type unconfined_service_t;
+    type unconfined_t;
     type proc_t;
     type tmp_t;
     class process { ptrace signal signull };
@@ -24,10 +24,31 @@ require {
     class sock_file { write read getattr };
 }
 
-# ptrace and signal are needed to trigger the JVM attach listener.
-# Target is the domain attribute (all process types) because the JVM may run
-# as java_t, unconfined_t, or a site-specific type depending on the policy.
-allow unconfined_service_t domain:process { ptrace signal signull };
+# Custom attribute for "may be ptrace/signaled by cert-agent-deployer to
+# perform a JVM attach". Deliberately scoped this way instead of the
+# blanket `domain` attribute (which covers every confined type on the
+# host -- sshd_t, crond_t, init_t, ...): this daemon already runs as root
+# with CAP_SYS_PTRACE/CAP_KILL/CAP_SETUID/CAP_SETGID at the capability
+# layer, so `domain`-wide SELinux ptrace/signal on top of that meant a
+# compromise of this daemon carried SELinux-authorized reach into every
+# other confined service on the host, not just target JVMs -- removing
+# SELinux as an independent containment layer for this attack surface.
+#
+# Only unconfined_t is required here: it's the type most manually-launched
+# or otherwise-unlabeled JVM processes actually run as, and (unlike a
+# custom java_t) it's guaranteed present in stock RHEL/Fedora targeted
+# policy, so requiring it here can't cause `semodule -i` to fail to load
+# this whole module on a system that lacks some other, less universal type.
+# If a site runs its target JVMs under java_t or another site-specific
+# type, extend coverage with a small local module:
+#   require { type java_t; }
+#   typeattribute java_t cert_agent_jvm_target;
+attribute cert_agent_jvm_target;
+typeattribute unconfined_t cert_agent_jvm_target;
+
+# ptrace and signal are needed to trigger the JVM attach listener. Target
+# is cert_agent_jvm_target (see above), not the full `domain` attribute.
+allow unconfined_service_t cert_agent_jvm_target:process { ptrace signal signull };
 
 # /proc/<pid>/ traversal for JVM discovery and attach
 allow unconfined_service_t proc_t:file { read open getattr };
