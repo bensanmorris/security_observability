@@ -193,6 +193,47 @@ an authoritative allowed/denied answer for a specific ServiceAccount (unlike tes
 `oc apply` as `kubeadmin`/cluster-admin, whose own broad SCC access can mask whether the
 workload's actual ServiceAccount would really be admitted).
 
+### Configuration
+
+cert-analyzer resolves every setting through the precedence chain in `agent/config.py`:
+`/etc/cert-analyzer/cert-analyzer.conf` → environment variable → hardcoded default. The
+RPM/bare-metal install ships that conf file to `/etc/cert-analyzer/cert-analyzer.conf`
+(`root:cert-analyzer`, mode `640`), but **the OpenShift image ships no conf file at all** —
+`Containerfile` never copies one in, and `daemonset.yaml` mounts no ConfigMap at
+`/etc/cert-analyzer`. At startup `load_config()` finds nothing there, logs it at `debug`, and
+falls through cleanly to env vars — this is expected, not broken. In practice this means **on
+OpenShift, `daemonset.yaml`'s `env:` block is the only place cert-analyzer's configuration
+lives.**
+
+Currently set there:
+
+| Env var                          | Value                                             | Purpose                                  |
+|-----------------------------------|----------------------------------------------------|-------------------------------------------|
+| `TETRAGON_ADDR`                    | `unix:///var/run/tetragon/tetragon.sock`           | Tetragon gRPC socket (see fix above)      |
+| `METRICS_PORT`                     | `9090`                                              | Prometheus `/metrics` listener            |
+| `HEALTH_PORT`                      | `8086`                                              | `/healthz` / `/readyz` listener           |
+| `ALERT_THRESHOLD_DAYS`             | `30`                                                 | Cert-expiry warning threshold             |
+| `LOG_LEVEL`                        | `DEBUG`                                             | Application log verbosity                |
+| `CERT_SCAN_PATHS`                  | `/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki` | Periodic filesystem scan roots         |
+| `SCAN_INTERVAL_SECONDS`            | `3600`                                              | Periodic scan cadence                     |
+| `READINESS_GRACE_PERIOD_SECONDS`   | `60`                                                | Startup grace before `/readyz` can fail   |
+| `READINESS_STALENESS_SECONDS`      | `300`                                               | Max age of last-seen-event before not-ready |
+| `HOST_PREFIX`                      | `/host`                                             | Prefix for the `host-root` hostPath mount |
+
+To change a setting, edit the `env:` block in `daemonset.yaml` directly and re-apply — there's
+no ConfigMap to patch separately, and no in-cluster way to drop in a `cert-analyzer.conf`
+without adding one:
+
+```bash
+oc apply -f extras/openshift/daemonset.yaml
+oc rollout restart daemonset/cert-expiry-monitor -n certsight
+```
+
+Any `[section] key` handled by `cfg()`/`cfg_int()`/`cfg_float()` in `agent/config.py` that
+*isn't* listed above (e.g. `[cache]`/`[kafka]` options) still has an `env_var` fallback per that
+function's signature — check `agent/config.py` for the exact name before assuming a setting is
+unreachable on OpenShift.
+
 ---
 
 ## 4. Load Tetragon tracing policies
