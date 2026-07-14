@@ -672,9 +672,10 @@
                   "max_concurrent_background_threads": 14,
                   "max_processes_per_cert": 15,
                   "new_cert_events_per_second": 16,
-                  "alert_threshold_days": 17,
-                  "Value #B": 18,
-                  "scan_paths": 19
+                  "retry_queue_max_size": 17,
+                  "alert_threshold_days": 18,
+                  "Value #B": 19,
+                  "scan_paths": 20
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -696,7 +697,8 @@
                   "alert_threshold_days": "Alert Threshold (days)",
                   "scan_paths": "Scan Paths",
                   "Value #B": "Scan Interval (s)",
-                  "new_cert_events_per_second": "New Cert Rate Limit (events/s)"
+                  "new_cert_events_per_second": "New Cert Rate Limit (events/s)",
+                  "retry_queue_max_size": "Retry Queue Max Size"
                 }
               }
             }
@@ -2941,6 +2943,61 @@
                 ]
               }
             ]
+          }
+        },
+        {
+          "id": 51,
+          "title": "Retry Queue Depth",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 16,
+            "y": 112
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "cert_analyzer_retry_queue_depth{node_name=~\"$node\"}",
+              "legendFormat": "{{node_name}} queued",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
           }
         },
         {

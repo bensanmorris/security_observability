@@ -1149,11 +1149,19 @@ class TestNewCertRateLimiting:
     Bounds the CPU an attacker can force purely through certificate activity
     (e.g. writing many distinct cert files, or churning bind/connect-probe
     endpoints) with no config access -- see agent/analyzer.py's
-    _new_cert_rate_limiter / _TokenBucket, gated at the top of
-    analyze_certificate(), the single choke point all three trigger paths
-    (real-time Tetragon events, periodic_scan, large-file background thread)
-    funnel through for never-before-seen paths.
+    _new_cert_rate_limiter / _TokenBucket. analyze_certificate() itself is
+    pure parse-and-extract; the limiter is gated in
+    _try_process_new_certificate_file()/_analyze_and_finish_new_certificate_file(),
+    the shared choke point all trigger paths (real-time Tetragon events,
+    periodic_scan, large-file background thread, and the retry-queue
+    drainer) funnel through for never-before-seen paths. A throttled file is
+    queued (see TestRateLimitRetryQueue) rather than dropped.
     """
+
+    def _analyze_new(self, analyzer, path, process="test", pid=1, namespace=""):
+        return analyzer._analyze_and_finish_new_certificate_file(
+            path, process, pid, namespace, None, "", 0, "test-node",
+        )
 
     def test_exhausted_bucket_skips_new_file_without_erroring(self, analyzer, temp_dir):
         """Once tokens run out, a brand-new cert file is skipped (returns []) instead of parsed."""
@@ -1165,15 +1173,34 @@ class TestNewCertRateLimiting:
             cert, _ = TestCertificateGeneration.generate_certificate(f"rl{i}.example.com", 365)
             path = os.path.join(temp_dir, f"rl{i}.pem")
             TestCertificateGeneration.save_certificate_pem(cert, path)
-            results.append(analyzer.analyze_certificate(path, "test", 1))
+            results.append(self._analyze_new(analyzer, path))
 
         succeeded = [r for r in results if r]
         skipped = [r for r in results if not r]
         assert len(succeeded) == 2, "only the burst capacity (2 tokens) should succeed"
         assert len(skipped) == 3
 
-    def test_rate_limited_event_is_not_cached_as_known(self, analyzer, temp_dir):
-        """A skipped file must get another chance later, not be permanently marked as seen."""
+    def test_analyze_certificate_itself_is_not_rate_limited(self, analyzer, temp_dir):
+        """
+        analyze_certificate() is pure parse-and-extract -- the rate limiter
+        only applies via the wrapper. This pins that intentional split so a
+        future refactor doesn't accidentally re-couple them (or silently
+        drop gating from the wrapper's callers).
+        """
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0  # force exhausted
+        analyzer._new_cert_rate_limiter = bucket
+
+        cert, _ = TestCertificateGeneration.generate_certificate("direct.example.com", 365)
+        path = os.path.join(temp_dir, "direct.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        result = analyzer.analyze_certificate(path, "test", 1)
+        assert len(result) == 1
+
+    def test_rate_limited_event_is_not_cached_but_is_queued_for_retry(self, analyzer, temp_dir):
+        """A throttled file isn't marked known, but is queued for replay -- not silently dropped."""
         from agent.analyzer import _TokenBucket
         bucket = _TokenBucket(rate=1)
         bucket._tokens = 0  # force exhausted
@@ -1183,17 +1210,13 @@ class TestNewCertRateLimiting:
         path = os.path.join(temp_dir, "rl-retry.pem")
         TestCertificateGeneration.save_certificate_pem(cert, path)
 
-        result = analyzer.analyze_certificate(path, "test", 1)
+        result = self._analyze_new(analyzer, path)
         assert result == []
         assert path not in analyzer.processed_paths
         matching = [k for k in analyzer.known_certs.keys() if k.startswith(path + ":")]
         assert matching == []
-
-        # Once tokens are available again, the same path is analyzed normally.
-        analyzer._new_cert_rate_limiter = _TokenBucket(rate=10)
-        result = analyzer.analyze_certificate(path, "test", 1)
-        assert len(result) == 1
-        assert result[0].common_name == "rl-retry.example.com"
+        assert path in analyzer._retry_queue_paths
+        assert any(e.cert_path == path for e in analyzer._retry_queue)
 
     def test_rate_limited_event_increments_error_metric(self, analyzer, temp_dir):
         from agent.analyzer import _TokenBucket
@@ -1206,11 +1229,11 @@ class TestNewCertRateLimiting:
         TestCertificateGeneration.save_certificate_pem(cert, path)
 
         before = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited')._value.get()
-        analyzer.analyze_certificate(path, "test", 1)
+        self._analyze_new(analyzer, path)
         after = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited')._value.get()
         assert after == before + 1
 
-    def test_zero_rate_disables_limiter(self, analyzer, temp_dir):
+    def test_zero_rate_disables_limiter_and_never_queues(self, analyzer, temp_dir):
         """rate <= 0 is the escape hatch for operators who want it off entirely."""
         from agent.analyzer import _TokenBucket
         analyzer._new_cert_rate_limiter = _TokenBucket(rate=0)
@@ -1220,9 +1243,10 @@ class TestNewCertRateLimiting:
             cert, _ = TestCertificateGeneration.generate_certificate(f"unlimited{i}.example.com", 365)
             path = os.path.join(temp_dir, f"unlimited{i}.pem")
             TestCertificateGeneration.save_certificate_pem(cert, path)
-            results.append(analyzer.analyze_certificate(path, "test", 1))
+            results.append(self._analyze_new(analyzer, path))
 
         assert all(len(r) == 1 for r in results)
+        assert len(analyzer._retry_queue) == 0
 
     def test_token_bucket_refills_over_time(self):
         """Tokens regenerate at `rate`/sec, capped at `rate` -- not an infinite drain."""
@@ -1234,6 +1258,95 @@ class TestNewCertRateLimiting:
 
         time.sleep(0.25)  # ~2-3 tokens' worth of refill
         assert bucket.try_acquire()
+
+
+class TestRateLimitRetryQueue:
+    """
+    agent/analyzer.py's _enqueue_rate_limited_retry / _retry_queue -- gives a
+    throttled certificate file a guaranteed path back regardless of whether
+    it happens to live under scan_paths (periodic_scan's coverage) or gets
+    touched again naturally. Bounded FIFO so it can't become a second
+    unbounded memory sink for the same abuse the rate limiter defends
+    against. See TestRetryQueueDrainer (near the other background-monitor
+    tests) for the actual replay thread.
+    """
+
+    def _analyze_new(self, analyzer, path, process="test", pid=1, namespace=""):
+        return analyzer._analyze_and_finish_new_certificate_file(
+            path, process, pid, namespace, None, "", 0, "test-node",
+        )
+
+    def test_dedupes_same_path(self, analyzer, temp_dir):
+        """A path throttled twice while already queued doesn't get a second entry."""
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
+
+        cert, _ = TestCertificateGeneration.generate_certificate("dupe.example.com", 365)
+        path = os.path.join(temp_dir, "dupe.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        self._analyze_new(analyzer, path)
+        self._analyze_new(analyzer, path)
+
+        assert len(analyzer._retry_queue) == 1
+        assert list(analyzer._retry_queue_paths) == [path]
+
+    def test_drops_oldest_on_overflow(self, analyzer, temp_dir):
+        """At capacity, the oldest queued entry is dropped to make room for a new one."""
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
+        analyzer._retry_queue_max_size = 3
+
+        paths = []
+        for i in range(5):
+            cert, _ = TestCertificateGeneration.generate_certificate(f"overflow{i}.example.com", 365)
+            path = os.path.join(temp_dir, f"overflow{i}.pem")
+            TestCertificateGeneration.save_certificate_pem(cert, path)
+            paths.append(path)
+            self._analyze_new(analyzer, path)
+
+        assert len(analyzer._retry_queue) == 3
+        queued_paths = [e.cert_path for e in analyzer._retry_queue]
+        assert queued_paths == paths[2:], "oldest two should have been dropped, newest three remain"
+        assert set(analyzer._retry_queue_paths) == set(paths[2:])
+
+    def test_overflow_increments_dropped_metric(self, analyzer, temp_dir):
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
+        analyzer._retry_queue_max_size = 1
+
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped')._value.get()
+
+        for i in range(3):
+            cert, _ = TestCertificateGeneration.generate_certificate(f"drop{i}.example.com", 365)
+            path = os.path.join(temp_dir, f"drop{i}.pem")
+            TestCertificateGeneration.save_certificate_pem(cert, path)
+            self._analyze_new(analyzer, path)
+
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped')._value.get()
+        assert after == before + 2  # first entry stays, next two each evict one
+
+    def test_queue_depth_metric_tracks_size(self, analyzer, temp_dir):
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
+
+        node = analyzer.metrics._node_name
+        assert analyzer.metrics.retry_queue_depth.labels(node_name=node)._value.get() == 0
+
+        cert, _ = TestCertificateGeneration.generate_certificate("depth.example.com", 365)
+        path = os.path.join(temp_dir, "depth.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        self._analyze_new(analyzer, path)
+
+        assert analyzer.metrics.retry_queue_depth.labels(node_name=node)._value.get() == 1
 
 
 class TestCertificateInfo:
@@ -4941,6 +5054,146 @@ class TestProcessMetricsMonitor:
         monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '9999')
         # Would raise TypeError if the method still expected a stub positional arg.
         analyzer._start_process_metrics_monitor()
+
+
+class TestRetryQueueDrainer:
+    """
+    Tests for _start_retry_queue_drainer — the background thread that
+    replays rate-limited new-certificate files from the retry queue as
+    _new_cert_rate_limiter capacity frees up. Shares the same token bucket
+    as fresh events rather than having its own budget.
+    """
+
+    def test_drainer_thread_is_daemon(self, analyzer, monkeypatch):
+        """The drainer thread must be a daemon so it doesn't block shutdown."""
+        threads_started = []
+
+        original_thread = _threading.Thread
+
+        def _capture_thread(*args, **kwargs):
+            t = original_thread(*args, **kwargs)
+            threads_started.append(t)
+            return t
+
+        monkeypatch.setattr(_threading, 'Thread', _capture_thread)
+
+        analyzer._start_retry_queue_drainer()
+
+        drainer_threads = [t for t in threads_started
+                            if getattr(t, 'name', '') == 'rate-limit-retry-drainer']
+        assert len(drainer_threads) == 1
+        assert drainer_threads[0].daemon is True
+
+    def test_drainer_replays_queued_entry_once_capacity_available(self, analyzer, temp_dir, monkeypatch):
+        """A throttled file sitting in the queue is fully processed once tokens free up."""
+        from agent.analyzer import _TokenBucket
+
+        # Start fully exhausted so the initial enqueue is forced, then refill
+        # fast (10/sec) so the drainer's own backoff loop picks it up quickly.
+        bucket = _TokenBucket(rate=10)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
+
+        cert, _ = TestCertificateGeneration.generate_certificate("drain-me.example.com", 365)
+        path = os.path.join(temp_dir, "drain-me.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        result = analyzer._analyze_and_finish_new_certificate_file(
+            path, "test", 1, "", None, "", 0, "test-node",
+        )
+        assert result == []
+        assert path in analyzer._retry_queue_paths
+
+        thread = _capture_started_thread(
+            monkeypatch, analyzer._start_retry_queue_drainer, 'rate-limit-retry-drainer'
+        )
+
+        deadline = _time.monotonic() + 3.0
+        while _time.monotonic() < deadline:
+            matching = [k for k in analyzer.known_certs.keys() if k.startswith(path + ":")]
+            if matching:
+                break
+            _time.sleep(0.05)
+        else:
+            pytest.fail("queued file was not replayed within 3s")
+
+        assert path not in analyzer._retry_queue_paths
+        assert all(e.cert_path != path for e in analyzer._retry_queue)
+
+        _stop_daemon_loop_thread(thread, monkeypatch)
+
+    def test_drainer_preserves_original_process_attribution_on_replay(self, analyzer, temp_dir, monkeypatch):
+        """Unlike periodic_scan's rediscovery, a replay keeps the real triggering process/pid."""
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=10)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
+
+        cert, _ = TestCertificateGeneration.generate_certificate("attributed.example.com", 365)
+        path = os.path.join(temp_dir, "attributed.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        analyzer._analyze_and_finish_new_certificate_file(
+            path, "/usr/bin/original-proc", 4242, "", None, "", 0, "test-node",
+        )
+
+        thread = _capture_started_thread(
+            monkeypatch, analyzer._start_retry_queue_drainer, 'rate-limit-retry-drainer'
+        )
+
+        deadline = _time.monotonic() + 3.0
+        cert_info = None
+        while _time.monotonic() < deadline:
+            matching = [k for k in analyzer.known_certs.keys() if k.startswith(path + ":")]
+            if matching:
+                cert_info = analyzer.known_certs.get(matching[0])
+                break
+            _time.sleep(0.05)
+
+        _stop_daemon_loop_thread(thread, monkeypatch)
+
+        assert cert_info is not None, "queued file was not replayed within 3s"
+        assert cert_info.process == "/usr/bin/original-proc"
+        assert cert_info.pid == 4242
+
+    def test_drainer_skips_entry_already_known_via_other_path(self, analyzer, temp_dir, monkeypatch):
+        """
+        If the path became known some other way (e.g. a fresh Tetragon
+        re-access won the race) while still queued, the drainer discards the
+        stale entry without spending a token or re-parsing.
+        """
+        cert, _ = TestCertificateGeneration.generate_certificate("already-known.example.com", 365)
+        path = os.path.join(temp_dir, "already-known.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        # Simulate the path having already been successfully processed
+        # through some other route.
+        analyzer._known_paths[path] = {f"{path}:0:1"}
+
+        # Directly queue a stale retry entry for that same path.
+        analyzer._enqueue_rate_limited_retry(
+            path, "test", 1, "", None, "", 0, "test-node",
+        )
+        assert path in analyzer._retry_queue_paths
+
+        def _fail_if_called(*args, **kwargs):
+            pytest.fail("analyze_certificate should not be called for an already-known path")
+
+        monkeypatch.setattr(analyzer, 'analyze_certificate', _fail_if_called)
+
+        thread = _capture_started_thread(
+            monkeypatch, analyzer._start_retry_queue_drainer, 'rate-limit-retry-drainer'
+        )
+
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline:
+            if path not in analyzer._retry_queue_paths:
+                break
+            _time.sleep(0.05)
+        else:
+            pytest.fail("stale queued entry was not discarded within 2s")
+
+        _stop_daemon_loop_thread(thread, monkeypatch)
 
 
 # ── Certificate parsing exception handling tests ──────────────────────────────
