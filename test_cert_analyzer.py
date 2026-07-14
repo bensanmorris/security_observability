@@ -1144,6 +1144,98 @@ class TestCertificateAnalysis:
         assert cert_infos[2].expires_soon(days=7)  # Expiring soon
 
 
+class TestNewCertRateLimiting:
+    """
+    Bounds the CPU an attacker can force purely through certificate activity
+    (e.g. writing many distinct cert files, or churning bind/connect-probe
+    endpoints) with no config access -- see agent/analyzer.py's
+    _new_cert_rate_limiter / _TokenBucket, gated at the top of
+    analyze_certificate(), the single choke point all three trigger paths
+    (real-time Tetragon events, periodic_scan, large-file background thread)
+    funnel through for never-before-seen paths.
+    """
+
+    def test_exhausted_bucket_skips_new_file_without_erroring(self, analyzer, temp_dir):
+        """Once tokens run out, a brand-new cert file is skipped (returns []) instead of parsed."""
+        from agent.analyzer import _TokenBucket
+        analyzer._new_cert_rate_limiter = _TokenBucket(rate=2)
+
+        results = []
+        for i in range(5):
+            cert, _ = TestCertificateGeneration.generate_certificate(f"rl{i}.example.com", 365)
+            path = os.path.join(temp_dir, f"rl{i}.pem")
+            TestCertificateGeneration.save_certificate_pem(cert, path)
+            results.append(analyzer.analyze_certificate(path, "test", 1))
+
+        succeeded = [r for r in results if r]
+        skipped = [r for r in results if not r]
+        assert len(succeeded) == 2, "only the burst capacity (2 tokens) should succeed"
+        assert len(skipped) == 3
+
+    def test_rate_limited_event_is_not_cached_as_known(self, analyzer, temp_dir):
+        """A skipped file must get another chance later, not be permanently marked as seen."""
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0  # force exhausted
+        analyzer._new_cert_rate_limiter = bucket
+
+        cert, _ = TestCertificateGeneration.generate_certificate("rl-retry.example.com", 365)
+        path = os.path.join(temp_dir, "rl-retry.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        result = analyzer.analyze_certificate(path, "test", 1)
+        assert result == []
+        assert path not in analyzer.processed_paths
+        matching = [k for k in analyzer.known_certs.keys() if k.startswith(path + ":")]
+        assert matching == []
+
+        # Once tokens are available again, the same path is analyzed normally.
+        analyzer._new_cert_rate_limiter = _TokenBucket(rate=10)
+        result = analyzer.analyze_certificate(path, "test", 1)
+        assert len(result) == 1
+        assert result[0].common_name == "rl-retry.example.com"
+
+    def test_rate_limited_event_increments_error_metric(self, analyzer, temp_dir):
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0  # force exhausted
+        analyzer._new_cert_rate_limiter = bucket
+
+        cert, _ = TestCertificateGeneration.generate_certificate("rl-metric.example.com", 365)
+        path = os.path.join(temp_dir, "rl-metric.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited')._value.get()
+        analyzer.analyze_certificate(path, "test", 1)
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited')._value.get()
+        assert after == before + 1
+
+    def test_zero_rate_disables_limiter(self, analyzer, temp_dir):
+        """rate <= 0 is the escape hatch for operators who want it off entirely."""
+        from agent.analyzer import _TokenBucket
+        analyzer._new_cert_rate_limiter = _TokenBucket(rate=0)
+
+        results = []
+        for i in range(20):
+            cert, _ = TestCertificateGeneration.generate_certificate(f"unlimited{i}.example.com", 365)
+            path = os.path.join(temp_dir, f"unlimited{i}.pem")
+            TestCertificateGeneration.save_certificate_pem(cert, path)
+            results.append(analyzer.analyze_certificate(path, "test", 1))
+
+        assert all(len(r) == 1 for r in results)
+
+    def test_token_bucket_refills_over_time(self):
+        """Tokens regenerate at `rate`/sec, capped at `rate` -- not an infinite drain."""
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=10)  # 10/sec == one token every 0.1s
+        for _ in range(10):
+            assert bucket.try_acquire()
+        assert not bucket.try_acquire()  # burst capacity exhausted
+
+        time.sleep(0.25)  # ~2-3 tokens' worth of refill
+        assert bucket.try_acquire()
+
+
 class TestCertificateInfo:
     """Test CertificateInfo dataclass functionality"""
     

@@ -48,6 +48,35 @@ from .kafka import KafkaPublisher
 logger = logging.getLogger(__name__)
 
 
+class _TokenBucket:
+    """
+    Thread-safe token bucket, refilled continuously at `rate` tokens/sec up to
+    a cap of `rate` tokens -- so up to a full second's worth of legitimate
+    burst (e.g. many pods restarting at once and touching their certs) is
+    never throttled, but sustained throughput above `rate`/sec is capped
+    regardless of how fast events keep arriving. `rate <= 0` disables the
+    limiter entirely (every acquire succeeds), for operators who want it off.
+    """
+
+    def __init__(self, rate: float):
+        self._rate = max(rate, 0.0)
+        self._tokens = self._rate
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        if self._rate <= 0:
+            return True
+        with self._lock:
+            now = time.monotonic()
+            self._tokens = min(self._rate, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
+
+
 class CertificateAnalyzer:
     """Main analyzer that processes Tetragon events and extracts certificate info"""
 
@@ -92,6 +121,7 @@ class CertificateAnalyzer:
                  large_file_byte_cap: int = 2 * 1024 * 1024,
                  max_concurrent_background_threads: int = 20,
                  max_processes_per_cert: int = 20,
+                 new_cert_events_per_second: float = 50.0,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600):
         self.tetragon_address = tetragon_address
@@ -128,6 +158,21 @@ class CertificateAnalyzer:
         # forever — unbounded regardless of known_certs cache size, since the
         # cert entry itself may never be evicted. See _record_cert_process_access.
         self._max_processes_per_cert = max_processes_per_cert
+        # Caps how many never-before-seen certificate files can be fully
+        # parsed/extracted/cached per second, regardless of source (real-time
+        # Tetragon events, periodic_scan, or the large-file background-thread
+        # path -- all three funnel through analyze_certificate(), the single
+        # choke point this gates). Re-accesses of already-known paths are
+        # cheap and NOT gated here; this only bounds the cost of onboarding
+        # new certs, which is the part an attacker can drive purely by
+        # generating distinct certificate content/paths, with no config
+        # access. A rate-limited file is simply skipped for this event, not
+        # cached as failed -- periodic_scan or a future access of the same
+        # path gets another chance once tokens are available again.
+        self._new_cert_rate_limiter = _TokenBucket(new_cert_events_per_second)
+        self._rate_limit_log_lock = threading.Lock()
+        self._rate_limit_last_log_time = 0.0
+        self._rate_limit_dropped_since_log = 0
         self._scan_paths = list(scan_paths) if scan_paths else []
         self._scan_interval_seconds = scan_interval_seconds
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
@@ -146,6 +191,7 @@ class CertificateAnalyzer:
             'large_file_metrics_cap':              str(large_file_metrics_cap),
             'large_file_byte_cap':                 str(large_file_byte_cap),
             'max_concurrent_background_threads':   str(max_concurrent_background_threads),
+            'new_cert_events_per_second':          str(new_cert_events_per_second),
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
             'scan_paths':                          ','.join(self._scan_paths),
@@ -865,6 +911,27 @@ class CertificateAnalyzer:
         except OSError:
             return False
 
+    def _log_rate_limited_new_cert(self, cert_path: str) -> None:
+        """
+        Log a rate-limit hit at most once every 10 seconds, with a count of
+        how many were dropped in between -- logging every single throttled
+        event would just move the flood from CPU cost to log-volume cost.
+        """
+        with self._rate_limit_log_lock:
+            self._rate_limit_dropped_since_log += 1
+            now = time.monotonic()
+            if now - self._rate_limit_last_log_time < 10.0:
+                return
+            dropped = self._rate_limit_dropped_since_log
+            self._rate_limit_dropped_since_log = 0
+            self._rate_limit_last_log_time = now
+        logger.warning(
+            f"New-certificate analysis rate limit reached (most recently for {cert_path}) -- "
+            f"{dropped} new-file event(s) skipped in the last ~10s. Tune via "
+            f"[certificates] new_cert_events_per_second in cert-analyzer.conf or "
+            f"NEW_CERT_EVENTS_PER_SECOND."
+        )
+
     def analyze_certificate(
         self,
         cert_path: str,
@@ -873,6 +940,11 @@ class CertificateAnalyzer:
         namespace: str = ""
     ) -> List[CertificateInfo]:
         """Analyze a certificate file and return list of CertificateInfo (supports multi-cert files)"""
+
+        if not self._new_cert_rate_limiter.try_acquire():
+            self._log_rate_limited_new_cert(cert_path)
+            self.metrics.cert_analysis_errors.labels(error_type='rate_limited').inc()
+            return []
 
         try:
             certs = self.parse_certificates(cert_path)
