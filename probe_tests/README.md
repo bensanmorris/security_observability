@@ -571,3 +571,86 @@ bundle's certs — that's already covered by
 scenario, but packaged as a container Job so it can write onto the node's
 real filesystem and drive a genuinely unattended multi-hour soak, neither of
 which this script can do against a remote cluster.
+
+---
+
+### test_new_cert_rate_limit (Python)
+
+Exercises the new-certificate rate limiter and its retry queue
+(`agent/analyzer.py`: `_TokenBucket` / `new_cert_events_per_second`, gated in
+`_analyze_and_finish_new_certificate_file()`; `_enqueue_rate_limited_retry` /
+`_start_retry_queue_drainer` for throttled files). Regression coverage for a
+gap found 2026-07-14 during a live burst test: the rate limiter's "throttled
+but not lost" guarantee only held if `periodic_scan` happened to cover the
+throttled file's directory — a burst written outside `scan_paths` plateaued
+partway through and never recovered, before the retry queue existed to give
+every throttled file a guaranteed replay path independent of `scan_paths`
+coverage.
+
+**Step 1 — Load the policy:**
+
+```bash
+sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+```
+
+**Step 2 — Run the probe test:**
+
+```bash
+# Writes to /etc/pki/tls/certs by default — same ReadOnlyPaths location used
+# by the other file-based probe tests; typically requires sudo to write.
+sudo python3 probe_tests/test_new_cert_rate_limit.py
+
+# Custom cert count / output directory:
+sudo python3 probe_tests/test_new_cert_rate_limit.py --count 2000
+python3 probe_tests/test_new_cert_rate_limit.py --out-dir /some/writable/readonly/path
+
+# Burst and poll cert_analyzer's own /metrics until every cert has surfaced
+# (or --timeout trips) instead of just printing verify commands and exiting —
+# this is how the gap above was originally found:
+sudo python3 probe_tests/test_new_cert_rate_limit.py --count 5000 --wait
+sudo python3 probe_tests/test_new_cert_rate_limit.py --wait --poll-interval 2 --timeout 120
+
+# Keep the generated files instead of deleting them at the end:
+sudo python3 probe_tests/test_new_cert_rate_limit.py --keep
+```
+
+The script generates `--count` unique self-signed certs and writes them all
+into `--out-dir` in one burst — each `open()`/`write()` fires its own
+`fd_install` event, so all `--count` events land in Tetragon's stream almost
+simultaneously. Only the first ~`new_cert_events_per_second` are analyzed
+immediately (token bucket burst capacity); the rest are throttled and queued,
+then replayed by the retry-queue drainer thread as capacity frees up.
+
+**Two separate caps can each stop a large `--wait` run from reaching 100% —
+neither is a rate-limiter bug, and the script warns about the first one
+up front:**
+
+- `retry_queue_max_size` (default 2000) bounds the retry queue itself. A
+  `--count` larger than this overflows it and *permanently drops the oldest
+  queued entries* (`cert_analysis_errors{error_type="retry_queue_dropped"}`)
+  rather than delaying them. Keep `--count` at or under the configured
+  `retry_queue_max_size` for `--wait` to reach 100%.
+- `known_certs` is separately LRU-capped at `CACHE_MAX_SIZE` (default
+  10,000), shared with every other cert `cert_analyzer` already knows about
+  on the host. A burst that pushes the total past that cap evicts older
+  entries — including earlier members of the same burst — to make room.
+  Leave headroom under the cap (accounting for the host's pre-existing known
+  cert count, `cert_analyzer_cache_known_certs_size` in `/metrics`) for
+  `--wait` to cleanly reach 100%.
+
+**Step 3 — Verify cert_analyzer output:**
+
+Without `--wait`, the script prints ready-to-run `curl`/`grep` commands
+against `/metrics` for the surfaced count, `cert_analyzer_retry_queue_depth`
+(should climb immediately after the burst, then drain to 0), and
+`tls_certificate_analysis_errors_total` (`retry_queue_dropped` should stay at
+0 for a `--count` under `retry_queue_max_size`).
+
+With `--wait`, the script polls those same signals itself and prints a
+timeline of cumulative surfaced count until it hits `--count` or times out.
+
+**Step 4 — Remove the policy:**
+
+```bash
+sudo tetra tracingpolicy delete certificate-file-access
+```
