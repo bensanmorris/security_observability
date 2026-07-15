@@ -47,6 +47,8 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from use_cases import USE_CASES, USE_CASES_BY_ID, UseCaseResult  # noqa: E402
+import blast_radius  # noqa: E402
+import chain_explorer  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test-server")
@@ -115,7 +117,7 @@ def _consume_kafka(broadcaster: EventBroadcaster, host: str, port: int, topic: s
             time.sleep(5)
 
 
-def make_handler(broadcaster: EventBroadcaster):
+def make_handler(broadcaster: EventBroadcaster, prometheus_url: str):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             logger.info("%s - %s", self.address_string(), fmt % args)
@@ -130,6 +132,10 @@ def make_handler(broadcaster: EventBroadcaster):
                 self._serve_use_cases()
             elif path == "/api/events":
                 self._serve_events()
+            elif path == "/blast-radius":
+                self._serve_generated_page(blast_radius, "blast radius")
+            elif path == "/chain-explorer":
+                self._serve_generated_page(chain_explorer, "chain explorer")
             else:
                 self.send_error(404)
 
@@ -230,6 +236,28 @@ def make_handler(broadcaster: EventBroadcaster):
             self.end_headers()
             self.wfile.write(body)
 
+        def _serve_generated_page(self, generator_module, label):
+            # Generated fresh on every request rather than cached -- these are
+            # low-traffic, manually-clicked links, and always reflect
+            # cert-analyzer's current state rather than a stale snapshot.
+            try:
+                html = generator_module.generate(prometheus_url)
+            except Exception as e:
+                logger.exception("%s generation failed", label)
+                body = f"Failed to generate {label} view: {e}".encode("utf-8")
+                self.send_response(502)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _serve_events(self):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -293,6 +321,14 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("TEST_SERVER_TOPIC", "cert-analyzer-events"),
         help="Kafka topic to watch (default: cert-analyzer-events, env: TEST_SERVER_TOPIC)",
     )
+    parser.add_argument(
+        "--prometheus-url",
+        default=os.environ.get("TEST_SERVER_PROMETHEUS_URL", "http://localhost:9090"),
+        help=(
+            "Prometheus base URL for the 'Blast radius explorer' link (default: "
+            "http://localhost:9090, env: TEST_SERVER_PROMETHEUS_URL)"
+        ),
+    )
     args = parser.parse_args()
     if args.kafka_host is None or args.kafka_port is None:
         parser.error(
@@ -313,11 +349,11 @@ def main() -> None:
     )
     consumer_thread.start()
 
-    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster))
+    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster, args.prometheus_url))
     server.daemon_threads = True
     logger.info(
-        "serving on http://%s:%d (Kafka: %s:%d, topic '%s')",
-        args.bind, args.port, args.kafka_host, args.kafka_port, args.topic,
+        "serving on http://%s:%d (Kafka: %s:%d, topic '%s'; Prometheus: %s)",
+        args.bind, args.port, args.kafka_host, args.kafka_port, args.topic, args.prometheus_url,
     )
     try:
         server.serve_forever()

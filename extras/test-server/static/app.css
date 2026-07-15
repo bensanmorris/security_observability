@@ -20,6 +20,26 @@ header p {
   max-width: 60em;
 }
 
+.tool-links {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.tool-link {
+  display: inline-block;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+}
+
+.tool-link:hover {
+  border-color: currentColor;
+}
+
 main {
   display: flex;
   gap: 1.5rem;
