@@ -294,7 +294,17 @@ showOverview();
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--prometheus-url", default="http://localhost:9090")
+    ap.add_argument(
+        "--prometheus-url",
+        default="http://127.0.0.1:9090",
+        help=(
+            "Prometheus base URL (default: http://127.0.0.1:9090) -- deliberately "
+            "an IPv4 literal, not 'localhost': on hosts with IPv6 disabled at the "
+            "kernel level, resolving 'localhost' to ::1 fails with '[Errno 97] "
+            "Address family not supported by protocol' before any IPv4 fallback "
+            "is attempted"
+        ),
+    )
     ap.add_argument("-o", "--output", default="blast_radius.html")
     args = ap.parse_args()
 

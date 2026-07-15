@@ -216,6 +216,13 @@ exit 0
 
 %changelog
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Default --prometheus-url / TEST_SERVER_PROMETHEUS_URL to
+  http://127.0.0.1:9090 instead of http://localhost:9090 -- on hosts with
+  IPv6 disabled at the kernel level (seen on a hardened/STIG-compliant
+  corporate RHEL9 box), resolving "localhost" returned only the ::1
+  result, which failed immediately with "[Errno 97] Address family not
+  supported by protocol" since no IPv4 fallback was ever attempted
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add a "Certificate chain explorer" link to the console header
   (chain_explorer.py), generated live on click against Prometheus --
   groups tls_certificate_expiry_days/tls_certificate_self_signed by

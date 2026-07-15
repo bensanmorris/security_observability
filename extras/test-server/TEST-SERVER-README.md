@@ -122,9 +122,18 @@ Then open http://localhost:8090.
 broker is whatever you configured cert-analyzer's `[kafka] bootstrap_servers`
 to point at. `--topic` defaults to `cert-analyzer-events` (cert-analyzer's
 own default); pass `--port` to change this server's own listen port
-(default `8090`). `--prometheus-url` defaults to `http://localhost:9090`
-and only matters for the "Certificate blast radius explorer" link -- adjust
-it if Prometheus lives elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
+(default `8090`). `--prometheus-url` defaults to `http://127.0.0.1:9090`
+(an IPv4 literal, not `localhost` -- see below) and only matters for the
+"Certificate blast radius explorer" / "Certificate chain explorer" links --
+adjust it if Prometheus lives elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
+
+If either link fails with `[Errno 97] Address family not supported by
+protocol`, the host has IPv6 disabled at the kernel level (common on
+hardened/STIG-compliant builds) and something got the default overridden
+back to a `localhost` URL -- `getaddrinfo("localhost", ...)` can return only
+the `::1` result on such a host, which fails immediately with no IPv4
+fallback attempted. Point `--prometheus-url` / `TEST_SERVER_PROMETHEUS_URL`
+at an explicit IPv4 address instead.
 
 By default this only listens on `127.0.0.1`, so it's only reachable from a
 browser on the same host. If the target host is headless and you're

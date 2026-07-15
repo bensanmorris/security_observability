@@ -323,10 +323,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prometheus-url",
-        default=os.environ.get("TEST_SERVER_PROMETHEUS_URL", "http://localhost:9090"),
+        default=os.environ.get("TEST_SERVER_PROMETHEUS_URL", "http://127.0.0.1:9090"),
         help=(
-            "Prometheus base URL for the 'Blast radius explorer' link (default: "
-            "http://localhost:9090, env: TEST_SERVER_PROMETHEUS_URL)"
+            "Prometheus base URL for the 'Blast radius explorer' / 'Chain explorer' "
+            "links (default: http://127.0.0.1:9090, env: TEST_SERVER_PROMETHEUS_URL) "
+            "-- deliberately an IPv4 literal, not 'localhost': on hosts with IPv6 "
+            "disabled at the kernel level, resolving 'localhost' to ::1 fails with "
+            "'[Errno 97] Address family not supported by protocol' before any IPv4 "
+            "fallback is attempted"
         ),
     )
     args = parser.parse_args()
