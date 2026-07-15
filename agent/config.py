@@ -195,6 +195,24 @@ def main():
     # CA trust bundle) accumulates one permanent series per distinct process,
     # forever, regardless of known_certs cache size.
     max_processes_per_cert = cfg_int(cp, 'certificates', 'max_processes_per_cert', 'MAX_PROCESSES_PER_CERT', '20')
+    # Caps how many never-before-seen certificate files can be fully parsed
+    # per second across all trigger paths (real-time Tetragon events,
+    # periodic_scan, large-file background thread). Bounds the CPU an
+    # attacker can force purely through certificate activity (e.g. writing
+    # many distinct cert files, or churning bind/connect-probe endpoints) --
+    # no config access needed to trigger it, so the default has to hold on
+    # its own. 50/sec comfortably covers legitimate bursts (e.g. a node
+    # rebooting and every pod re-touching its certs) while bounding sustained
+    # abuse to ~50 * (cost per cert) of CPU instead of unbounded throughput.
+    new_cert_events_per_second = cfg_float(cp, 'certificates', 'new_cert_events_per_second', 'NEW_CERT_EVENTS_PER_SECOND', '50')
+    # Bounds the rate-limit retry queue -- a throttled file is queued here
+    # (with its original triggering process/pod context) and replayed by a
+    # dedicated drainer thread as capacity frees up, rather than relying on
+    # periodic_scan (which only covers configured scan_paths) or a future
+    # unrelated access to the same path to give it a second chance. Bounded
+    # FIFO so this can't become a second unbounded memory sink for the same
+    # abuse new_cert_events_per_second defends against.
+    retry_queue_max_size = cfg_int(cp, 'certificates', 'retry_queue_max_size', 'RETRY_QUEUE_MAX_SIZE', '2000')
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
@@ -237,6 +255,8 @@ def main():
     logger.info(f"Large file byte cap: {large_file_byte_cap} bytes read to classify a file as large")
     logger.info(f"Max concurrent background threads: {max_concurrent_background_threads}")
     logger.info(f"Max processes tracked per cert: {max_processes_per_cert}")
+    logger.info(f"New-cert analysis rate limit: {new_cert_events_per_second}/sec" if new_cert_events_per_second > 0 else "New-cert analysis rate limit: disabled")
+    logger.info(f"Rate-limit retry queue max size: {retry_queue_max_size}")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Min scrape interval: {min_scrape_interval}s (too-frequent scrapes get a cached reply)" if min_scrape_interval > 0 else "Min scrape interval: disabled")
     logger.info(f"Health port:       {health_port}")
@@ -301,6 +321,8 @@ def main():
                                    large_file_byte_cap=large_file_byte_cap,
                                    max_concurrent_background_threads=max_concurrent_background_threads,
                                    max_processes_per_cert=max_processes_per_cert,
+                                   new_cert_events_per_second=new_cert_events_per_second,
+                                   retry_queue_max_size=retry_queue_max_size,
                                    scan_paths=scan_paths,
                                    scan_interval_seconds=scan_interval)
 

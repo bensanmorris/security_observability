@@ -69,6 +69,14 @@ provided by cert-agent-deployer) or statically via the -javaagent JVM flag.
 JAVA_HOME=$(readlink -f /usr/bin/javac | sed 's|/bin/javac||')
 export JAVA_HOME
 
+# Apply RPM's standard hardened build flags (stack-protector-strong,
+# FORTIFY_SOURCE, full RELRO, CET, etc. via the redhat-hardened-cc1/-ld
+# specs) to the native stub instead of relying on the Makefile's own bare
+# defaults -- native/Makefile's CFLAGS/LDFLAGS use `?=` specifically so
+# this override takes effect rather than being clobbered.
+export CFLAGS="%{optflags} -fPIC"
+export LDFLAGS="%{build_ldflags}"
+
 make -C native JAVA_HOME="$JAVA_HOME"
 
 

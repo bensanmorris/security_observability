@@ -406,6 +406,17 @@ class PrometheusMetrics:
         )
         self.cache_max_size.labels(node_name=self._node_name).set(CACHE_MAX_SIZE)
 
+        # Depth of the rate-limit retry queue -- new-certificate files
+        # throttled by new_cert_events_per_second and waiting to be replayed.
+        # A sustained non-zero value means the analyzer is falling behind the
+        # rate of never-before-seen certificate files arriving, not just
+        # absorbing a brief burst.
+        self.retry_queue_depth = Gauge(
+            'cert_analyzer_retry_queue_depth',
+            'Number of rate-limited new-certificate files waiting to be replayed',
+            ['node_name'],
+        )
+
         self._process = psutil.Process()
         # Primes psutil's internal cpu_percent() sample point. The first call
         # to cpu_percent(interval=None) after a Process is constructed always

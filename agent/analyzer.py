@@ -9,9 +9,10 @@ import struct
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from .health import HealthServer
@@ -46,6 +47,53 @@ from .cache import LRUCache
 from .kafka import KafkaPublisher
 
 logger = logging.getLogger(__name__)
+
+
+class _TokenBucket:
+    """
+    Thread-safe token bucket, refilled continuously at `rate` tokens/sec up to
+    a cap of `rate` tokens -- so up to a full second's worth of legitimate
+    burst (e.g. many pods restarting at once and touching their certs) is
+    never throttled, but sustained throughput above `rate`/sec is capped
+    regardless of how fast events keep arriving. `rate <= 0` disables the
+    limiter entirely (every acquire succeeds), for operators who want it off.
+    """
+
+    def __init__(self, rate: float):
+        self._rate = max(rate, 0.0)
+        self._tokens = self._rate
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        if self._rate <= 0:
+            return True
+        with self._lock:
+            now = time.monotonic()
+            self._tokens = min(self._rate, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
+
+
+class _RetryEntry(NamedTuple):
+    """
+    Captures everything needed to fully replay a rate-limited new-certificate
+    file later, exactly as if the original event were being handled -- unlike
+    periodic_scan's rediscovery path, this preserves the real triggering
+    process/pod context instead of falling back to synthetic
+    process="periodic_scan", pid=0 attribution.
+    """
+    cert_path: str
+    process_name: str
+    pid: int
+    namespace: str
+    tetragon_pod: object
+    parent_process: str
+    parent_pid: int
+    node_name: str
 
 
 class CertificateAnalyzer:
@@ -92,6 +140,8 @@ class CertificateAnalyzer:
                  large_file_byte_cap: int = 2 * 1024 * 1024,
                  max_concurrent_background_threads: int = 20,
                  max_processes_per_cert: int = 20,
+                 new_cert_events_per_second: float = 50.0,
+                 retry_queue_max_size: int = 2000,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600):
         self.tetragon_address = tetragon_address
@@ -128,6 +178,35 @@ class CertificateAnalyzer:
         # forever — unbounded regardless of known_certs cache size, since the
         # cert entry itself may never be evicted. See _record_cert_process_access.
         self._max_processes_per_cert = max_processes_per_cert
+        # Caps how many never-before-seen certificate files can be fully
+        # parsed/extracted/cached per second, regardless of source (real-time
+        # Tetragon events, periodic_scan, or the large-file background-thread
+        # path -- all four trigger points, including the retry queue below,
+        # funnel through _analyze_and_finish_new_certificate_file() /
+        # _try_process_new_certificate_file(), the single choke point this
+        # gates). Re-accesses of already-known paths are cheap and NOT gated
+        # here; this only bounds the cost of onboarding new certs, which is
+        # the part an attacker can drive purely by generating distinct
+        # certificate content/paths, with no config access.
+        self._new_cert_rate_limiter = _TokenBucket(new_cert_events_per_second)
+        self._rate_limit_log_lock = threading.Lock()
+        self._rate_limit_last_log_time = 0.0
+        self._rate_limit_dropped_since_log = 0
+        # A rate-limited file isn't dropped -- it's queued here and replayed
+        # by the retry-queue drainer thread once capacity frees up, with its
+        # *original* triggering process/pod context intact (unlike
+        # periodic_scan's rediscovery path, which only knows the path, not
+        # who touched it). This is what makes "throttled but not lost" true
+        # regardless of whether the path happens to fall under scan_paths --
+        # relying on periodic_scan alone left files outside scan_paths with
+        # no recovery path at all. Bounded FIFO: at capacity, the oldest
+        # queued entry is dropped to make room, so this can't become a
+        # second unbounded memory sink for the same abuse the rate limiter
+        # itself defends against.
+        self._retry_queue_max_size = retry_queue_max_size
+        self._retry_queue: deque = deque()
+        self._retry_queue_paths: Set[str] = set()
+        self._retry_queue_lock = threading.Lock()
         self._scan_paths = list(scan_paths) if scan_paths else []
         self._scan_interval_seconds = scan_interval_seconds
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
@@ -146,6 +225,8 @@ class CertificateAnalyzer:
             'large_file_metrics_cap':              str(large_file_metrics_cap),
             'large_file_byte_cap':                 str(large_file_byte_cap),
             'max_concurrent_background_threads':   str(max_concurrent_background_threads),
+            'new_cert_events_per_second':          str(new_cert_events_per_second),
+            'retry_queue_max_size':                str(retry_queue_max_size),
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
             'scan_paths':                          ','.join(self._scan_paths),
@@ -865,6 +946,27 @@ class CertificateAnalyzer:
         except OSError:
             return False
 
+    def _log_rate_limited_new_cert(self, cert_path: str) -> None:
+        """
+        Log a rate-limit hit at most once every 10 seconds, with a count of
+        how many were dropped in between -- logging every single throttled
+        event would just move the flood from CPU cost to log-volume cost.
+        """
+        with self._rate_limit_log_lock:
+            self._rate_limit_dropped_since_log += 1
+            now = time.monotonic()
+            if now - self._rate_limit_last_log_time < 10.0:
+                return
+            dropped = self._rate_limit_dropped_since_log
+            self._rate_limit_dropped_since_log = 0
+            self._rate_limit_last_log_time = now
+        logger.warning(
+            f"New-certificate analysis rate limit reached (most recently for {cert_path}) -- "
+            f"{dropped} new-file event(s) skipped in the last ~10s. Tune via "
+            f"[certificates] new_cert_events_per_second in cert-analyzer.conf or "
+            f"NEW_CERT_EVENTS_PER_SECOND."
+        )
+
     def analyze_certificate(
         self,
         cert_path: str,
@@ -872,7 +974,14 @@ class CertificateAnalyzer:
         pid: int,
         namespace: str = ""
     ) -> List[CertificateInfo]:
-        """Analyze a certificate file and return list of CertificateInfo (supports multi-cert files)"""
+        """
+        Analyze a certificate file and return list of CertificateInfo (supports
+        multi-cert files). Pure parse-and-extract -- callers that are handling
+        a never-before-seen path should go through
+        _try_process_new_certificate_file()/_analyze_and_finish_new_certificate_file()
+        instead of calling this directly, so the new-cert rate limiter and
+        retry queue apply consistently.
+        """
 
         try:
             certs = self.parse_certificates(cert_path)
@@ -977,6 +1086,179 @@ class CertificateAnalyzer:
 
         self._update_cache_metrics()
 
+    def _try_process_new_certificate_file(
+        self,
+        cert_path: str,
+        process_name: str,
+        pid: int,
+        namespace: str,
+        tetragon_pod,
+        parent_process: str,
+        parent_pid: int,
+        node_name: str,
+    ) -> Optional[List[CertificateInfo]]:
+        """
+        Attempt to fully process a never-before-seen certificate file, gated
+        by the new-cert rate limiter. Returns None if no token was available
+        (throttled); otherwise returns the list of CertificateInfo found
+        (possibly empty, if the file turned out to contain no valid certs --
+        that's not a throttling outcome). Callers decide what a None result
+        means for them: a fresh trigger (see
+        _analyze_and_finish_new_certificate_file) queues the file for retry;
+        the retry-queue drainer just leaves its entry where it is and tries
+        again later.
+        """
+        if not self._new_cert_rate_limiter.try_acquire():
+            return None
+
+        cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
+        if cert_infos:
+            logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
+            self._finish_new_certificate_file(
+                cert_infos, tetragon_pod, parent_process, parent_pid, node_name
+            )
+        return cert_infos
+
+    def _analyze_and_finish_new_certificate_file(
+        self,
+        cert_path: str,
+        process_name: str,
+        pid: int,
+        namespace: str,
+        tetragon_pod,
+        parent_process: str,
+        parent_pid: int,
+        node_name: str,
+    ) -> List[CertificateInfo]:
+        """
+        Entry point for every *fresh* trigger of a never-before-seen
+        certificate file -- real-time Tetragon events, periodic_scan, and the
+        large-file background-thread worker all call this instead of
+        analyze_certificate()+_finish_new_certificate_file() directly, so
+        rate-limiting and retry-queueing apply uniformly regardless of
+        source. A throttled file is queued for replay (see
+        _enqueue_rate_limited_retry) rather than being dropped; this returns
+        [] for that case too, since nothing was found *in this call* --
+        periodic_scan's cert_count tally relies on that.
+        """
+        cert_infos = self._try_process_new_certificate_file(
+            cert_path, process_name, pid, namespace,
+            tetragon_pod, parent_process, parent_pid, node_name,
+        )
+        if cert_infos is not None:
+            return cert_infos
+
+        self._log_rate_limited_new_cert(cert_path)
+        self.metrics.cert_analysis_errors.labels(error_type='rate_limited').inc()
+        self._enqueue_rate_limited_retry(
+            cert_path, process_name, pid, namespace,
+            tetragon_pod, parent_process, parent_pid, node_name,
+        )
+        return []
+
+    def _enqueue_rate_limited_retry(
+        self,
+        cert_path: str,
+        process_name: str,
+        pid: int,
+        namespace: str,
+        tetragon_pod,
+        parent_process: str,
+        parent_pid: int,
+        node_name: str,
+    ) -> None:
+        """
+        Queue a rate-limited new-certificate file for replay by the
+        retry-queue drainer thread once capacity frees up. Bounded FIFO --
+        at capacity, the oldest entry is dropped to make room, so this can't
+        become a second unbounded memory sink for the same abuse the rate
+        limiter itself defends against. De-duped on cert_path so a file that
+        keeps getting touched while already queued doesn't pile up repeat
+        entries.
+        """
+        with self._retry_queue_lock:
+            if cert_path in self._retry_queue_paths:
+                return
+            if len(self._retry_queue) >= self._retry_queue_max_size:
+                dropped = self._retry_queue.popleft()
+                self._retry_queue_paths.discard(dropped.cert_path)
+                self.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped').inc()
+                logger.warning(
+                    f"Rate-limit retry queue full ({self._retry_queue_max_size}) -- "
+                    f"dropped oldest queued file {dropped.cert_path} to make room for {cert_path}"
+                )
+            self._retry_queue.append(_RetryEntry(
+                cert_path, process_name, pid, namespace,
+                tetragon_pod, parent_process, parent_pid, node_name,
+            ))
+            self._retry_queue_paths.add(cert_path)
+            depth = len(self._retry_queue)
+        self.metrics.retry_queue_depth.labels(node_name=self.metrics._node_name).set(depth)
+
+    def _start_retry_queue_drainer(self) -> None:
+        """
+        Start a background daemon thread that replays rate-limited
+        new-certificate files from the retry queue as capacity frees up.
+
+        Shares _new_cert_rate_limiter with every other trigger path rather
+        than having its own budget, so replays and fresh arrivals compete
+        for the same fixed throughput instead of the queue draining at an
+        unbounded rate alongside live traffic.
+        """
+        def _drain():
+            while True:
+                with self._retry_queue_lock:
+                    entry = self._retry_queue[0] if self._retry_queue else None
+                if entry is None:
+                    time.sleep(1.0)
+                    continue
+
+                # The path may have already been fully processed by an
+                # unrelated event (a fresh Tetragon re-access, or
+                # periodic_scan finding it under scan_paths) since it was
+                # queued -- drop it without spending a token on a no-op
+                # replay.
+                with self._known_paths_lock:
+                    already_known = entry.cert_path in self._known_paths
+                if already_known:
+                    with self._retry_queue_lock:
+                        if self._retry_queue and self._retry_queue[0] == entry:
+                            self._retry_queue.popleft()
+                            self._retry_queue_paths.discard(entry.cert_path)
+                            self.metrics.retry_queue_depth.labels(
+                                node_name=self.metrics._node_name
+                            ).set(len(self._retry_queue))
+                    continue
+
+                try:
+                    result = self._try_process_new_certificate_file(
+                        entry.cert_path, entry.process_name, entry.pid, entry.namespace,
+                        entry.tetragon_pod, entry.parent_process, entry.parent_pid, entry.node_name,
+                    )
+                except Exception as e:
+                    logger.error(f"Error replaying queued certificate file {entry.cert_path}: {e}",
+                                 exc_info=True)
+                    result = []  # don't retry an entry that itself errors indefinitely
+
+                if result is None:
+                    time.sleep(0.1)  # no token yet -- back off briefly rather than busy-spin
+                    continue
+
+                with self._retry_queue_lock:
+                    if self._retry_queue and self._retry_queue[0] == entry:
+                        self._retry_queue.popleft()
+                        self._retry_queue_paths.discard(entry.cert_path)
+                        depth = len(self._retry_queue)
+                    else:
+                        depth = len(self._retry_queue)
+                self.metrics.retry_queue_depth.labels(node_name=self.metrics._node_name).set(depth)
+                logger.info(f"Replayed rate-limited certificate file {entry.cert_path} from retry queue")
+
+        thread = threading.Thread(target=_drain, daemon=True)
+        thread.name = 'rate-limit-retry-drainer'
+        thread.start()
+        logger.info(f"Started rate-limit retry queue drainer (max size: {self._retry_queue_max_size})")
+
     def _start_background_thread(self, target, name: str) -> bool:
         """
         Start a daemon thread for probe/large-file work, bounded by
@@ -1039,15 +1321,10 @@ class CertificateAnalyzer:
         def _worker():
             try:
                 try:
-                    cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
-                    if cert_infos:
-                        logger.info(
-                            f"Found {len(cert_infos)} certificate(s) in {cert_path} "
-                            f"(parsed in background — large file)"
-                        )
-                        self._finish_new_certificate_file(
-                            cert_infos, tetragon_pod, parent_process, parent_pid, node_name
-                        )
+                    self._analyze_and_finish_new_certificate_file(
+                        cert_path, process_name, pid, namespace,
+                        tetragon_pod, parent_process, parent_pid, node_name,
+                    )
                 except Exception as e:
                     # Mirror the error handling start()'s event loop gives every
                     # synchronous event — this runs on its own thread, so nothing
@@ -2079,13 +2356,9 @@ class CertificateAnalyzer:
                 return
             self._new_file_in_flight.add(cert_path)
         try:
-            cert_infos = self.analyze_certificate(cert_path, process_name, pid, namespace)
-            if not cert_infos:
-                return
-
-            logger.info(f"Found {len(cert_infos)} certificate(s) in {cert_path}")
-            self._finish_new_certificate_file(
-                cert_infos, tetragon_pod, parent_process, parent_pid, event.node_name
+            self._analyze_and_finish_new_certificate_file(
+                cert_path, process_name, pid, namespace,
+                tetragon_pod, parent_process, parent_pid, event.node_name,
             )
         finally:
             with self._new_path_lock:
@@ -2334,6 +2607,7 @@ class CertificateAnalyzer:
         self.check_tetragon_policies(stub)
         self._start_policy_monitor(stub)
         self._start_process_metrics_monitor()
+        self._start_retry_queue_drainer()
 
         request = events_pb2.GetEventsRequest(
             allow_list=[
@@ -2458,13 +2732,11 @@ class CertificateAnalyzer:
                             continue
                         self._new_file_in_flight.add(cert_path)
                     try:
-                        cert_infos = self.analyze_certificate(cert_path, "periodic_scan", 0)
-                        if cert_infos:
-                            self._finish_new_certificate_file(
-                                cert_infos, tetragon_pod=None, parent_process="",
-                                parent_pid=0, node_name=_NODE_NAME,
-                            )
-                            cert_count += len(cert_infos)
+                        cert_infos = self._analyze_and_finish_new_certificate_file(
+                            cert_path, "periodic_scan", 0, "",
+                            None, "", 0, _NODE_NAME,
+                        )
+                        cert_count += len(cert_infos)
                     finally:
                         with self._new_path_lock:
                             self._new_file_in_flight.discard(cert_path)

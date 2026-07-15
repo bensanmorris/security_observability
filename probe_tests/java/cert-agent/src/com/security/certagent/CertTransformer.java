@@ -38,6 +38,26 @@ public class CertTransformer implements ClassFileTransformer {
     private static final String BRIDGE_METHOD = "reportCertificate";
     private static final String BRIDGE_DESC   = "(Ljava/security/cert/Certificate;)V";
 
+    // Tracked so CertAgent.setup() can report a truthful, non-misleading
+    // initialization status instead of an unconditional "Initialized" that
+    // doesn't reflect whether the instrumentation actually took effect.
+    // transform() can be invoked again at any later point (e.g. a fresh
+    // KeyStore load well after setup() returns), so this can flip to true
+    // asynchronously -- CertAgent only reports what it can verify
+    // synchronously at setup() time; this flag/message are the source of
+    // truth for anything that happens afterward. volatile because the JVM
+    // may invoke transform() from a different thread than setup() ran on.
+    private static volatile boolean transformFailed = false;
+    private static volatile String lastFailureReason = null;
+
+    public static boolean hasFailed() {
+        return transformFailed;
+    }
+
+    public static String getLastFailureReason() {
+        return lastFailureReason;
+    }
+
     @Override
     public byte[] transform(ClassLoader loader,
                             String className,
@@ -58,7 +78,14 @@ public class CertTransformer implements ClassFileTransformer {
             cr.accept(new KeyStoreVisitor(cw), ClassReader.EXPAND_FRAMES);
             return cw.toByteArray();
         } catch (Exception e) {
-            System.err.println("[cert-agent] Transformation failed for " + className + ": " + e);
+            transformFailed = true;
+            lastFailureReason = e.toString();
+            // Distinct, consistently-greppable marker (matches CertAgent's own
+            // failure lines) -- this is the only signal available when the
+            // failure happens after setup() already returned, so it needs to
+            // be unambiguous on its own, not just a generic warning.
+            System.err.println("[cert-agent] INSTRUMENTATION FAILURE: transform of " + className
+                + " failed -- certificate observations for this JVM will be incomplete: " + e);
             return null;
         }
     }

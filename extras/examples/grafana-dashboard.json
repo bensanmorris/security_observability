@@ -604,7 +604,7 @@
           "type": "table",
           "gridPos": {
             "h": 6,
-            "w": 18,
+            "w": 24,
             "x": 0,
             "y": 7
           },
@@ -622,9 +622,26 @@
               "instant": true,
               "format": "table",
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "cert_analyzer_scan_interval_seconds{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "B"
             }
           ],
           "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "node_name",
+                "mode": "outer"
+              }
+            },
             {
               "id": "organize",
               "options": {
@@ -633,7 +650,9 @@
                   "__name__": true,
                   "instance": true,
                   "job": true,
-                  "Value": true
+                  "Value": true,
+                  "Time 1": true,
+                  "Value #A": true
                 },
                 "indexByName": {
                   "node_name": 0,
@@ -652,8 +671,11 @@
                   "large_file_byte_cap": 13,
                   "max_concurrent_background_threads": 14,
                   "max_processes_per_cert": 15,
-                  "alert_threshold_days": 16,
-                  "scan_paths": 17
+                  "new_cert_events_per_second": 16,
+                  "retry_queue_max_size": 17,
+                  "alert_threshold_days": 18,
+                  "Value #B": 19,
+                  "scan_paths": 20
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -673,7 +695,10 @@
                   "max_concurrent_background_threads": "Max Concurrent Background Threads",
                   "max_processes_per_cert": "Max Processes Per Cert",
                   "alert_threshold_days": "Alert Threshold (days)",
-                  "scan_paths": "Scan Paths"
+                  "scan_paths": "Scan Paths",
+                  "Value #B": "Scan Interval (s)",
+                  "new_cert_events_per_second": "New Cert Rate Limit (events/s)",
+                  "retry_queue_max_size": "Retry Queue Max Size"
                 }
               }
             }
@@ -690,52 +715,6 @@
               }
             },
             "overrides": []
-          }
-        },
-        {
-          "id": 50,
-          "title": "Scan Interval",
-          "type": "stat",
-          "gridPos": {
-            "h": 6,
-            "w": 6,
-            "x": 18,
-            "y": 7
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "cert_analyzer_scan_interval_seconds{node_name=~\"$node\"}",
-              "instant": true,
-              "format": "time_series",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "s",
-              "custom": {}
-            },
-            "overrides": []
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto",
-            "colorMode": "none",
-            "graphMode": "none"
           }
         }
       ]
@@ -2967,6 +2946,61 @@
           }
         },
         {
+          "id": 51,
+          "title": "Retry Queue Depth",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 16,
+            "y": 112
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "cert_analyzer_retry_queue_depth{node_name=~\"$node\"}",
+              "legendFormat": "{{node_name}} queued",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
           "id": 26,
           "title": "Cache Utilization",
           "type": "bargauge",
@@ -3565,7 +3599,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "id": 49,
+          "id": 50,
           "title": "TLS Probe Results",
           "description": "Protocol version and cipher suite negotiated during a TLS port probe. The server's ceiling with a modern client, not necessarily what every real client gets.",
           "type": "table",
