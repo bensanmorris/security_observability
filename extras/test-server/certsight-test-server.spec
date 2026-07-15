@@ -119,6 +119,8 @@ install -d %{buildroot}%{app_venv}
 install -d %{buildroot}%{app_home}/static
 
 install -m 0644 server.py             %{buildroot}%{app_home}/server.py
+install -m 0644 blast_radius.py       %{buildroot}%{app_home}/blast_radius.py
+install -m 0644 chain_explorer.py     %{buildroot}%{app_home}/chain_explorer.py
 install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
 install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
 install -m 0644 tcp_connect_probe_helper.py %{buildroot}%{app_home}/tcp_connect_probe_helper.py
@@ -197,6 +199,8 @@ exit 0
 %license %{_defaultlicensedir}/%{name}/LICENSE
 %dir %{app_home}
 %{app_home}/server.py
+%{app_home}/blast_radius.py
+%{app_home}/chain_explorer.py
 %{app_home}/use_cases.py
 %{app_home}/tls_probe_helper.py
 %{app_home}/tcp_connect_probe_helper.py
@@ -211,6 +215,24 @@ exit 0
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add a "Certificate chain explorer" link to the console header
+  (chain_explorer.py), generated live on click against Prometheus --
+  groups tls_certificate_expiry_days/tls_certificate_self_signed by
+  cert_path, and renders each bundle's chain length and leaf/intermediate/
+  root structure, flagging any non-self-signed cert whose issuer isn't
+  present elsewhere in the same bundle (mirrors
+  extras/kafka/list_cert_chains.py's missing-intermediate detection, but
+  from Prometheus's current state rather than replayed Kafka history); no
+  new package dependencies (stdlib only)
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add a "Certificate blast radius explorer" link to the console header
+  (blast_radius.py), generated live on click against Prometheus --
+  queries tls_certificate_expiry_days/tls_certificate_process_info and
+  renders an interactive, click-through overview of every discovered
+  certificate and the processes/pods/nodes that load it; configurable via
+  --prometheus-url / TEST_SERVER_PROMETHEUS_URL (default
+  http://localhost:9090), no new package dependencies (stdlib only)
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add java-jca-keystore use case (CertAgentTest.java, compiled at build
   time) exercising CertSight's java_cert_agent_write uprobe detection path

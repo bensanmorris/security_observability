@@ -48,6 +48,10 @@ streamed live via Server-Sent Events as it arrives.
   RHEL8) TracingPolicy loaded, and `/usr/lib64/libssl.so.3` present on
   this host -- that's the literal path both policies hook, and the one
   this use case loads via `ctypes`
+- For the "Certificate blast radius explorer" link specifically: a
+  reachable Prometheus scraping cert-analyzer's `/metrics` endpoint (see
+  `--prometheus-url` / `TEST_SERVER_PROMETHEUS_URL` below) -- not required
+  for anything else in this console
 
 ## Install
 
@@ -118,7 +122,9 @@ Then open http://localhost:8090.
 broker is whatever you configured cert-analyzer's `[kafka] bootstrap_servers`
 to point at. `--topic` defaults to `cert-analyzer-events` (cert-analyzer's
 own default); pass `--port` to change this server's own listen port
-(default `8090`).
+(default `8090`). `--prometheus-url` defaults to `http://localhost:9090`
+and only matters for the "Certificate blast radius explorer" link -- adjust
+it if Prometheus lives elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
 
 By default this only listens on `127.0.0.1`, so it's only reachable from a
 browser on the same host. If the target host is headless and you're
@@ -129,6 +135,50 @@ listen on all interfaces, then open `http://<target-host>:8090` instead of
 **Do not** bind this beyond localhost or a trusted lab network: every use
 case executes a real, hardcoded action against this host on request from
 any browser that can reach it.
+
+## Certificate blast radius explorer
+
+The "Certificate blast radius explorer" link in the header
+(`blast_radius.py`) is generated live, on click, against Prometheus --
+querying cert-analyzer's own `tls_certificate_expiry_days` and
+`tls_certificate_process_info` metrics fresh each time rather than a
+pre-baked snapshot. It shows every certificate cert-analyzer has
+discovered, colored by expiry urgency; clicking one reveals every
+distinct process/pod/node Tetragon has observed loading it, i.e. what
+would actually break if that certificate were rotated or revoked.
+
+Unlike the rest of this console it needs a reachable Prometheus, not just
+Tetragon/cert-analyzer/Kafka -- see `--prometheus-url` /
+`TEST_SERVER_PROMETHEUS_URL` above. If Prometheus is unreachable or has no
+matching series yet, the link returns a plain-text error explaining why
+instead of a broken page.
+
+This is a bundled copy of the standalone
+[`extras/cert_blast_radius.py`](../cert_blast_radius.py) script (same
+rendering logic, trimmed to a library) -- see that file if you want to
+generate a static HTML report without running this console at all.
+
+## Certificate chain explorer
+
+The "Certificate chain explorer" link (`chain_explorer.py`) is generated
+live the same way, grouping cert-analyzer's `tls_certificate_expiry_days`
+and `tls_certificate_self_signed` metrics by `cert_path` and ordering each
+bundle by `cert_index` (0 = leaf) to show its chain length and
+leaf/intermediate/root structure.
+
+It separately flags a real misconfiguration: any non-self-signed cert in a
+bundle whose issuer doesn't match any other cert's subject in that same
+bundle -- the "server forgot to include its intermediate CA" case. Bundles
+with a missing intermediate sort to the top of the overview. This mirrors
+[`extras/kafka/list_cert_chains.py`](../kafka/list_cert_chains.py)'s
+detection logic, but reads Prometheus's current live state instead of
+replaying Kafka's first-time-discovery history, so it reflects every
+bundle cert-analyzer currently knows about, not just what Kafka has seen
+since it was enabled.
+
+Also needs the reachable Prometheus described above (`--prometheus-url` /
+`TEST_SERVER_PROMETHEUS_URL`); same plain-text-error behavior if it's
+unreachable or has no data yet.
 
 ## Running under systemd (RPM install only)
 
@@ -176,8 +226,9 @@ sudo systemctl stop certsight-test-server      # sudo systemctl disable ... to a
 the same format as `cert-analyzer.conf` -- see the commented-out options
 in the shipped file for the full list (`TEST_SERVER_KAFKA_HOST`,
 `TEST_SERVER_KAFKA_PORT`, `TEST_SERVER_TOPIC`, `TEST_SERVER_PORT`,
-`TEST_SERVER_BIND`). It's marked `%config(noreplace)` in the spec, so an
-RPM upgrade won't overwrite edits you've made to it.
+`TEST_SERVER_BIND`, `TEST_SERVER_PROMETHEUS_URL`). It's marked
+`%config(noreplace)` in the spec, so an RPM upgrade won't overwrite edits
+you've made to it.
 
 ## Use cases
 
