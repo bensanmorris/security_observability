@@ -241,27 +241,19 @@ def _make_ca_cert(
     return key, subject, cert
 
 
-def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
-    missing_str = params.get("missing_intermediates", _DEFAULT_MISSING_INTERMEDIATE_COUNT)
-    if missing_str not in _ALLOWED_MISSING_INTERMEDIATE_COUNTS:
-        return UseCaseResult(
-            ok=False,
-            detail=f"invalid missing_intermediates '{missing_str}' -- must be one of "
-            f"{_ALLOWED_MISSING_INTERMEDIATE_COUNTS}",
-        )
-    missing_count = int(missing_str)
-
-    token = uuid.uuid4().hex[:12]
-
+def _build_5_tier_chain(token: str):
+    """Builds root -> intermediate-1 -> intermediate-2 -> intermediate-3 ->
+    leaf, each tier signed by the one before it. path_length counts down so
+    each intermediate is only ever asserted to be allowed to sign the CAs
+    actually beneath it in this chain. Returns (root_cert, intermediates,
+    leaf_cn, leaf_cert) -- intermediates is [(subject, cert), ...] in
+    root-to-leaf order. Shared by both chain use cases below so the two
+    stay structurally identical except for how the result gets written out."""
     root_key, root_subject, root_cert = _make_ca_cert(
         f"certsight-test-chain-root-{token}.local", None, None, None,
     )
 
-    # Chain root -> intermediate-1 -> intermediate-2 -> intermediate-3, each
-    # signed by the previous tier. path_length counts down so each
-    # intermediate is only ever asserted to be allowed to sign the CAs
-    # actually beneath it in this chain.
-    intermediates = []  # [(subject, cert), ...] in root-to-leaf order
+    intermediates = []
     signing_key, signing_subject = root_key, root_subject
     for i in range(1, _CHAIN_INTERMEDIATE_COUNT + 1):
         cn = f"certsight-test-chain-int{i}-{token}.local"
@@ -286,6 +278,28 @@ def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(leaf_cn)]), critical=False)
         .sign(signing_key, hashes.SHA256())
     )
+    return root_cert, intermediates, leaf_cn, leaf_cert
+
+
+def _validate_missing_intermediates_param(params: dict):
+    """Returns (missing_count, None) or (None, error_result)."""
+    missing_str = params.get("missing_intermediates", _DEFAULT_MISSING_INTERMEDIATE_COUNT)
+    if missing_str not in _ALLOWED_MISSING_INTERMEDIATE_COUNTS:
+        return None, UseCaseResult(
+            ok=False,
+            detail=f"invalid missing_intermediates '{missing_str}' -- must be one of "
+            f"{_ALLOWED_MISSING_INTERMEDIATE_COUNTS}",
+        )
+    return int(missing_str), None
+
+
+def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
+    missing_count, error = _validate_missing_intermediates_param(params)
+    if error:
+        return error
+
+    token = uuid.uuid4().hex[:12]
+    root_cert, intermediates, leaf_cn, leaf_cert = _build_5_tier_chain(token)
 
     # Always drop the N intermediates closest to the root -- this produces
     # exactly one gap in the chain (between whichever intermediate is left
@@ -328,6 +342,70 @@ def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
             f"bundle, wrote the remaining {len(kept_intermediates) + 2} certs to {path}, and "
             f"cat'd it -- expect the chain-explorer view to show a MISSING gap between "
             f"{gap_note} and the root"
+        ),
+    )
+
+
+def _generate_chain_across_multiple_files(params: dict) -> UseCaseResult:
+    missing_count, error = _validate_missing_intermediates_param(params)
+    if error:
+        return error
+
+    token = uuid.uuid4().hex[:12]
+    root_cert, intermediates, leaf_cn, leaf_cert = _build_5_tier_chain(token)
+
+    # Same drop rule as the single-bundle use case above -- drop the N
+    # intermediates closest to the root. The difference here is that every
+    # *surviving* cert gets written to and cat'd from its own separate
+    # file, so cert-analyzer discovers each as an independent cert_path --
+    # reassembling the chain requires chain-explorer's cross-file subject/
+    # issuer matching, not just cert_index ordering within one bundle.
+    kept_intermediates = intermediates[missing_count:]
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+
+    written_paths = []
+    try:
+        for name, cert in (
+            [("leaf", leaf_cert)]
+            # Named by original tier number (missing_count + position), not
+            # sequential kept-position, so the file name matches the CN
+            # actually baked into the cert -- e.g. if intermediate-1 was
+            # dropped, the first surviving file is named "int2", not "int1".
+            + [
+                (f"int{missing_count + i}", cert)
+                for i, (_subject, cert) in enumerate(kept_intermediates, start=1)
+            ]
+            + [("root", root_cert)]
+        ):
+            path = _GENERATED_CERT_DIR / f"chain-multifile-{name}-{token}.crt"
+            path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            path.chmod(0o644)
+            proc = subprocess.run(["cat", str(path)], capture_output=True, text=True, timeout=10)
+            if proc.returncode != 0:
+                return UseCaseResult(ok=False, detail=f"cat {path} exited {proc.returncode}: {proc.stderr.strip()}")
+            written_paths.append(path)
+    except subprocess.TimeoutExpired as e:
+        return UseCaseResult(ok=False, detail=f"cat timed out: {e}")
+
+    # A single-cert file is never flagged MISSING by chain-explorer's design
+    # (see _find_chain_gaps's docstring in chain_explorer.py) -- only cross-
+    # file *resolution* is ever shown for these, regardless of how many
+    # intermediates were dropped, so this use case can't demonstrate the
+    # MISSING state itself; use the single-bundle use case above for that.
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"generated the same 5-certificate chain (root -> 3 intermediates -> leaf, "
+            f"CN={leaf_cn}) as the single-bundle use case above, dropped {missing_count} of "
+            f"the 3 intermediates (closest to the root), but wrote each of the remaining "
+            f"{len(written_paths)} certs to its own separate file and cat'd it individually -- "
+            f"expect the chain-explorer view to link them together via FOUND ELSEWHERE boxes "
+            f"across files rather than cert_index ordering within one file. Note: because each "
+            f"surviving cert lives in its own single-cert file here, none of them will show as "
+            f"MISSING even with intermediates dropped -- single-cert bundles are never flagged "
+            f"missing, to avoid flagging every ordinary standalone leaf cert on the host"
         ),
     )
 
@@ -1254,12 +1332,77 @@ USE_CASES: List[UseCase] = [
             "Server-Sent Events stream, where they land in the right-hand "
             "pane.",
 
-            "Open the [chain explorer](/chain-explorer) afterwards: it "
-            "reads the same Prometheus metrics back out, groups certs by "
-            "file path, and -- via the same issuer-not-in-subjects check as "
-            "extras/kafka/list_cert_chains.py's find_missing_intermediates() "
-            "-- renders a dashed red MISSING box wherever this bundle's "
-            "chain has a gap.",
+            "Open the [chain explorer](/chain-explorer) afterwards: it reads "
+            "the same Prometheus metrics back out, groups certs by file "
+            "path, and checks every non-self-signed cert's issuer against "
+            "every bundle it currently knows about -- not just this one -- "
+            "before rendering a dashed red MISSING box; since the dropped "
+            "intermediate(s) were never written anywhere at all, they stay "
+            "genuinely unresolvable and show as MISSING here.",
+        ],
+    ),
+    UseCase(
+        id="cert-chain-across-multiple-files",
+        label="generate a 5-cert chain split across several files",
+        description=(
+            "Same 5-certificate chain and same missing-intermediates drop "
+            "rule as the use case above, but instead of writing the "
+            "surviving certs to one PEM bundle, each gets its own separate "
+            "file, cat'd individually. Exercises chain-explorer's "
+            "cross-file chain reconstruction: reassembling the chain now "
+            "requires matching issuer/subject across bundles, not just "
+            "cert_index ordering within one file -- check the chain-"
+            "explorer view afterwards for FOUND ELSEWHERE links between "
+            "the separate files."
+        ),
+        run=_generate_chain_across_multiple_files,
+        params=[
+            UseCaseParam(
+                name="missing_intermediates",
+                label="missing intermediates",
+                type="select",
+                options=_ALLOWED_MISSING_INTERMEDIATE_COUNTS,
+                default=_DEFAULT_MISSING_INTERMEDIATE_COUNT,
+            ),
+        ],
+        pipeline=[
+            "This server builds the same full 5-tier certificate chain in "
+            "memory as the single-bundle use case above -- a self-signed "
+            "root CA, 3 intermediate CAs each signed by the one before it, "
+            "and a leaf signed by the last intermediate.",
+
+            "This server drops the same N intermediates closest to the "
+            "root, but writes each *surviving* cert (leaf, remaining "
+            "intermediates, root) to its own separate file under "
+            "/dev/shm/certsight-test-server/, running 'cat <path>' "
+            "against each one individually -- so this is several real "
+            "open()/read() calls, not one.",
+
+            "Tetragon's kprobe on fd_install fires once per file, and "
+            "CertSight discovers each as its own independent cert_path -- "
+            "unlike the single-bundle use case, there's no cert_index "
+            "grouping to lean on; every file here is its own single-cert "
+            "bundle from cert-analyzer's point of view.",
+
+            "CertSight records each cert as its own first-time discovery "
+            "(unique path + serial) and -- since [kafka] enabled = true -- "
+            "publishes a 'certificate_discovered' event per file to the "
+            "cert-analyzer-events Kafka topic, pushed to the browser the "
+            "same way as every other use case here.",
+
+            "Open the [chain explorer](/chain-explorer) afterwards: for "
+            "each single-cert bundle, it looks up that cert's issuer "
+            "against every *other* bundle it knows about and, on a match, "
+            "renders a clickable FOUND ELSEWHERE box linking straight to "
+            "the bundle that actually has it -- reconstructing the chain "
+            "across files instead of leaving each file looking like an "
+            "unremarkable, unrelated lone leaf cert.",
+
+            "Note: single-cert bundles are never flagged MISSING (to avoid "
+            "flagging every ordinary standalone leaf cert on the host), so "
+            "even with intermediates dropped here, this use case only ever "
+            "demonstrates the FOUND ELSEWHERE state, not MISSING -- use the "
+            "single-bundle use case above for that.",
         ],
     ),
 ]
