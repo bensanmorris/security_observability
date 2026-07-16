@@ -61,7 +61,8 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
-.subtitle { color: var(--secondary); font-size: 0.9rem; margin: 0 0 1.5rem; }
+.subtitle { color: var(--secondary); font-size: 0.9rem; margin: 0 0 0.5rem; }
+.note { color: var(--critical); font-size: 0.78rem; font-style: italic; margin: 0 0 1.5rem; }
 #overview {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 12px; max-width: 1100px;
@@ -262,6 +263,7 @@ def render_page(all_certs):
 <body>
 <h1>Certificate Blast Radius</h1>
 <p class="subtitle">{len(all_certs)} certificate(s) monitored &middot; click one to see every process, pod, and node that loads it</p>
+<p class="note">Data comes from Prometheus's last scrape of cert-analyzer's metrics, not a live query -- a newly-discovered certificate or process can take up to one Prometheus scrape interval to show up here.</p>
 
 <div id="overview">{"".join(overview_cards)}</div>
 

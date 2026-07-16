@@ -92,6 +92,15 @@ _DEFAULT_EXPIRED_DAYS = "30"
 _MIN_EXPIRED_DAYS = 1
 _MAX_EXPIRED_DAYS = 3650
 
+# The chain-with-missing-intermediates use case always builds a fixed 5-tier
+# chain (root -> intermediate-1 -> intermediate-2 -> intermediate-3 -> leaf)
+# and then omits some number of the 3 intermediates from the written bundle.
+# Server-side allowlist for the same reason as _ALLOWED_KEY_SIZES above --
+# this endpoint is unauthenticated.
+_CHAIN_INTERMEDIATE_COUNT = 3
+_ALLOWED_MISSING_INTERMEDIATE_COUNTS = ["1", "2", "3"]
+_DEFAULT_MISSING_INTERMEDIATE_COUNT = "1"
+
 
 def _generate_self_signed_cert(cn: str, key_size: int, expired_days: int = 0) -> Tuple[bytes, bytes]:
     """Returns (cert_pem, key_pem) for a self-signed cert, SAN=cn.
@@ -203,6 +212,122 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
             f"{path} and cat'd it{fips_note}{expiry_note} -- unique path and serial number "
             "guarantee CertSight treats this as a first-time discovery, so a new "
             "Kafka event should always appear"
+        ),
+    )
+
+
+def _make_ca_cert(
+    cn: str,
+    issuer_key: Optional[rsa.RSAPrivateKey],
+    issuer_subject: Optional[x509.Name],
+    path_length: Optional[int],
+):
+    """Builds one CA cert. issuer_key/issuer_subject=None means self-signed
+    (i.e. this is the root)."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer_subject if issuer_subject is not None else subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
+        .sign(issuer_key if issuer_key is not None else key, hashes.SHA256())
+    )
+    return key, subject, cert
+
+
+def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
+    missing_str = params.get("missing_intermediates", _DEFAULT_MISSING_INTERMEDIATE_COUNT)
+    if missing_str not in _ALLOWED_MISSING_INTERMEDIATE_COUNTS:
+        return UseCaseResult(
+            ok=False,
+            detail=f"invalid missing_intermediates '{missing_str}' -- must be one of "
+            f"{_ALLOWED_MISSING_INTERMEDIATE_COUNTS}",
+        )
+    missing_count = int(missing_str)
+
+    token = uuid.uuid4().hex[:12]
+
+    root_key, root_subject, root_cert = _make_ca_cert(
+        f"certsight-test-chain-root-{token}.local", None, None, None,
+    )
+
+    # Chain root -> intermediate-1 -> intermediate-2 -> intermediate-3, each
+    # signed by the previous tier. path_length counts down so each
+    # intermediate is only ever asserted to be allowed to sign the CAs
+    # actually beneath it in this chain.
+    intermediates = []  # [(subject, cert), ...] in root-to-leaf order
+    signing_key, signing_subject = root_key, root_subject
+    for i in range(1, _CHAIN_INTERMEDIATE_COUNT + 1):
+        cn = f"certsight-test-chain-int{i}-{token}.local"
+        new_key, new_subject, new_cert = _make_ca_cert(
+            cn, signing_key, signing_subject, _CHAIN_INTERMEDIATE_COUNT - i,
+        )
+        intermediates.append((new_subject, new_cert))
+        signing_key, signing_subject = new_key, new_subject
+
+    leaf_cn = f"certsight-test-chain-leaf-{token}.local"
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, leaf_cn)])
+    now = datetime.now(timezone.utc)
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_subject)
+        .issuer_name(signing_subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(leaf_cn)]), critical=False)
+        .sign(signing_key, hashes.SHA256())
+    )
+
+    # Always drop the N intermediates closest to the root -- this produces
+    # exactly one gap in the chain (between whichever intermediate is left
+    # closest to the leaf, or the leaf itself if all 3 are dropped, and the
+    # root) instead of scattering multiple gaps through the middle.
+    kept_intermediates = intermediates[missing_count:]
+
+    token_suffix = f"chain-missing-{missing_count}-{token}"
+    path = _GENERATED_CERT_DIR / f"{token_suffix}.crt"
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+
+    # Bundle order matches how a real misconfigured server presents a chain
+    # (leaf first, then whatever's left, root last) -- same convention as
+    # test_analyzer.py's generate_broken_chain().
+    with path.open("wb") as f:
+        f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+        for _subject, cert in kept_intermediates:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        f.write(root_cert.public_bytes(serialization.Encoding.PEM))
+    path.chmod(0o644)
+
+    try:
+        proc = subprocess.run(["cat", str(path)], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return UseCaseResult(ok=False, detail=f"cat {path} timed out")
+
+    if proc.returncode != 0:
+        return UseCaseResult(ok=False, detail=f"cat {path} exited {proc.returncode}: {proc.stderr.strip()}")
+
+    gap_note = (
+        "the leaf" if missing_count == _CHAIN_INTERMEDIATE_COUNT
+        else "the remaining intermediate closest to the leaf"
+    )
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"generated a 5-certificate chain (root -> 3 intermediates -> leaf, CN={leaf_cn}), "
+            f"dropped {missing_count} of the 3 intermediates (closest to the root) from the "
+            f"bundle, wrote the remaining {len(kept_intermediates) + 2} certs to {path}, and "
+            f"cat'd it -- expect the chain-explorer view to show a MISSING gap between "
+            f"{gap_note} and the root"
         ),
     )
 
@@ -1071,6 +1196,70 @@ USE_CASES: List[UseCase] = [
             "Server-Sent Events stream, where it lands in the right-hand "
             "pane. This server kills the JVM a few seconds later, once "
             "its lifetime elapses, so no stray process is left running.",
+        ],
+    ),
+    UseCase(
+        id="cert-chain-missing-intermediates",
+        label="generate a 5-cert chain with missing intermediates",
+        description=(
+            "Builds a full 5-certificate chain (root CA -> 3 intermediate CAs "
+            "-> leaf) and writes only some of it to a single PEM bundle, "
+            "omitting 1, 2, or 3 intermediates (closest to the root) before "
+            "cat'ing it. Exercises the same broken-chain scenario as "
+            "extras/test_analyzer.py's generate_broken_chain() fixture, but "
+            "clickable and with a configurable number of missing links -- "
+            "check the chain-explorer view afterwards for a MISSING gap."
+        ),
+        run=_generate_chain_with_missing_intermediates,
+        params=[
+            UseCaseParam(
+                name="missing_intermediates",
+                label="missing intermediates",
+                type="select",
+                options=_ALLOWED_MISSING_INTERMEDIATE_COUNTS,
+                default=_DEFAULT_MISSING_INTERMEDIATE_COUNT,
+            ),
+        ],
+        pipeline=[
+            "This server builds a full 5-tier certificate chain in memory: "
+            "a self-signed root CA, 3 intermediate CAs each signed by the "
+            "one before it, and a leaf certificate signed by the last "
+            "intermediate -- a real, validly-signed chain, just like a CA "
+            "would issue.",
+
+            "This server then writes only a subset of that chain to a "
+            "single PEM bundle: the leaf, then whichever intermediates "
+            "weren't dropped, then the root -- always dropping the "
+            "intermediate(s) closest to the root first, so the bundle has "
+            "exactly one gap in it rather than several scattered ones.",
+
+            "This server runs 'cat <path>' as a real subprocess against "
+            "that bundle -- the same real open()/read() every other "
+            "file-based use case here triggers.",
+
+            "Tetragon's kprobe on fd_install (certificate-file-access.yaml) "
+            "fires for the .crt extension and CertSight reads the same "
+            "file itself, parsing every certificate in the bundle -- "
+            "cert-analyzer already supports multi-cert PEM files, indexing "
+            "each cert by its position (cert_index).",
+
+            "CertSight records each cert as its own discovery (unique path "
+            "+ index + serial), updates Prometheus metrics per cert-index, "
+            "and -- since [kafka] enabled = true -- publishes a "
+            "'certificate_discovered' event per cert to the "
+            "cert-analyzer-events Kafka topic.",
+
+            "This test server's own background Kafka consumer thread pushes "
+            "each of those events to every connected browser over the "
+            "Server-Sent Events stream, where they land in the right-hand "
+            "pane.",
+
+            "Open the [chain explorer](/chain-explorer) afterwards: it "
+            "reads the same Prometheus metrics back out, groups certs by "
+            "file path, and -- via the same issuer-not-in-subjects check as "
+            "extras/kafka/list_cert_chains.py's find_missing_intermediates() "
+            "-- renders a dashed red MISSING box wherever this bundle's "
+            "chain has a gap.",
         ],
     ),
 ]
