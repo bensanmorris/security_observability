@@ -296,6 +296,61 @@ basic operational needs.
 
 ---
 
+## 6. Interactive test-console Pod (optional)
+
+For demos: run [`extras/test-server/`](test-server/TEST-SERVER-README.md) — the two-pane
+test-console UI used to exercise CertSight's detections one at a time — inside the cluster
+instead of on the operator's laptop, so its use cases (file writes, TLS binds/connects,
+PKCS12/JKS loads) happen in-cluster and get picked up by the same Tetragon + cert-expiry-monitor
+already watching the node.
+
+```bash
+bash extras/openshift/scripts/deploy-test-server.sh
+```
+
+(also reachable via the [`openshift-utils.sh`](openshift/openshift-utils.sh) menu) — builds
+[`extras/test-server/Containerfile`](test-server/Containerfile), pushes it under a fresh tag to
+the internal registry (same reasoning as "Why a fresh tag, not just re-pushing `:latest`" below),
+and applies/updates [`extras/openshift/test-server-pod.yaml`](openshift/test-server-pod.yaml).
+
+Drive it:
+
+```bash
+oc port-forward -n certsight pod/cert-test-server 8090:8090   # then open http://localhost:8090
+```
+
+or skip the UI and run a use case straight from a shell:
+
+```bash
+oc rsh -n certsight cert-test-server
+python3 -c "from use_cases import USE_CASES_BY_ID; print(USE_CASES_BY_ID['fresh-test-cert'].run({}))"
+```
+
+No `hostPath`, `hostNetwork`, or elevated SCC needed — Tetragon's `fd_install`/`tcp_connect`
+kprobes are node-wide with no path or namespace filter (see
+[`tetragon-policies/certificate-file-access.yaml`](../tetragon-policies/certificate-file-access.yaml),
+[`tcp-connect-tls.yaml`](../tetragon-policies/tcp-connect-tls.yaml)), so this Pod's real
+file/network activity is picked up exactly like any other process on the node would be. The one
+thing it *can't* exercise is cert-analyzer's periodic filesystem scan (`CERT_SCAN_PATHS` above is
+restricted to literal host paths under `/host/etc/...`) — that needs the same `hostPath` +
+`spc_t` SELinux grant [`probe_tests/openshift-soak/job.yaml`](../probe_tests/openshift-soak/job.yaml)
+uses.
+
+The Kafka event pane (right-hand side of the UI) stays empty by default —
+`TEST_SERVER_KAFKA_HOST`/`TEST_SERVER_KAFKA_PORT` in `test-server-pod.yaml` point at an
+unreachable placeholder, and the consumer thread retries quietly in the background rather than
+crashing the server. Every use case still runs and triggers real detections; point those two env
+vars at a real broker if you also want the live event feed.
+
+> **If you ever edit `extras/test-server/Containerfile`**: `use_cases.py` locates
+> `cert-agent.jar` via `Path(__file__).resolve().parents[2]`, which assumes it lives at
+> `<repo-root>/extras/test-server/use_cases.py`. Copying the app files into a flatter directory
+> than that (e.g. straight into `/app`) makes `parents[2]` raise `IndexError` at import and the
+> container crash-loops on startup — the `WORKDIR /app/extras/test-server` in the checked-in
+> Containerfile is deliberately there to preserve that depth, not a stray leftover.
+
+---
+
 ## Rebuilding and redeploying after a code change
 
 Once the DaemonSet is up, iterating on `agent/`/`cert_analyzer.py` changes means getting a new
@@ -394,4 +449,5 @@ cardinality-cap checks over hours instead of a single burst — see
 To bring the whole demo (CRC, Tetragon, cert-analyzer, tracing policies, soak Job) back up after
 a host reboot without re-running every step above by hand, use the menu-driven
 [`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh) — it currently offers
-"start the soak demo from a reboot" and is the home for future OpenShift utility scripts.
+"start the soak demo from a reboot", "rebuild/redeploy cert-analyzer", and "build/deploy the
+interactive test-console Pod" (§6 above), and is the home for future OpenShift utility scripts.

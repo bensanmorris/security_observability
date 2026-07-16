@@ -1,0 +1,42 @@
+ARG UBI_VERSION=9
+ARG PYTHON_VERSION=311
+
+FROM registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest
+
+ARG PIP_INDEX_URL=https://pypi.org/simple/
+ARG PIP_TRUSTED_HOST=pypi.org
+
+USER 0
+
+# use_cases.py locates probe_tests/java/cert-agent/cert-agent.jar via
+# Path(__file__).resolve().parents[2], assuming it lives at
+# <repo-root>/extras/test-server/use_cases.py -- a flat /app copy leaves too
+# few parent directories and parents[2] raises IndexError at import time, so
+# this mirrors the same repo-relative depth instead of flattening it.
+WORKDIR /app/extras/test-server
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    --index-url ${PIP_INDEX_URL} \
+    --trusted-host ${PIP_TRUSTED_HOST} \
+    -r requirements.txt
+
+COPY server.py use_cases.py blast_radius.py chain_explorer.py \
+     tls_probe_helper.py tcp_connect_probe_helper.py CertAgentTest.java ./
+COPY static ./static
+
+# Unlike probe_tests/openshift-soak/'s image, this one needs no hostPath
+# writes or privileged SCC -- use cases here write generated certs under
+# /dev/shm (world-writable in any container) and the detections that matter
+# for a demo (fd_install / tcp_connect kprobes) are node-wide and fire
+# regardless of which pod triggered them. OpenShift's default restricted-v2
+# SCC will assign a random non-root UID at runtime and override this image's
+# USER 0 anyway.
+#
+# --bind must be 0.0.0.0 here (the upstream default of 127.0.0.1 is meant for
+# the "don't expose beyond localhost" local-host use case in
+# TEST-SERVER-README.md) so the UI is reachable via 'oc port-forward'.
+ENV TEST_SERVER_BIND=0.0.0.0
+EXPOSE 8090
+
+ENTRYPOINT ["python3", "-u", "server.py"]
