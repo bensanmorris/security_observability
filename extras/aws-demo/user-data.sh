@@ -169,7 +169,7 @@ server {
     server_name _;
 
     location /api/run/ {
-        limit_req zone=tc_actions burst=3 nodelay;
+        limit_req zone=tc_actions burst=6 nodelay;
         limit_conn tc_conn 3;
         proxy_pass http://127.0.0.1:8091;
         proxy_set_header Host $host;

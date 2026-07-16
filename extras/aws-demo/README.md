@@ -42,7 +42,7 @@ itself only listens on `127.0.0.1:8091`) and rate-limits per client IP:
 
 | Path | Limit | Why |
 |---|---|---|
-| `/api/run/*` (the actual action endpoints -- spawn JVM, generate cert, bind port, etc.) | 12/min, burst 3 | These are the expensive ones (real subprocess/JVM/crypto work); this is the main cost/load control |
+| `/api/run/*` (the actual action endpoints -- spawn JVM, generate cert, bind port, etc.) | 12/min, burst 6 | These are the expensive ones (real subprocess/JVM/crypto work); this is the main cost/load control |
 | `/api/events` (the SSE live-event stream) | not request-rate-limited, capped at 5 concurrent connections/IP | It's one long-lived connection per page load, not a request to throttle |
 | everything else (static assets, `/api/use-cases`) | 10 req/s, burst 20 | Generous -- just guards against a naive scraper/bot loop |
 
