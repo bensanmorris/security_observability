@@ -66,6 +66,17 @@ security:
         66704: # CVE-2024-26130 -- NULL pointer deref in pkcs12.serialize_key_and_certificates
             reason: "Not applicable: this app only ever loads/reads PKCS12 files, never serializes/writes them."
             expires: '2026-10-04'
+        SFTY-20260615-96125: # GHSA-537c-gmf6-5ccf / CVE-2026-34180 -- vendored OpenSSL ASN.1 integer-truncation OOB read in d2i_X509-style DER decoding
+            reason: >-
+                Real exposure: cryptography's PyPI wheels vendor a statically
+                linked OpenSSL affected by CVE-2026-34180, an integer-truncation
+                out-of-bounds read in ASN.1 content-length handling reachable via
+                d2i_X509/d2i_PKCS7-style DER decoding -- the exact path
+                load_der_x509_certificate/load_pem_x509_certificate take when
+                parsing certs from arbitrary host paths and TLS probes. Tracked as
+                part of the same cryptography upgrade as the other entries in this
+                list.
+            expires: '2026-10-04'
         73711: # PVE-2024-73711 -- generic advisory covering cryptography's vendored OpenSSL CVEs
             reason: >-
                 Broad/generic catch-all advisory rather than a specific exploit
