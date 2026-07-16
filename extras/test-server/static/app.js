@@ -119,6 +119,18 @@ async function runUseCase(id, button, li) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
+    if (!res.ok) {
+      // A proxy in front of this server (e.g. the AWS demo's nginx rate
+      // limiter) can reject the request before it ever reaches here,
+      // returning an HTML error page instead of JSON -- report that
+      // clearly rather than letting res.json() throw a cryptic
+      // "unexpected character" SyntaxError.
+      status.textContent = res.status === 429
+        ? 'Rate limited -- wait a few seconds and try again.'
+        : `Request failed: HTTP ${res.status} ${res.statusText}`;
+      status.className = 'error';
+      return;
+    }
     const result = await res.json();
     setRichText(status, result.detail);
     status.className = result.ok ? 'ok' : 'error';
