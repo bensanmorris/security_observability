@@ -1928,15 +1928,17 @@ class CertificateAnalyzer:
         except OSError:
             return None
 
-        ip_pat = re.compile(r'(\d+\.\d+\.\d+\.\d+)/32')
-        for i, line in enumerate(lines):
+        # The kernel renders each LOCAL /32 leaf as a bare-IP line ("|-- x.x.x.x")
+        # immediately followed by its mask/type line ("/32 host LOCAL") -- the IP
+        # and "/32" never share a line, so a single-line regex never matches.
+        ip_only_pat = re.compile(r'\|--\s+(\d+\.\d+\.\d+\.\d+)\s*$')
+        for prev_line, line in zip(lines, lines[1:]):
             if 'LOCAL' in line and '/32 host' in line:
-                for j in range(i - 1, max(-1, i - 5), -1):
-                    m = ip_pat.search(lines[j])
-                    if m:
-                        ip = m.group(1)
-                        if not ip.startswith('127.') and ip != '0.0.0.0':  # nosec B104 - comparing an observed process's bind address, not binding our own socket
-                            return ip
+                m = ip_only_pat.search(prev_line)
+                if m:
+                    ip = m.group(1)
+                    if not ip.startswith('127.') and ip != '0.0.0.0':  # nosec B104 - comparing an observed process's bind address, not binding our own socket
+                        return ip
         return None
 
     def _resolve_pid_ip(self, pid: int, bind_addr: str) -> str:

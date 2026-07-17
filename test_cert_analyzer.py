@@ -7748,16 +7748,23 @@ class TestPortProbe:
 
     @staticmethod
     def _fib_trie(ips, loopback=True):
-        """Build minimal fib_trie text with the given non-loopback IPs."""
+        """Build minimal fib_trie text with the given non-loopback IPs.
+
+        Matches the real kernel format (confirmed against a live pod's
+        /proc/<pid>/net/fib_trie): each LOCAL /32 leaf is a bare-IP line
+        ("|-- x.x.x.x") immediately followed by its mask/type line
+        ("/32 host LOCAL") on the next line -- the IP and "/32" never
+        share a line.
+        """
         lines = ['Main:\n']
         for ip in ips:
             lines += [
-                f'        +-- {ip}/32 2 0 1\n',
+                f'        |-- {ip}\n',
                 '           /32 host LOCAL\n',
             ]
         if loopback:
             lines += [
-                '        +-- 127.0.0.1/32 2 0 1\n',
+                '        |-- 127.0.0.1\n',
                 '           /32 host LOCAL\n',
             ]
         return ''.join(lines)
