@@ -31,8 +31,15 @@ spec:
       containers:
       - name: analyzer
         # Internal OpenShift registry path (see extras/OPENSHIFT-DEPLOYMENT-README.md for how
-        # this gets populated). Avoid 'latest' in production - use a versioned tag.
-        image: image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:latest
+        # this gets populated). Pinned to a versioned tag, not 'latest': rebuild-redeploy-
+        # cert-analyzer.sh pushes a fresh dev-<timestamp> tag and points the *live* DaemonSet
+        # at it via 'oc set image', but never touches this file or the registry's 'latest' tag
+        # -- any later plain 'oc apply -f daemonset.yaml' (e.g. for an unrelated env var change)
+        # would silently revert the running image back to whatever 'latest' last pointed to,
+        # undoing the rebuild. dev-1784286667 is the build with the bind-probe fib_trie fix and
+        # BIND_PROBE_ENABLED/CONNECT_PROBE_ENABLED support -- update this whenever
+        # rebuild-redeploy-cert-analyzer.sh ships a build you want to keep.
+        image: image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:dev-1784286667
         imagePullPolicy: IfNotPresent
         env:
         - name: TETRAGON_ADDR
