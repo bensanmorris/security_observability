@@ -1,0 +1,169 @@
+# Interactive test-console Pod for demos: runs extras/test-server/ in-cluster
+# so use cases (file writes, TLS binds/connects, PKCS12/JKS loads) happen
+# inside the OpenShift cluster instead of on the operator's laptop, and get
+# picked up by the same Tetragon + cert-expiry-monitor already watching the
+# node.
+#
+# Build & push (same pattern as extras/openshift/scripts/rebuild-redeploy-cert-analyzer.sh):
+#   cd extras/test-server
+#   sudo podman build -t cert-test-server:latest -f Containerfile .
+#   HOST=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+#   sudo podman login -u kubeadmin -p "$(oc whoami -t)" --tls-verify=false "$HOST"
+#   sudo podman tag localhost/cert-test-server:latest "$HOST/certsight/cert-test-server:latest"
+#   sudo podman push --tls-verify=false "$HOST/certsight/cert-test-server:latest"
+#
+# Deploy:
+#   bash extras/openshift/scripts/deploy-test-server.sh [--kafka-host <ip>]
+#
+#   TEST_SERVER_KAFKA_HOST below is a substitution placeholder -- the script
+#   fills it in (with --kafka-host if given, else the host's auto-detected
+#   default-route IP) before applying. Don't 'oc apply' this file directly;
+#   the raw placeholder would be taken as a literal, unreachable hostname.
+#
+# Drive it:
+#   oc port-forward -n certsight pod/cert-test-server 8090:8090
+#   # then open http://localhost:8090
+#
+# Or skip the UI and run a use case from a shell instead (params dict is
+# whatever that use case's UseCaseParam list expects, {} for none):
+#   oc rsh -n certsight cert-test-server
+#   python3 -c "from use_cases import USE_CASES_BY_ID; print(USE_CASES_BY_ID['fresh-test-cert'].run({}))"
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-test-server
+  namespace: certsight
+---
+# hostmount-anyuid (the narrower SCC that just permits a hostPath volume) is
+# NOT enough: kubelet's DirectoryOrCreate labels a fresh hostPath dir with
+# the confined container_t SELinux type, and a normal container -- any UID,
+# hostmount-anyuid included -- gets an AVC write denial against it regardless
+# of DAC permissions. Same root cause as probe_tests/openshift-soak/job.yaml's
+# host-pki-certs mount; same fix: the spc_t (super-privileged container)
+# SELinux type below, which requires the privileged SCC (seLinuxContext:
+# RunAsAny) to request. This Pod is purely a demo/test tool, not part of the
+# deployed product, so the wider grant here doesn't affect cert-analyzer's
+# own security posture. Equivalent to:
+#   oc adm policy add-scc-to-user privileged -z cert-test-server -n certsight
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-test-server-privileged-scc
+  namespace: certsight
+subjects:
+- kind: ServiceAccount
+  name: cert-test-server
+  namespace: certsight
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cert-test-server
+  namespace: certsight
+  labels:
+    app: cert-test-server
+spec:
+  serviceAccountName: cert-test-server
+  initContainers:
+  - name: fix-cert-dir-perms
+    # kubelet's DirectoryOrCreate creates the hostPath below as root:root
+    # 0755 the first time -- unwritable by the main container's non-root
+    # image UID. Reusing the same image avoids an extra pull; this needs
+    # root and default capabilities so chmod on a directory it doesn't own
+    # actually works ('drop: ALL' would strip CAP_FOWNER and defeat the
+    # point), plus spc_t (see the RoleBinding comment above) so SELinux
+    # doesn't block the chmod regardless of UID/capabilities.
+    image: image-registry.openshift-image-registry.svc:5000/certsight/cert-test-server:latest
+    imagePullPolicy: IfNotPresent
+    command: ["chmod", "0777", "/var/certsight-test-server"]
+    volumeMounts:
+    - name: generated-certs
+      mountPath: /var/certsight-test-server
+    securityContext:
+      runAsUser: 0
+      seLinuxOptions:
+        type: spc_t
+  containers:
+  - name: test-server
+    # Internal OpenShift registry path -- see the build/push steps above.
+    image: image-registry.openshift-image-registry.svc:5000/certsight/cert-test-server:latest
+    imagePullPolicy: IfNotPresent
+    env:
+    - name: TEST_SERVER_KAFKA_HOST
+      # Substituted by deploy-test-server.sh -- see the Deploy note above and
+      # extras/OPENSHIFT-DEPLOYMENT-README.md's Kafka reachability section.
+      # Requires the host broker's listeners/advertised.listeners bound off
+      # localhost and firewalld port 9092/tcp open (both host-side, not
+      # tracked by this repo).
+      value: "__TEST_SERVER_KAFKA_HOST__"
+    - name: TEST_SERVER_KAFKA_PORT
+      value: "9092"
+    - name: TEST_SERVER_PROMETHEUS_URL
+      # server.py defaults to http://127.0.0.1:9090, correct only in the
+      # standalone deployment where a real Prometheus and cert-analyzer share
+      # a host. In-cluster, cert-analyzer's own :9090 only exposes raw
+      # /metrics for scraping, not a query API -- this points at the
+      # standalone demo Prometheus in demo-prometheus.yaml instead, which
+      # scrapes cert-expiry-monitor and serves /api/v1/query for
+      # blast_radius.py / chain_explorer.py.
+      value: "http://demo-prometheus.certsight.svc:9090"
+    - name: TEST_SERVER_CERT_DIR
+      # Overrides use_cases.py's /dev/shm default -- see that file's comment
+      # above _GENERATED_CERT_DIR. /dev/shm is a private per-container tmpfs
+      # here, invisible to cert-analyzer's /host bind mount no matter what's
+      # written there; this path is hostPath-backed (volumes below) so it's
+      # the same file on both sides of that mount.
+      value: "/var/certsight-test-server"
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: 500m
+      requests:
+        memory: 64Mi
+        cpu: 100m
+    ports:
+    - containerPort: 8090
+      name: http
+      protocol: TCP
+    volumeMounts:
+    - name: generated-certs
+      mountPath: /var/certsight-test-server
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      # spc_t so writes into the hostPath mount above aren't AVC-denied --
+      # see the RoleBinding comment. Otherwise unprivileged: no runAsUser
+      # override (still the image's non-root default), same capability drop
+      # as before.
+      seLinuxOptions:
+        type: spc_t
+  volumes:
+  - name: generated-certs
+    # Mounted at the *same* path in both places deliberately: cert-analyzer
+    # resolves Tetragon-reported paths as HOST_PREFIX + path (agent/analyzer.py),
+    # so a cert this container writes to /var/certsight-test-server/x.crt only
+    # resolves to a real file at cert-analyzer's /host/var/certsight-test-server/x.crt
+    # if that's genuinely where it landed on the node -- i.e. hostPath and
+    # mountPath must match.
+    hostPath:
+      path: /var/certsight-test-server
+      type: DirectoryOrCreate
+  # hostNetwork/hostPID still aren't needed -- Tetragon's node-wide fd_install /
+  # tcp_connect kprobes (see tetragon-policies/certificate-file-access.yaml and
+  # tcp-connect-tls.yaml) have no path or namespace filter, so they fire for
+  # this Pod's real file/network activity same as they would for any other
+  # process on the node. hostPath above is only there so a file this Pod
+  # writes is resolvable through cert-analyzer's /host bind mount -- without
+  # it, cert-analyzer would see the Tetragon event but the path would never
+  # resolve to a readable file (logged as "Skipping non-regular-file cert
+  # path"), and no Kafka event would follow. This pod still can't reach
+  # cert-analyzer's periodic filesystem *scan* (CERT_SCAN_PATHS in
+  # daemonset.yaml is restricted to literal host paths under /host/etc/...)
+  # -- that's a separate mechanism from the Tetragon-driven detection above.
+  restartPolicy: Never

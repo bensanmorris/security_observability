@@ -296,6 +296,143 @@ basic operational needs.
 
 ---
 
+## 6. Interactive test-console Pod (optional)
+
+For demos: run [`extras/test-server/`](test-server/TEST-SERVER-README.md) — the two-pane
+test-console UI used to exercise CertSight's detections one at a time — inside the cluster
+instead of on the operator's laptop, so its use cases (file writes, TLS binds/connects,
+PKCS12/JKS loads) happen in-cluster and get picked up by the same Tetragon + cert-expiry-monitor
+already watching the node.
+
+```bash
+bash extras/openshift/scripts/deploy-test-server.sh
+```
+
+(also reachable via the [`openshift-utils.sh`](openshift/openshift-utils.sh) menu) — builds
+[`extras/test-server/Containerfile`](test-server/Containerfile), pushes it under a fresh tag to
+the internal registry (same reasoning as "Why a fresh tag, not just re-pushing `:latest`" below),
+applies/updates [`extras/openshift/test-server-pod.yaml`](openshift/test-server-pod.yaml), and
+port-forwards it for you — the script prints `http://localhost:8090` once it's confirmed the
+console is actually responding.
+
+Or skip the UI and run a use case straight from a shell:
+
+```bash
+oc rsh -n certsight cert-test-server
+python3 -c "from use_cases import USE_CASES_BY_ID; print(USE_CASES_BY_ID['fresh-test-cert'].run({}))"
+```
+
+No `hostNetwork`/`hostPID` needed — Tetragon's `fd_install`/`tcp_connect` kprobes are node-wide
+with no path or namespace filter (see
+[`tetragon-policies/certificate-file-access.yaml`](../tetragon-policies/certificate-file-access.yaml),
+[`tcp-connect-tls.yaml`](../tetragon-policies/tcp-connect-tls.yaml)), so this Pod's real
+file/network activity is picked up exactly like any other process on the node would be. The one
+thing it *can't* exercise is cert-analyzer's periodic filesystem scan (`CERT_SCAN_PATHS` above is
+restricted to literal host paths under `/host/etc/...`) — that needs the same `hostPath` +
+`spc_t` SELinux grant [`probe_tests/openshift-soak/job.yaml`](../probe_tests/openshift-soak/job.yaml)
+uses.
+
+It *does* need a small `hostPath` grant (a dedicated `cert-test-server` ServiceAccount). Detection
+firing isn't enough on its own: cert-analyzer resolves every Tetragon-reported path as
+`HOST_PREFIX + path` before it can read the file (`agent/analyzer.py`), and a file this Pod writes
+under `/dev/shm` — a private per-container tmpfs — never exists at that resolved path on the node,
+no matter what Tetragon reports. `test-server-pod.yaml` mounts a `hostPath` volume at
+`/var/certsight-test-server` (same path in the container and on the node, so the `HOST_PREFIX`
+translation lands on the real file) and points `TEST_SERVER_CERT_DIR` at it — `use_cases.py`'s
+`_GENERATED_CERT_DIR` reads that env var, defaulting to the old `/dev/shm` path for the standalone
+(non-OpenShift) deployment where it's actually correct, since there test-server and cert-analyzer
+share one kernel/mount namespace.
+
+The narrower `hostmount-anyuid` SCC (just a hostPath grant, no `hostNetwork`/`hostPID`) is **not**
+enough for that mount, though: kubelet's `DirectoryOrCreate` labels a fresh hostPath dir with the
+confined `container_t` SELinux type, and any normal container gets an AVC write denial against it
+regardless of UID. Same root cause and fix as `probe_tests/openshift-soak/job.yaml`'s
+`host-pki-certs` mount — needs the `privileged` SCC (`seLinuxContext: RunAsAny`) plus
+`seLinuxOptions.type: spc_t` on both the init container that `chmod`s the mount and the main
+container that writes into it.
+
+The "Certificate blast radius explorer" / "Certificate chain explorer" links need a real
+Prometheus that's *scraped* cert-analyzer's `/metrics` — cert-analyzer's own `:9090` only exposes
+raw metrics for scraping, not a query API (see `TEST-SERVER-README.md`'s Prometheus section).
+Since CRC has cluster monitoring disabled by default (see the note near the top of this file) and
+enabling User Workload Monitoring just for this would need a Thanos Querier bearer-token/TLS dance
+`blast_radius.py`/`chain_explorer.py`'s plain `urllib` calls don't handle,
+[`extras/openshift/demo-prometheus.yaml`](openshift/demo-prometheus.yaml) deploys a minimal
+standalone Prometheus in the `certsight` namespace instead, scraping only
+`cert-expiry-monitor.certsight.svc:9090`:
+
+```bash
+oc apply -f extras/openshift/demo-prometheus.yaml
+```
+
+`test-server-pod.yaml`'s `TEST_SERVER_PROMETHEUS_URL` already points at it
+(`http://demo-prometheus.certsight.svc:9090`). This is purely a demo/test dependency, same
+reasoning as the SCC grant above — not meant to represent how a real deployment would wire up
+monitoring.
+
+The Kafka event pane (right-hand side of the UI) stays empty by default — the consumer thread
+retries quietly in the background rather than crashing the server, so every use case still runs
+and triggers real detections either way. To get the live event feed, point the Pod at a real
+broker:
+
+```bash
+bash extras/openshift/scripts/deploy-test-server.sh                    # auto-detects the host IP
+bash extras/openshift/scripts/deploy-test-server.sh --kafka-host <ip>  # or set it explicitly
+```
+
+`TEST_SERVER_KAFKA_HOST` in `test-server-pod.yaml` is a `__TEST_SERVER_KAFKA_HOST__` substitution
+placeholder, not a literal value — the script fills it in (`--kafka-host` if given, else the
+host's default-route source IP via `ip -4 route get 1.1.1.1`) before `oc apply`. Don't `oc apply`
+the manifest directly; the raw placeholder is not a resolvable hostname.
+
+If Kafka is running on the operator's host machine (e.g. the local dev stack's broker) rather
+than in-cluster, two host-side things also have to be true — neither is tracked by this repo, so
+they don't survive a Kafka reinstall or a fresh host:
+
+1. **The broker must listen on more than `localhost`.** A single-node dev broker's
+   `/etc/kafka/server.properties` typically ships with `listeners=PLAINTEXT://localhost:9092` and
+   `advertised.listeners=PLAINTEXT://localhost:9092` — both loopback-only. The pod can open a TCP
+   connection to the bootstrap address, but the client then reconnects using whatever
+   `advertised.listeners` says, and `localhost` from inside the pod resolves to the pod's own
+   loopback, not the host. Fix:
+
+   ```bash
+   sudo sed -i \
+     -e 's|^listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093|listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://localhost:9093|' \
+     -e 's|^advertised.listeners=PLAINTEXT://localhost:9092|advertised.listeners=PLAINTEXT://<host-ip>:9092|' \
+     /etc/kafka/server.properties
+   sudo systemctl restart kafka   # brief outage for anything else consuming/producing right now
+   ```
+
+2. **`firewalld` must allow the port.** OpenShift's pod network (CRC's OVN overlay, or any other
+   CNI) reaches the host over its real interface, which lands in the host firewall's active zone
+   — a default `public` zone only allows a handful of named services (`ssh`, `cockpit`, ...), not
+   arbitrary ports:
+
+   ```bash
+   sudo firewall-cmd --add-port=9092/tcp --permanent
+   sudo firewall-cmd --reload
+   ```
+
+Verify from inside the Pod once both are done:
+
+```bash
+oc rsh -n certsight cert-test-server python3 -c \
+  "import socket; socket.create_connection(('<host-ip>', 9092), timeout=3); print('TCP connect OK')"
+```
+
+Note `<host-ip>` is typically DHCP-assigned — re-run `deploy-test-server.sh` (no `--kafka-host`)
+to re-detect it if it changes after a reboot, or check `ip -4 route get 1.1.1.1`.
+
+> **If you ever edit `extras/test-server/Containerfile`**: `use_cases.py` locates
+> `cert-agent.jar` via `Path(__file__).resolve().parents[2]`, which assumes it lives at
+> `<repo-root>/extras/test-server/use_cases.py`. Copying the app files into a flatter directory
+> than that (e.g. straight into `/app`) makes `parents[2]` raise `IndexError` at import and the
+> container crash-loops on startup — the `WORKDIR /app/extras/test-server` in the checked-in
+> Containerfile is deliberately there to preserve that depth, not a stray leftover.
+
+---
+
 ## Rebuilding and redeploying after a code change
 
 Once the DaemonSet is up, iterating on `agent/`/`cert_analyzer.py` changes means getting a new
@@ -394,4 +531,5 @@ cardinality-cap checks over hours instead of a single burst — see
 To bring the whole demo (CRC, Tetragon, cert-analyzer, tracing policies, soak Job) back up after
 a host reboot without re-running every step above by hand, use the menu-driven
 [`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh) — it currently offers
-"start the soak demo from a reboot" and is the home for future OpenShift utility scripts.
+"start the soak demo from a reboot", "rebuild/redeploy cert-analyzer", and "build/deploy the
+interactive test-console Pod" (§6 above), and is the home for future OpenShift utility scripts.

@@ -59,6 +59,19 @@ spec:
           value: "300"
         - name: HOST_PREFIX
           value: "/host"
+        - name: KAFKA_ENABLED
+          value: "true"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          # The value below is a substitution placeholder --
+          # rebuild-redeploy-cert-analyzer.sh fills it in (--kafka-host if
+          # given, else the host's auto-detected default-route IP) before
+          # applying. Don't 'oc apply' this file directly; the raw
+          # placeholder is not a resolvable address. See the Kafka
+          # reachability section of extras/OPENSHIFT-DEPLOYMENT-README.md --
+          # this DaemonSet runs with hostNetwork: true, so once the host
+          # broker's listeners/advertised.listeners are off localhost and
+          # firewalld allows 9092/tcp, it reaches Kafka directly.
+          value: "__KAFKA_BOOTSTRAP_SERVERS__"
         volumeMounts:
         - name: tetragon-sock
           mountPath: /var/run/tetragon

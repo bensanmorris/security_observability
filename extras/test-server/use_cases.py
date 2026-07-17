@@ -11,6 +11,7 @@ performs the action and returns a UseCaseResult. Nothing else needs to
 change -- server.py and the frontend both read this list at request time.
 """
 import ctypes
+import os
 import queue
 import re
 import subprocess
@@ -72,7 +73,15 @@ class UseCase:
 # ProtectHome=true (which only covers /home, /root, /run/user) or
 # ProtectSystem=strict (which leaves /dev alone), so it's visible to both
 # this script and cert-analyzer, and world-writable like /tmp.
-_GENERATED_CERT_DIR = Path("/dev/shm/certsight-test-server")
+#
+# This reasoning only holds when test-server and cert-analyzer share a
+# kernel/mount namespace (the standalone host deployment). Under OpenShift
+# (extras/openshift/test-server-pod.yaml), /dev/shm is a private per-container
+# tmpfs -- invisible to cert-analyzer's own /host bind mount no matter what's
+# written there. TEST_SERVER_CERT_DIR overrides this for that deployment,
+# pointed at a hostPath-backed directory instead; see the Kafka reachability
+# section of extras/OPENSHIFT-DEPLOYMENT-README.md.
+_GENERATED_CERT_DIR = Path(os.environ.get("TEST_SERVER_CERT_DIR", "/dev/shm/certsight-test-server"))
 
 # CertSight's FIPS compliance checker (agent/fips_compliance_checker.py)
 # flags RSA keys under 2048 bits, so 1024 reliably triggers a
@@ -912,12 +921,12 @@ USE_CASES: List[UseCase] = [
         id="fresh-test-cert",
         label="generate + read a fresh test certificate",
         description=(
-            "Generates a new self-signed certificate at a unique path under "
-            "/dev/shm and cat's it. Guaranteed to be a first-time discovery "
-            "every click, so a new Kafka event always appears. Pick a key size "
-            "below 2048 bits to trigger a FIPS non-compliance finding, or check "
-            "'expired' to generate a cert that's already past its validity "
-            "window and verify CertSight flags that in the Kafka event."
+            f"Generates a new self-signed certificate at a unique path under "
+            f"{_GENERATED_CERT_DIR} and cat's it. Guaranteed to be a first-time "
+            "discovery every click, so a new Kafka event always appears. Pick a "
+            "key size below 2048 bits to trigger a FIPS non-compliance finding, "
+            "or check 'expired' to generate a cert that's already past its "
+            "validity window and verify CertSight flags that in the Kafka event."
         ),
         run=_generate_and_read_fresh_cert,
         params=[
@@ -945,7 +954,7 @@ USE_CASES: List[UseCase] = [
         ],
         pipeline=[
             "This server generates a self-signed X.509 certificate in memory "
-            "and writes it to a brand-new path under /dev/shm/certsight-test-server/.",
+            f"and writes it to a brand-new path under {_GENERATED_CERT_DIR}/.",
 
             "This server then runs 'cat <path>' as a real subprocess -- a real "
             "process performing a real open()/read() of that file, no different "
@@ -999,7 +1008,7 @@ USE_CASES: List[UseCase] = [
         run=_bind_tls_service_for_discovery,
         pipeline=[
             "This server generates a fresh self-signed X.509 cert + private "
-            "key in memory and writes both to /dev/shm/certsight-test-server/.",
+            f"key in memory and writes both to {_GENERATED_CERT_DIR}/.",
 
             "This server spawns tls_probe_helper.py as a separate OS "
             "process (not a thread) specifically so the bind() call below "
@@ -1065,7 +1074,7 @@ USE_CASES: List[UseCase] = [
         run=_dial_outbound_tls_port,
         pipeline=[
             "This server generates a fresh self-signed X.509 cert + private "
-            "key in memory and writes both to /dev/shm/certsight-test-server/.",
+            f"key in memory and writes both to {_GENERATED_CERT_DIR}/.",
 
             "This server spawns tcp_connect_probe_helper.py as a separate OS "
             "process (not a thread) specifically so the connect() call below "
@@ -1219,7 +1228,7 @@ USE_CASES: List[UseCase] = [
         pipeline=[
             "This server generates a fresh self-signed X.509 cert and "
             "writes it to a throwaway path under "
-            "/dev/shm/certsight-test-server/ -- only as seed input for the "
+            f"{_GENERATED_CERT_DIR}/ -- only as seed input for the "
             "JVM below to load once at startup, not as something "
             "cert-analyzer is meant to detect itself (its extension is "
             "deliberately not one of certificate-file-access.yaml's "
@@ -1374,7 +1383,7 @@ USE_CASES: List[UseCase] = [
             "This server drops the same N intermediates closest to the "
             "root, but writes each *surviving* cert (leaf, remaining "
             "intermediates, root) to its own separate file under "
-            "/dev/shm/certsight-test-server/, running 'cat <path>' "
+            f"{_GENERATED_CERT_DIR}/, running 'cat <path>' "
             "against each one individually -- so this is several real "
             "open()/read() calls, not one.",
 
