@@ -68,6 +68,12 @@ metadata:
     app: cert-test-server
 spec:
   serviceAccountName: cert-test-server
+  # A bare Pod with no controller to recreate it -- if the scheduler preempts it (see the
+  # priorityClassName comment on cert-expiry-monitor in daemonset.yaml for why that happens
+  # on memory-constrained single-node CRC), it's just gone until someone notices and reruns
+  # deploy-test-server.sh / restart-test-server.sh. Matching cert-expiry-monitor's priority
+  # protects it the same way.
+  priorityClassName: system-cluster-critical
   initContainers:
   - name: fix-cert-dir-perms
     # kubelet's DirectoryOrCreate creates the hostPath below as root:root

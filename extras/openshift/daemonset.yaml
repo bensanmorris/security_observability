@@ -28,6 +28,12 @@ spec:
       serviceAccountName: cert-expiry-monitor
       hostNetwork: true
       hostPID: true
+      # Without a priorityClassName this pod defaults to priority 0, the lowest in the
+      # cluster -- openshift-marketplace's catalog-refresh pods run at system-cluster-critical
+      # (2000000000), so on a memory-constrained single node (CRC) the scheduler repeatedly
+      # preempts this pod to make room for a fresh catalog pod, even seconds after it starts.
+      # Matching that priority stops this pod from losing that contention.
+      priorityClassName: system-cluster-critical
       containers:
       - name: analyzer
         # Internal OpenShift registry path (see extras/OPENSHIFT-DEPLOYMENT-README.md for how

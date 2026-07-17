@@ -46,6 +46,10 @@ spec:
       labels:
         app: demo-prometheus
     spec:
+      # Matches cert-expiry-monitor's priorityClassName (daemonset.yaml) -- without it this
+      # backs the test-console's blast-radius/chain-explorer panels but sits at the lowest
+      # scheduling priority, same preemption risk on memory-constrained single-node CRC.
+      priorityClassName: system-cluster-critical
       containers:
       - name: prometheus
         image: quay.io/prometheus/prometheus:latest
