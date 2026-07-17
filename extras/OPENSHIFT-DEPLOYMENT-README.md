@@ -315,6 +315,18 @@ applies/updates [`extras/openshift/test-server-pod.yaml`](openshift/test-server-
 port-forwards it for you — the script prints `http://localhost:8090` once it's confirmed the
 console is actually responding.
 
+If the Pod dies mid-demo (CRC is single-node, and this bare Pod has no priority class — it's a
+recurring preemption target for OpenShift's periodic operator-catalog refresh pods in
+`openshift-marketplace`, which briefly need real memory/CPU on the same node), don't rebuild —
+[`extras/openshift/scripts/restart-test-server.sh`](openshift/scripts/restart-test-server.sh)
+recreates the Pod against whatever image was already running (or, if the Pod object was preempted
+away entirely, the newest tag already sitting in the registry) and re-establishes the
+port-forward, all in a few seconds:
+
+```bash
+bash extras/openshift/scripts/restart-test-server.sh
+```
+
 Or skip the UI and run a use case straight from a shell:
 
 ```bash
