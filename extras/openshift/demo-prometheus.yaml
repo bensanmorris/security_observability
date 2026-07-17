@@ -1,0 +1,102 @@
+# Minimal standalone Prometheus for the test-console's "Certificate blast
+# radius explorer" / "Certificate chain explorer" links (blast_radius.py /
+# chain_explorer.py) -- both query a real Prometheus's /api/v1/query API for
+# cert-analyzer's own tls_certificate_expiry_days / tls_certificate_self_signed
+# / tls_certificate_process_info series; cert-analyzer's own :9090 only
+# exposes raw /metrics for scraping, not a query API.
+#
+# Deliberately its own throwaway instance scraping only cert-expiry-monitor,
+# not OpenShift's User Workload Monitoring stack -- UWM is a cluster-wide
+# config change, and querying it needs bearer-token auth + TLS through Thanos
+# Querier's RBAC proxy that blast_radius.py/chain_explorer.py's plain
+# urllib.request.urlopen() calls don't handle. This is purely a demo/test
+# dependency, same reasoning as test-server-pod.yaml's own SCC grant.
+#
+# Deploy: oc apply -f extras/openshift/demo-prometheus.yaml
+# Then point test-server-pod.yaml's TEST_SERVER_PROMETHEUS_URL at
+# http://demo-prometheus.certsight.svc:9090 (already wired up there).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-prometheus-config
+  namespace: certsight
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+    - job_name: cert-expiry-monitor
+      static_configs:
+      - targets: ["cert-expiry-monitor.certsight.svc:9090"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-prometheus
+  namespace: certsight
+  labels:
+    app: demo-prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-prometheus
+  template:
+    metadata:
+      labels:
+        app: demo-prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: quay.io/prometheus/prometheus:latest
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=6h
+        ports:
+        - containerPort: 9090
+          name: http
+        resources:
+          limits:
+            memory: 256Mi
+            cpu: 200m
+          requests:
+            memory: 64Mi
+            cpu: 50m
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: data
+          mountPath: /prometheus
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: demo-prometheus-config
+      - name: data
+        emptyDir: {}
+      # No fixed runAsUser -- the default restricted-v2 SCC assigns one from
+      # the namespace's allocated range; the upstream Prometheus image
+      # already runs as an arbitrary non-root UID by default (see its own
+      # Dockerfile), so no extra grant is needed here unlike cert-test-server.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-prometheus
+  namespace: certsight
+  labels:
+    app: demo-prometheus
+spec:
+  selector:
+    app: demo-prometheus
+  ports:
+  - name: http
+    port: 9090
+    targetPort: 9090
+    protocol: TCP
+  type: ClusterIP

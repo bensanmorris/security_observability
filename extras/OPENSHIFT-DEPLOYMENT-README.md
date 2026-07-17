@@ -332,17 +332,43 @@ restricted to literal host paths under `/host/etc/...`) — that needs the same 
 `spc_t` SELinux grant [`probe_tests/openshift-soak/job.yaml`](../probe_tests/openshift-soak/job.yaml)
 uses.
 
-It *does* need a small `hostPath` grant (a dedicated `cert-test-server` ServiceAccount bound to
-the `hostmount-anyuid` SCC — narrower than `hostaccess`, since this Pod needs neither
-`hostNetwork` nor `hostPID`). Detection firing isn't enough on its own: cert-analyzer resolves
-every Tetragon-reported path as `HOST_PREFIX + path` before it can read the file (`agent/analyzer.py`),
-and a file this Pod writes under `/dev/shm` — a private per-container tmpfs — never exists at that
-resolved path on the node, no matter what Tetragon reports. `test-server-pod.yaml` mounts a
-`hostPath` volume at `/var/certsight-test-server` (same path in the container and on the node, so
-the `HOST_PREFIX` translation lands on the real file) and points `TEST_SERVER_CERT_DIR` at it —
-`use_cases.py`'s `_GENERATED_CERT_DIR` reads that env var, defaulting to the old `/dev/shm` path
-for the standalone (non-OpenShift) deployment where it's actually correct, since there
-test-server and cert-analyzer share one kernel/mount namespace.
+It *does* need a small `hostPath` grant (a dedicated `cert-test-server` ServiceAccount). Detection
+firing isn't enough on its own: cert-analyzer resolves every Tetragon-reported path as
+`HOST_PREFIX + path` before it can read the file (`agent/analyzer.py`), and a file this Pod writes
+under `/dev/shm` — a private per-container tmpfs — never exists at that resolved path on the node,
+no matter what Tetragon reports. `test-server-pod.yaml` mounts a `hostPath` volume at
+`/var/certsight-test-server` (same path in the container and on the node, so the `HOST_PREFIX`
+translation lands on the real file) and points `TEST_SERVER_CERT_DIR` at it — `use_cases.py`'s
+`_GENERATED_CERT_DIR` reads that env var, defaulting to the old `/dev/shm` path for the standalone
+(non-OpenShift) deployment where it's actually correct, since there test-server and cert-analyzer
+share one kernel/mount namespace.
+
+The narrower `hostmount-anyuid` SCC (just a hostPath grant, no `hostNetwork`/`hostPID`) is **not**
+enough for that mount, though: kubelet's `DirectoryOrCreate` labels a fresh hostPath dir with the
+confined `container_t` SELinux type, and any normal container gets an AVC write denial against it
+regardless of UID. Same root cause and fix as `probe_tests/openshift-soak/job.yaml`'s
+`host-pki-certs` mount — needs the `privileged` SCC (`seLinuxContext: RunAsAny`) plus
+`seLinuxOptions.type: spc_t` on both the init container that `chmod`s the mount and the main
+container that writes into it.
+
+The "Certificate blast radius explorer" / "Certificate chain explorer" links need a real
+Prometheus that's *scraped* cert-analyzer's `/metrics` — cert-analyzer's own `:9090` only exposes
+raw metrics for scraping, not a query API (see `TEST-SERVER-README.md`'s Prometheus section).
+Since CRC has cluster monitoring disabled by default (see the note near the top of this file) and
+enabling User Workload Monitoring just for this would need a Thanos Querier bearer-token/TLS dance
+`blast_radius.py`/`chain_explorer.py`'s plain `urllib` calls don't handle,
+[`extras/openshift/demo-prometheus.yaml`](openshift/demo-prometheus.yaml) deploys a minimal
+standalone Prometheus in the `certsight` namespace instead, scraping only
+`cert-expiry-monitor.certsight.svc:9090`:
+
+```bash
+oc apply -f extras/openshift/demo-prometheus.yaml
+```
+
+`test-server-pod.yaml`'s `TEST_SERVER_PROMETHEUS_URL` already points at it
+(`http://demo-prometheus.certsight.svc:9090`). This is purely a demo/test dependency, same
+reasoning as the SCC grant above — not meant to represent how a real deployment would wire up
+monitoring.
 
 The Kafka event pane (right-hand side of the UI) stays empty by default — the consumer thread
 retries quietly in the background rather than crashing the server, so every use case still runs

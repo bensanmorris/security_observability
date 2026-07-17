@@ -102,6 +102,15 @@ spec:
       value: "__TEST_SERVER_KAFKA_HOST__"
     - name: TEST_SERVER_KAFKA_PORT
       value: "9092"
+    - name: TEST_SERVER_PROMETHEUS_URL
+      # server.py defaults to http://127.0.0.1:9090, correct only in the
+      # standalone deployment where a real Prometheus and cert-analyzer share
+      # a host. In-cluster, cert-analyzer's own :9090 only exposes raw
+      # /metrics for scraping, not a query API -- this points at the
+      # standalone demo Prometheus in demo-prometheus.yaml instead, which
+      # scrapes cert-expiry-monitor and serves /api/v1/query for
+      # blast_radius.py / chain_explorer.py.
+      value: "http://demo-prometheus.certsight.svc:9090"
     - name: TEST_SERVER_CERT_DIR
       # Overrides use_cases.py's /dev/shm default -- see that file's comment
       # above _GENERATED_CERT_DIR. /dev/shm is a private per-container tmpfs
