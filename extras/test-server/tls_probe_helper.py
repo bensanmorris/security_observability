@@ -2,11 +2,20 @@
 """
 Standalone helper spawned by use_cases.py's TLS bind-probe use case.
 
-Binds a TCP socket on 127.0.0.1 itself -- deliberately a separate process
-rather than a thread inside the main test server, so that Tetragon's
-security_socket_bind hook attributes the bind to *this* process's own
-PID. use_cases.py surfaces that PID in the UI so it can be cross-checked
-against the "pid" field of the resulting Kafka event.
+Binds a TCP socket on the wildcard address (0.0.0.0) itself -- deliberately
+a separate process rather than a thread inside the main test server, so
+that Tetragon's security_socket_bind hook attributes the bind to *this*
+process's own PID. use_cases.py surfaces that PID in the UI so it can be
+cross-checked against the "pid" field of the resulting Kafka event.
+
+Wildcard, not a literal 127.0.0.1: cert-analyzer's _resolve_pid_ip only
+reads the bound process's real IP from /proc/<pid>/net/fib_trie for
+wildcard binds, falling back to the bind address verbatim otherwise. On
+OpenShift, cert-test-server and cert-analyzer sit in different network
+namespaces (the latter runs hostNetwork), so a literal 127.0.0.1 bind here
+would resolve to the analyzer's own host loopback -- nothing is listening
+there, and the probe fails with connection refused. The wildcard bind lets
+_resolve_pid_ip find this pod's actual IP instead.
 
 Picks its own random port from the dynamic/private range (49152-65535)
 and retries on collision, rather than binding to port 0 and letting the
@@ -62,7 +71,7 @@ def main() -> int:
         candidate = random.randint(*_PORT_RANGE)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s.bind(("127.0.0.1", candidate))
+            s.bind(("0.0.0.0", candidate))  # nosec B104 - see module docstring for why wildcard, not loopback
             s.listen(4)
             sock = s
             break

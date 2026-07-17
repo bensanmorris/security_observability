@@ -508,12 +508,13 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
     return UseCaseResult(
         ok=True,
         detail=(
-            f"spawned PID {proc.pid}, listening for a TLS handshake on 127.0.0.1:{port} "
+            f"spawned PID {proc.pid}, listening for a TLS handshake on 0.0.0.0:{port} "
             f"for up to {int(_TLS_PROBE_LIFETIME_SECONDS)}s (CN={cn}) -- if cert-analyzer "
             "has [port_probe] bind_probe_enabled = true and the tls-service-tracking.yaml "
             "TracingPolicy loaded, it should connect within ~2s and pull this cert; check "
-            f"the Kafka pane for a tls-bind-probe://127.0.0.1:{port} event and confirm its "
-            f"'pid' field reads {proc.pid} -- the same process that bound the socket"
+            f"the Kafka pane for a tls-bind-probe://<resolved-ip>:{port} event (the pod's real "
+            "IP on OpenShift, or 127.0.0.1 on a bare-metal/host-network deployment) and "
+            f"confirm its 'pid' field reads {proc.pid} -- the same process that bound the socket"
         ),
     )
 

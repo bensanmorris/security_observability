@@ -28,11 +28,24 @@ spec:
       serviceAccountName: cert-expiry-monitor
       hostNetwork: true
       hostPID: true
+      # Without a priorityClassName this pod defaults to priority 0, the lowest in the
+      # cluster -- openshift-marketplace's catalog-refresh pods run at system-cluster-critical
+      # (2000000000), so on a memory-constrained single node (CRC) the scheduler repeatedly
+      # preempts this pod to make room for a fresh catalog pod, even seconds after it starts.
+      # Matching that priority stops this pod from losing that contention.
+      priorityClassName: system-cluster-critical
       containers:
       - name: analyzer
         # Internal OpenShift registry path (see extras/OPENSHIFT-DEPLOYMENT-README.md for how
-        # this gets populated). Avoid 'latest' in production - use a versioned tag.
-        image: image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:latest
+        # this gets populated). Pinned to a versioned tag, not 'latest': rebuild-redeploy-
+        # cert-analyzer.sh pushes a fresh dev-<timestamp> tag and points the *live* DaemonSet
+        # at it via 'oc set image', but never touches this file or the registry's 'latest' tag
+        # -- any later plain 'oc apply -f daemonset.yaml' (e.g. for an unrelated env var change)
+        # would silently revert the running image back to whatever 'latest' last pointed to,
+        # undoing the rebuild. dev-1784286667 is the build with the bind-probe fib_trie fix and
+        # BIND_PROBE_ENABLED/CONNECT_PROBE_ENABLED support -- update this whenever
+        # rebuild-redeploy-cert-analyzer.sh ships a build you want to keep.
+        image: image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:dev-1784286667
         imagePullPolicy: IfNotPresent
         env:
         - name: TETRAGON_ADDR
@@ -50,7 +63,12 @@ spec:
         - name: LOG_LEVEL
           value: "DEBUG"
         - name: CERT_SCAN_PATHS
-          value: "/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki"
+          # Empty disables the periodic scanner entirely (agent/config.py only starts that
+          # thread when scan_paths is non-empty) -- off for the OpenShift demo so cert
+          # discovery is purely event-driven (Tetragon kprobes/uprobes), matching what's
+          # actually being demonstrated. SCAN_INTERVAL_SECONDS below is unused while this is
+          # empty.
+          value: ""
         - name: SCAN_INTERVAL_SECONDS
           value: "3600"
         - name: READINESS_GRACE_PERIOD_SECONDS
@@ -72,6 +90,17 @@ spec:
           # broker's listeners/advertised.listeners are off localhost and
           # firewalld allows 9092/tcp, it reaches Kafka directly.
           value: "__KAFKA_BOOTSTRAP_SERVERS__"
+        - name: BIND_PROBE_ENABLED
+          # Off by default (agent/config.py) -- without this, security_socket_bind/sys_bind
+          # kprobe events still arrive and increment tls_socket_bind_events_total, but
+          # _handle_tls_bind_event never runs, so no probe is scheduled and no Kafka event is
+          # published. The test-server's 'tls-bind-probe' use case needs this on to produce its
+          # second (bind) Kafka event.
+          value: "true"
+        - name: CONNECT_PROBE_ENABLED
+          # Same gap as BIND_PROBE_ENABLED above, for the tcp_connect use case's outbound-probe
+          # Kafka event.
+          value: "true"
         volumeMounts:
         - name: tetragon-sock
           mountPath: /var/run/tetragon
