@@ -5,8 +5,48 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 NAMESPACE=certsight
+MANIFEST="$REPO_ROOT/extras/openshift/daemonset.yaml"
 
 step() { echo; echo "==> $*"; }
+
+KAFKA_HOST_ARG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --kafka-host)
+            KAFKA_HOST_ARG="$2"
+            shift 2
+            ;;
+        --kafka-host=*)
+            KAFKA_HOST_ARG="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--kafka-host <ip>]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+step "Resolving the Kafka host"
+if [[ -n "$KAFKA_HOST_ARG" ]]; then
+    KAFKA_HOST="$KAFKA_HOST_ARG"
+    echo "Using --kafka-host: $KAFKA_HOST"
+else
+    # Default-route source IP -- the address the hostNetwork DaemonSet pod
+    # can actually reach the host broker on (see the Kafka reachability
+    # section of extras/OPENSHIFT-DEPLOYMENT-README.md).
+    KAFKA_HOST=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+    if [[ -z "$KAFKA_HOST" ]]; then
+        echo "Could not auto-detect the host's IP -- pass it explicitly: $0 --kafka-host <ip>" >&2
+        exit 1
+    fi
+    echo "Auto-detected: $KAFKA_HOST (override with --kafka-host <ip>)"
+fi
+
+render_manifest() {
+    sed "s#__KAFKA_BOOTSTRAP_SERVERS__#$KAFKA_HOST:9092#g" "$MANIFEST"
+}
 
 step "Checking cluster login"
 if ! oc whoami >/dev/null 2>&1; then
@@ -44,6 +84,9 @@ IN_CLUSTER_IMAGE="image-registry.openshift-image-registry.svc:5000/certsight/cer
 step "Tagging and pushing $PUSH_IMAGE"
 sudo podman tag localhost/cert-analyzer:latest "$PUSH_IMAGE"
 sudo podman push --tls-verify=false "$PUSH_IMAGE"
+
+step "Applying the DaemonSet manifest"
+render_manifest | oc apply -f -
 
 step "Pointing the DaemonSet at the new tag"
 oc set image daemonset/cert-expiry-monitor analyzer="$IN_CLUSTER_IMAGE" -n "$NAMESPACE"

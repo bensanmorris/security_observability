@@ -5,8 +5,49 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 NAMESPACE=certsight
+MANIFEST="$REPO_ROOT/extras/openshift/test-server-pod.yaml"
 
 step() { echo; echo "==> $*"; }
+
+KAFKA_HOST_ARG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --kafka-host)
+            KAFKA_HOST_ARG="$2"
+            shift 2
+            ;;
+        --kafka-host=*)
+            KAFKA_HOST_ARG="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--kafka-host <ip>]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+step "Resolving the Kafka host"
+if [[ -n "$KAFKA_HOST_ARG" ]]; then
+    KAFKA_HOST="$KAFKA_HOST_ARG"
+    echo "Using --kafka-host: $KAFKA_HOST"
+else
+    # Default-route source IP -- the address the pod network can actually
+    # reach back to (see the Kafka reachability section of
+    # extras/OPENSHIFT-DEPLOYMENT-README.md for why plain localhost/127.0.0.1
+    # doesn't work here).
+    KAFKA_HOST=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+    if [[ -z "$KAFKA_HOST" ]]; then
+        echo "Could not auto-detect the host's IP -- pass it explicitly: $0 --kafka-host <ip>" >&2
+        exit 1
+    fi
+    echo "Auto-detected: $KAFKA_HOST (override with --kafka-host <ip>)"
+fi
+
+render_manifest() {
+    sed "s#__TEST_SERVER_KAFKA_HOST__#$KAFKA_HOST#g" "$MANIFEST"
+}
 
 step "Checking cluster login"
 if ! oc whoami >/dev/null 2>&1; then
@@ -44,9 +85,18 @@ sudo podman tag localhost/cert-test-server:latest "$PUSH_IMAGE"
 sudo podman push --tls-verify=false "$PUSH_IMAGE"
 
 step "Deploying the Pod"
-if ! oc get pod cert-test-server -n "$NAMESPACE" >/dev/null 2>&1; then
-    oc apply -f "$REPO_ROOT/extras/openshift/test-server-pod.yaml"
+# Almost every field on a live Pod other than spec.containers[*].image is
+# immutable (env vars, volumes, serviceAccountName, ...), and this manifest
+# has grown several of those over time -- Kafka host, the hostPath mount for
+# TEST_SERVER_CERT_DIR, etc. Trying to special-case which fields changed has
+# already missed a real change once (the hostPath volume slipped through a
+# check that only compared image/Kafka-host). This is a lightweight demo
+# pod with no state worth preserving, so just always delete and recreate
+# rather than chase field-by-field drift detection.
+if oc get pod cert-test-server -n "$NAMESPACE" >/dev/null 2>&1; then
+    oc delete pod cert-test-server -n "$NAMESPACE" --wait=true
 fi
+render_manifest | oc apply -f -
 oc set image pod/cert-test-server test-server="$IN_CLUSTER_IMAGE" -n "$NAMESPACE"
 
 step "Waiting for the rollout"
@@ -61,9 +111,36 @@ oc get pod cert-test-server -n "$NAMESPACE" -o wide
 echo
 echo "Image now running: $(oc get pod cert-test-server -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].image}')"
 echo "Digest:             $(oc get pod cert-test-server -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].imageID}')"
+
+step "Port-forwarding to the Pod"
+PF_LOG="$(mktemp)"
+# Kill any stale forward left running from a previous invocation of this script.
+pkill -f "oc port-forward -n $NAMESPACE pod/cert-test-server 8090:8090" 2>/dev/null || true
+nohup oc port-forward -n "$NAMESPACE" pod/cert-test-server 8090:8090 >"$PF_LOG" 2>&1 &
+PF_PID=$!
+disown "$PF_PID"
+
+for _ in $(seq 1 20); do
+    if curl -sf -o /dev/null http://localhost:8090/; then
+        break
+    fi
+    if ! kill -0 "$PF_PID" 2>/dev/null; then
+        echo "port-forward exited unexpectedly:" >&2
+        cat "$PF_LOG" >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+
+if ! curl -sf -o /dev/null http://localhost:8090/; then
+    echo "Port-forward did not come up in time — check $PF_LOG" >&2
+    exit 1
+fi
+
 echo
-echo "Drive it:  oc port-forward -n $NAMESPACE pod/cert-test-server 8090:8090   (then open http://localhost:8090)"
-echo "Or:        oc rsh -n $NAMESPACE cert-test-server"
+echo "Test console:  http://localhost:8090"
+echo "Stop it with:  kill $PF_PID"
+echo "Or shell in:   oc rsh -n $NAMESPACE cert-test-server"
 echo
 echo "Once you're happy with this build, tag a real version and update"
 echo "extras/openshift/test-server-pod.yaml's image field to match — the checked-in manifest"

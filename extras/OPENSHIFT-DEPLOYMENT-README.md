@@ -311,23 +311,19 @@ bash extras/openshift/scripts/deploy-test-server.sh
 (also reachable via the [`openshift-utils.sh`](openshift/openshift-utils.sh) menu) — builds
 [`extras/test-server/Containerfile`](test-server/Containerfile), pushes it under a fresh tag to
 the internal registry (same reasoning as "Why a fresh tag, not just re-pushing `:latest`" below),
-and applies/updates [`extras/openshift/test-server-pod.yaml`](openshift/test-server-pod.yaml).
+applies/updates [`extras/openshift/test-server-pod.yaml`](openshift/test-server-pod.yaml), and
+port-forwards it for you — the script prints `http://localhost:8090` once it's confirmed the
+console is actually responding.
 
-Drive it:
-
-```bash
-oc port-forward -n certsight pod/cert-test-server 8090:8090   # then open http://localhost:8090
-```
-
-or skip the UI and run a use case straight from a shell:
+Or skip the UI and run a use case straight from a shell:
 
 ```bash
 oc rsh -n certsight cert-test-server
 python3 -c "from use_cases import USE_CASES_BY_ID; print(USE_CASES_BY_ID['fresh-test-cert'].run({}))"
 ```
 
-No `hostPath`, `hostNetwork`, or elevated SCC needed — Tetragon's `fd_install`/`tcp_connect`
-kprobes are node-wide with no path or namespace filter (see
+No `hostNetwork`/`hostPID` needed — Tetragon's `fd_install`/`tcp_connect` kprobes are node-wide
+with no path or namespace filter (see
 [`tetragon-policies/certificate-file-access.yaml`](../tetragon-policies/certificate-file-access.yaml),
 [`tcp-connect-tls.yaml`](../tetragon-policies/tcp-connect-tls.yaml)), so this Pod's real
 file/network activity is picked up exactly like any other process on the node would be. The one
@@ -336,11 +332,71 @@ restricted to literal host paths under `/host/etc/...`) — that needs the same 
 `spc_t` SELinux grant [`probe_tests/openshift-soak/job.yaml`](../probe_tests/openshift-soak/job.yaml)
 uses.
 
-The Kafka event pane (right-hand side of the UI) stays empty by default —
-`TEST_SERVER_KAFKA_HOST`/`TEST_SERVER_KAFKA_PORT` in `test-server-pod.yaml` point at an
-unreachable placeholder, and the consumer thread retries quietly in the background rather than
-crashing the server. Every use case still runs and triggers real detections; point those two env
-vars at a real broker if you also want the live event feed.
+It *does* need a small `hostPath` grant (a dedicated `cert-test-server` ServiceAccount bound to
+the `hostmount-anyuid` SCC — narrower than `hostaccess`, since this Pod needs neither
+`hostNetwork` nor `hostPID`). Detection firing isn't enough on its own: cert-analyzer resolves
+every Tetragon-reported path as `HOST_PREFIX + path` before it can read the file (`agent/analyzer.py`),
+and a file this Pod writes under `/dev/shm` — a private per-container tmpfs — never exists at that
+resolved path on the node, no matter what Tetragon reports. `test-server-pod.yaml` mounts a
+`hostPath` volume at `/var/certsight-test-server` (same path in the container and on the node, so
+the `HOST_PREFIX` translation lands on the real file) and points `TEST_SERVER_CERT_DIR` at it —
+`use_cases.py`'s `_GENERATED_CERT_DIR` reads that env var, defaulting to the old `/dev/shm` path
+for the standalone (non-OpenShift) deployment where it's actually correct, since there
+test-server and cert-analyzer share one kernel/mount namespace.
+
+The Kafka event pane (right-hand side of the UI) stays empty by default — the consumer thread
+retries quietly in the background rather than crashing the server, so every use case still runs
+and triggers real detections either way. To get the live event feed, point the Pod at a real
+broker:
+
+```bash
+bash extras/openshift/scripts/deploy-test-server.sh                    # auto-detects the host IP
+bash extras/openshift/scripts/deploy-test-server.sh --kafka-host <ip>  # or set it explicitly
+```
+
+`TEST_SERVER_KAFKA_HOST` in `test-server-pod.yaml` is a `__TEST_SERVER_KAFKA_HOST__` substitution
+placeholder, not a literal value — the script fills it in (`--kafka-host` if given, else the
+host's default-route source IP via `ip -4 route get 1.1.1.1`) before `oc apply`. Don't `oc apply`
+the manifest directly; the raw placeholder is not a resolvable hostname.
+
+If Kafka is running on the operator's host machine (e.g. the local dev stack's broker) rather
+than in-cluster, two host-side things also have to be true — neither is tracked by this repo, so
+they don't survive a Kafka reinstall or a fresh host:
+
+1. **The broker must listen on more than `localhost`.** A single-node dev broker's
+   `/etc/kafka/server.properties` typically ships with `listeners=PLAINTEXT://localhost:9092` and
+   `advertised.listeners=PLAINTEXT://localhost:9092` — both loopback-only. The pod can open a TCP
+   connection to the bootstrap address, but the client then reconnects using whatever
+   `advertised.listeners` says, and `localhost` from inside the pod resolves to the pod's own
+   loopback, not the host. Fix:
+
+   ```bash
+   sudo sed -i \
+     -e 's|^listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093|listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://localhost:9093|' \
+     -e 's|^advertised.listeners=PLAINTEXT://localhost:9092|advertised.listeners=PLAINTEXT://<host-ip>:9092|' \
+     /etc/kafka/server.properties
+   sudo systemctl restart kafka   # brief outage for anything else consuming/producing right now
+   ```
+
+2. **`firewalld` must allow the port.** OpenShift's pod network (CRC's OVN overlay, or any other
+   CNI) reaches the host over its real interface, which lands in the host firewall's active zone
+   — a default `public` zone only allows a handful of named services (`ssh`, `cockpit`, ...), not
+   arbitrary ports:
+
+   ```bash
+   sudo firewall-cmd --add-port=9092/tcp --permanent
+   sudo firewall-cmd --reload
+   ```
+
+Verify from inside the Pod once both are done:
+
+```bash
+oc rsh -n certsight cert-test-server python3 -c \
+  "import socket; socket.create_connection(('<host-ip>', 9092), timeout=3); print('TCP connect OK')"
+```
+
+Note `<host-ip>` is typically DHCP-assigned — re-run `deploy-test-server.sh` (no `--kafka-host`)
+to re-detect it if it changes after a reboot, or check `ip -4 route get 1.1.1.1`.
 
 > **If you ever edit `extras/test-server/Containerfile`**: `use_cases.py` locates
 > `cert-agent.jar` via `Path(__file__).resolve().parents[2]`, which assumes it lives at
