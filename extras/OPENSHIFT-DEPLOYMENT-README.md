@@ -475,6 +475,18 @@ All four steps are automated by
 (reachable via the [`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh) menu) —
 useful to know the manual steps below for troubleshooting, but day to day the script is faster.
 
+If cert-expiry-monitor just needs restarting — no code change, e.g. after a crash or a stall
+caused by `openshift-marketplace`'s catalog-refresh pods starving the node of schedulable memory
+(see the `priorityClassName` comment in `daemonset.yaml`) —
+[`extras/openshift/scripts/restart-cert-analyzer.sh`](openshift/scripts/restart-cert-analyzer.sh)
+is the lighter-weight option: no rebuild, just `oc rollout restart` against the DaemonSet's
+existing image, with a fallback that clears any stuck `openshift-marketplace` pods if that's
+what's actually blocking the rollout.
+
+```bash
+bash extras/openshift/scripts/restart-cert-analyzer.sh
+```
+
 **Why a fresh tag, not just re-pushing `:latest`**: the DaemonSet's `imagePullPolicy:
 IfNotPresent` means the node only checks whether an image with that exact tag *string* is
 already present locally — it does not compare digests. Re-pushing new content under `:latest`
