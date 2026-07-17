@@ -50,7 +50,12 @@ spec:
         - name: LOG_LEVEL
           value: "DEBUG"
         - name: CERT_SCAN_PATHS
-          value: "/host/etc/ssl,/host/etc/pki,/host/etc/kubernetes/pki"
+          # Empty disables the periodic scanner entirely (agent/config.py only starts that
+          # thread when scan_paths is non-empty) -- off for the OpenShift demo so cert
+          # discovery is purely event-driven (Tetragon kprobes/uprobes), matching what's
+          # actually being demonstrated. SCAN_INTERVAL_SECONDS below is unused while this is
+          # empty.
+          value: ""
         - name: SCAN_INTERVAL_SECONDS
           value: "3600"
         - name: READINESS_GRACE_PERIOD_SECONDS
