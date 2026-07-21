@@ -104,6 +104,35 @@ async function loadUseCases() {
   }
 }
 
+// Tracks the CN tokens this browser tab's own use-case runs have generated
+// (see use_cases.py's `token = uuid.uuid4().hex[:12]`, folded into every CN
+// it produces) so the Kafka pane can show only this visitor's activity
+// instead of everyone's on a shared/public test-server instance. Backed by
+// sessionStorage so a reload doesn't lose it, but scoped to the tab -- a
+// fresh tab is a fresh "session" with no prior activity to filter in.
+const MY_TOKENS_KEY = 'certsight-my-tokens';
+
+function loadMyTokens() {
+  try {
+    return new Set(JSON.parse(sessionStorage.getItem(MY_TOKENS_KEY) || '[]'));
+  } catch (err) {
+    return new Set();
+  }
+}
+
+function rememberMyToken(token) {
+  if (!token) return;
+  myTokens.add(token);
+  try {
+    sessionStorage.setItem(MY_TOKENS_KEY, JSON.stringify([...myTokens]));
+  } catch (err) {
+    // sessionStorage unavailable (e.g. private browsing) -- filtering still
+    // works for the rest of this page load via the in-memory Set alone
+  }
+}
+
+const myTokens = loadMyTokens();
+
 async function runUseCase(id, button, li) {
   const status = document.getElementById('run-status');
   button.disabled = true;
@@ -132,6 +161,7 @@ async function runUseCase(id, button, li) {
       return;
     }
     const result = await res.json();
+    rememberMyToken(result.token);
     setRichText(status, result.detail);
     status.className = result.ok ? 'ok' : 'error';
   } catch (err) {
@@ -146,14 +176,21 @@ function connectEventStream() {
   const log = document.getElementById('event-log');
   const source = new EventSource('/api/events');
   source.onmessage = (evt) => {
-    let text = evt.data;
+    let parsed;
     try {
-      text = JSON.stringify(JSON.parse(evt.data), null, 2);
+      parsed = JSON.parse(evt.data);
     } catch (err) {
-      // not JSON -- show the raw payload as-is
+      // not JSON -- cert-analyzer's schema is always JSON in practice, but
+      // there's no CN to attribute this to, so drop it rather than risk
+      // showing another visitor's activity
+      return;
     }
+    const commonName = parsed && typeof parsed.common_name === 'string' ? parsed.common_name : '';
+    const isMine = [...myTokens].some((token) => commonName.includes(token));
+    if (!isMine) return;
+
     const entry = document.createElement('pre');
-    entry.textContent = `[${new Date().toLocaleTimeString()}]\n${text}`;
+    entry.textContent = `[${new Date().toLocaleTimeString()}]\n${JSON.stringify(parsed, null, 2)}`;
     log.prepend(entry);
   };
 }

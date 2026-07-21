@@ -5088,15 +5088,19 @@ class TestRetryQueueDrainer:
         """A throttled file sitting in the queue is fully processed once tokens free up."""
         from agent.analyzer import _TokenBucket
 
-        # Start fully exhausted so the initial enqueue is forced, then refill
-        # fast (10/sec) so the drainer's own backoff loop picks it up quickly.
-        bucket = _TokenBucket(rate=10)
-        bucket._tokens = 0
-        analyzer._new_cert_rate_limiter = bucket
-
         cert, _ = TestCertificateGeneration.generate_certificate("drain-me.example.com", 365)
         path = os.path.join(temp_dir, "drain-me.pem")
         TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        # Exhaust the bucket right before the throttled call, not before cert
+        # generation above -- keygen+signing+disk-write can occasionally take
+        # >100ms under CI load, long enough at 10/sec for a token to trickle
+        # back in and make this call succeed instead of queue, flaking the
+        # assertion below. Refilled fast (10/sec) so the drainer's own
+        # backoff loop still picks the queued entry up quickly.
+        bucket = _TokenBucket(rate=10)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
 
         result = analyzer._analyze_and_finish_new_certificate_file(
             path, "test", 1, "", None, "", 0, "test-node",
@@ -5125,13 +5129,17 @@ class TestRetryQueueDrainer:
     def test_drainer_preserves_original_process_attribution_on_replay(self, analyzer, temp_dir, monkeypatch):
         """Unlike periodic_scan's rediscovery, a replay keeps the real triggering process/pid."""
         from agent.analyzer import _TokenBucket
-        bucket = _TokenBucket(rate=10)
-        bucket._tokens = 0
-        analyzer._new_cert_rate_limiter = bucket
 
         cert, _ = TestCertificateGeneration.generate_certificate("attributed.example.com", 365)
         path = os.path.join(temp_dir, "attributed.pem")
         TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        # Exhaust the bucket right before the throttled call -- see the
+        # matching comment in test_drainer_replays_queued_entry_once_capacity_available
+        # for why this can't happen before cert generation above.
+        bucket = _TokenBucket(rate=10)
+        bucket._tokens = 0
+        analyzer._new_cert_rate_limiter = bucket
 
         analyzer._analyze_and_finish_new_certificate_file(
             path, "/usr/bin/original-proc", 4242, "", None, "", 0, "test-node",

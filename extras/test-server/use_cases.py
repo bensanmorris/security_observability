@@ -34,6 +34,12 @@ from cryptography.x509.oid import NameOID
 class UseCaseResult:
     ok: bool
     detail: str
+    # The random token folded into every CN this run generated (see the
+    # per-use-case `token = uuid.uuid4().hex[:12]` lines below) -- returned
+    # to the browser so it can tell its own Kafka events apart from other
+    # visitors' on a shared/public test-server instance. Empty on failure,
+    # since a failed run never produces a cert for cert-analyzer to see.
+    token: str = ""
 
 
 @dataclass
@@ -222,6 +228,7 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
             "guarantee CertSight treats this as a first-time discovery, so a new "
             "Kafka event should always appear"
         ),
+        token=token,
     )
 
 
@@ -352,6 +359,7 @@ def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
             f"cat'd it -- expect the chain-explorer view to show a MISSING gap between "
             f"{gap_note} and the root"
         ),
+        token=token,
     )
 
 
@@ -416,6 +424,7 @@ def _generate_chain_across_multiple_files(params: dict) -> UseCaseResult:
             f"MISSING even with intermediates dropped -- single-cert bundles are never flagged "
             f"missing, to avoid flagging every ordinary standalone leaf cert on the host"
         ),
+        token=token,
     )
 
 
@@ -516,6 +525,7 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
             "IP on OpenShift, or 127.0.0.1 on a bare-metal/host-network deployment) and "
             f"confirm its 'pid' field reads {proc.pid} -- the same process that bound the socket"
         ),
+        token=token,
     )
 
 
@@ -635,6 +645,7 @@ def _dial_outbound_tls_port(params: dict) -> UseCaseResult:
             "cache. This is independent of the bind-probe use case's own dedup, even against "
             "the identical 127.0.0.1:<port> -- each mechanism now tracks its own discoveries."
         ),
+        token=token,
     )
 
 
@@ -715,6 +726,7 @@ def _load_in_memory_cert_via_libssl(params: dict) -> UseCaseResult:
             "ever written to disk -- unique serial guarantees CertSight treats this as a "
             "first-time discovery, so a new Kafka event should always appear"
         ),
+        token=token,
     )
 
 
@@ -914,6 +926,7 @@ def _run_java_keystore_cert(params: dict) -> UseCaseResult:
             f"~{int(_JAVA_KEYSTORE_LOOP_INTERVAL_MS / 1000) + 1}s; unique PID+serial guarantees "
             "a first-time discovery"
         ),
+        token=token,
     )
 
 
