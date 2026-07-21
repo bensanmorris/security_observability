@@ -244,13 +244,18 @@ Identical to the vanilla Kubernetes path — `TracingPolicy` is a cluster-scoped
 kubectl apply -f tetragon-policies/certificate-file-access.yaml
 kubectl apply -f tetragon-policies/tcp-connect-tls.yaml
 kubectl apply -f tetragon-policies/experimental/tls-service-tracking.yaml
+kubectl apply -f tetragon-policies/experimental/openshift/openssl3-cert-load.yaml
 kubectl get tracingpolicies
 ```
 
-**Known gap on containerized nodes — two distinct failure classes.** All three experimental
-uprobe policies (`openssl3-cert-load`, `java-fips-nss-cert`, `java-non-fips-cert`) fail to load
-on the OpenShift/CRC Tetragon DaemonSet with `adding tracing policy failed: open <path>: no such
-file or directory`, but for different reasons:
+Note the last policy is the OpenShift-specific variant, not
+`tetragon-policies/experimental/openssl3-cert-load.yaml` — see below for why.
+
+**Known gap on containerized nodes — two distinct failure classes.** The `java-fips-nss-cert` and
+`java-non-fips-cert` experimental uprobe policies still fail to load on the OpenShift/CRC
+Tetragon DaemonSet with `adding tracing policy failed: open <path>: no such file or directory`.
+`openssl3-cert-load` used to fail the same way but is now covered by the OpenShift variant
+applied above; both failure classes are explained here for context:
 
 - `java-fips-nss-cert` (`/usr/lib64/libsoftokn3.so`) and `java-non-fips-cert`
   (`/opt/cert-agent/libcert_agent_stub.so`) fail because those paths genuinely don't exist on a
