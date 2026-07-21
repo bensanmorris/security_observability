@@ -46,7 +46,7 @@ import sys
 import threading
 import time
 
-_CANDIDATE_PORTS = [8443, 5671, 5672, 6380, 8883, 9093, 9094]
+_CANDIDATE_PORTS = [8443, 5671, 5672, 6380, 8883, 9093, 9094, 2376, 4443, 5986, 6443, 8140, 9443]
 
 
 def _serve(sock: socket.socket, context: ssl.SSLContext, deadline: float, stop: threading.Event) -> None:

@@ -404,7 +404,8 @@ disabled, same as the bind-probe and file-access cases) to pull the served
 certificate. Unlike the bind hook, `tcp_connect` fires on outbound
 connection attempts regardless of who's listening on the other end, so
 `tcp-connect-tls.yaml` narrows it with a `DPort` selector -- a fixed list
-of common TLS ports (443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094) --
+of common TLS ports (443, 636, 2376, 4443, 5671, 5672, 5986, 6380, 6443,
+8140, 8443, 8883, 9093, 9094, 9443) --
 rather than matching every outbound TCP connection on the host.
 
 `use_cases.py` spawns `tcp_connect_probe_helper.py` as a **separate OS
@@ -446,9 +447,12 @@ with no expiry: a port *this specific use case* has already dialed
 successfully since cert-analyzer's last restart will be silently skipped
 on a later click -- the `tcp_connect` kprobe still fires and the PID in
 the result message is still real, but no second Kafka event appears. The
-helper picks randomly from its 7 candidate ports each click specifically
-to soften this: expect roughly 7 fresh discoveries before you start seeing
-repeats, at which point restarting cert-analyzer clears the cache.
+helper picks randomly from its 13 candidate ports each click specifically
+to soften this: expect roughly 13 fresh discoveries before you start seeing
+repeats, at which point restarting cert-analyzer clears the cache. On a
+long-running shared demo, cumulative clicks from every visitor draw from
+this same pool, so it can still run dry eventually -- there's no expiry,
+just a bigger buffer than the 7-port list this used to be.
 
 At most 2 of these can run concurrently
 (`_MAX_CONCURRENT_CONNECT_PROBES` in `use_cases.py`), for the same

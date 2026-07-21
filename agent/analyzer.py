@@ -112,13 +112,19 @@ class CertificateAnalyzer:
     TLS_OUTBOUND_PORTS = frozenset({
         443,   # HTTPS
         636,   # LDAPS
+        2376,  # Docker daemon TLS
+        4443,  # HTTPS alternate
         5671,  # AMQP/TLS
         5672,  # AMQP (often TLS)
+        5986,  # WinRM HTTPS
         6380,  # Redis TLS
+        6443,  # Kubernetes API server
+        8140,  # Puppet
         8443,  # HTTPS alternate
         8883,  # MQTT/TLS
         9093,  # Kafka TLS
         9094,  # Kafka TLS alternate
+        9443,  # HTTPS alternate
     })
 
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,

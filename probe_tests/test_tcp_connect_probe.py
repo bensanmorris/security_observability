@@ -92,7 +92,8 @@ def main() -> None:
     parser.add_argument('--port', type=int, default=DEFAULT_PORT,
                         help=f'TCP port to connect to (default: {DEFAULT_PORT}). '
                              f'Must be in tcp-connect-tls.yaml DPort filter: '
-                             f'443, 636, 8443, 5671, 5672, 6380, 8883, 9093, 9094')
+                             f'443, 636, 2376, 4443, 5671, 5672, 5986, 6380, 6443, '
+                             f'8140, 8443, 8883, 9093, 9094, 9443')
     parser.add_argument('--cert', default=DEFAULT_CERT,
                         help='PEM certificate file served by the local TLS server')
     parser.add_argument('--key',  default=DEFAULT_KEY,
