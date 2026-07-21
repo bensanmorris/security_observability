@@ -247,17 +247,30 @@ kubectl apply -f tetragon-policies/experimental/tls-service-tracking.yaml
 kubectl get tracingpolicies
 ```
 
-**Known gap on containerized/RHCOS nodes**: the `openssl3-cert-load`, `java-fips-nss-cert`, and
-`java-non-fips-cert` experimental policies are host-uprobe policies that hook a specific
-absolute host library/agent path (`/usr/lib64/libssl.so.3`, `libsoftokn3.so`, the cert-agent
-native stub respectively). On a bare RHCOS node none of these paths exist by default, so the
-tetragon agent logs `adding tracing policy failed: open <path>: no such file or directory` for
-each and the policy simply doesn't attach — this is expected, not a misconfiguration, unless
-those libraries/agents are actually present at those exact host paths (e.g. via the optional
-Java agent RPM, or a workload that installs OpenSSL 3 at the host level rather than inside its
-own container image). Revisit whether in-memory OpenSSL/Java cert detection is in scope for the
-pilot, and if so, confirm the actual library paths on the real pilot cluster's nodes before
-assuming these three policies will "just work".
+**Known gap on containerized nodes — two distinct failure classes.** All three experimental
+uprobe policies (`openssl3-cert-load`, `java-fips-nss-cert`, `java-non-fips-cert`) fail to load
+on the OpenShift/CRC Tetragon DaemonSet with `adding tracing policy failed: open <path>: no such
+file or directory`, but for different reasons:
+
+- `java-fips-nss-cert` (`/usr/lib64/libsoftokn3.so`) and `java-non-fips-cert`
+  (`/opt/cert-agent/libcert_agent_stub.so`) fail because those paths genuinely don't exist on a
+  bare RHCOS node — confirmed via `oc debug node`. This is expected, not a misconfiguration,
+  unless those libraries/agents are actually installed at those exact host paths (e.g. via the
+  optional Java agent RPM). Revisit whether in-memory Java cert detection is in scope for the
+  pilot, and if so, confirm the actual paths on the real pilot cluster's nodes first.
+- `openssl3-cert-load` (`/usr/lib64/libssl.so.3`) fails for a *different* reason: the library
+  genuinely exists on the RHCOS host (`openssl-libs` RPM), but the Tetragon DaemonSet's
+  container only mounts host `/proc` (at `/procRoot`, used internally for cgroup resolution) —
+  it has no view of host `/usr/lib64` in its own mount namespace, so the plain host path can't
+  be opened from inside the container. Use
+  [`tetragon-policies/experimental/openshift/openssl3-cert-load.yaml`](../tetragon-policies/experimental/openshift/openssl3-cert-load.yaml)
+  instead of the bare-metal version for containerized/OpenShift deployments — it rewrites both
+  uprobe paths to `/procRoot/1/root/usr/lib64/libssl.so.3`, reusing the same host-proc mount
+  Tetragon already has rather than patching the Helm-managed DaemonSet with an extra host-root
+  volume. Verified loading cleanly (`Loaded generic uprobe sensor ... (3 functions)`, no error)
+  against CRC. The plain `tetragon-policies/experimental/openssl3-cert-load.yaml` stays correct
+  as-is for the bare-metal RHEL9 RPM deployment, where Tetragon runs directly on the host and
+  already sees `/usr/lib64` natively — don't apply the `/procRoot`-prefixed variant there.
 
 ---
 
