@@ -22,8 +22,18 @@ metadata:
   namespace: certsight
 data:
   prometheus.yml: |
+    # 60s, not the Prometheus default 15s -- matches cert-analyzer's own
+    # min_scrape_interval_seconds (agent/config.py, default 60s), which
+    # replays a cached /metrics reply to any scrape landing sooner than
+    # that. A faster interval here doesn't get you fresher data, only
+    # more real (uncached) generate_latest()+gzip rebuilds of a payload
+    # that can run into the tens of thousands of series/~15MB on a busy
+    # node -- confirmed as the dominant CPU cost via a live py-spy profile
+    # against the CRC soak cluster on 2026-07-21, well above cert
+    # parsing/FIPS/checksum work. Keep in sync with min_scrape_interval_seconds
+    # if either changes.
     global:
-      scrape_interval: 15s
+      scrape_interval: 60s
     scrape_configs:
     - job_name: cert-expiry-monitor
       static_configs:
