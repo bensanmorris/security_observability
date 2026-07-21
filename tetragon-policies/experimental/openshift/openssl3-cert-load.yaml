@@ -1,0 +1,49 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openssl3-cert-load
+spec:
+  uprobes:
+  # SSL_CTX_use_certificate_file(SSL_CTX*, const char* file, int type)
+  # SSL_CTX_use_certificate_chain_file(SSL_CTX*, const char* file)
+  # Hooks applications that load certificate files explicitly via OpenSSL.
+  # This covers: openssl s_client -CAfile, nginx, Apache, Java via OpenSSL, etc.
+  #
+  # RHEL9 path — Tetragon v1.1.0 compatible
+  #
+  # Container variant: the Tetragon DaemonSet on OpenShift/Kubernetes runs libssl.so.3
+  # inside its own container mount namespace, which doesn't have the host's /usr/lib64.
+  # The chart's DaemonSet only mounts host /proc at /procRoot (used internally for cgroup
+  # resolution), so the uprobe path is rewritten through /procRoot/1/root/ to reach the
+  # host's real root filesystem via PID 1's procfs root symlink — the same trick Tetragon
+  # itself relies on. Use tetragon-policies/experimental/openssl3-cert-load.yaml (no
+  # /procRoot prefix) instead for the bare-metal RHEL9 RPM deployment, where Tetragon runs
+  # directly on the host and already sees /usr/lib64 natively.
+  - path: "/procRoot/1/root/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_file"
+    - "SSL_CTX_use_certificate_chain_file"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "string"
+  # SSL_CTX_use_certificate_ASN1(SSL_CTX *ctx, int len, const unsigned char *d)
+  # Hooks explicit in-memory DER certificate loading via libssl. arg2 is a plain
+  # single pointer to the DER bytes — Tetragon reads them atomically in eBPF at
+  # hook entry via bpf_probe_read_user (char_buf), before the function executes.
+  # This avoids the double-pointer problem of d2i_X509 (const unsigned char **in)
+  # which cannot be safely resolved from userspace after function return.
+  #
+  # RHEL9 path — Tetragon v1.1.0 compatible
+  - path: "/procRoot/1/root/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_ASN1"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "int32"
+    - index: 2
+      type: "char_buf"
+      sizeArgIndex: 2
