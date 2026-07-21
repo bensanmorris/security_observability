@@ -160,7 +160,15 @@ dnf -y install nginx || true
 cat <<'EOF' > /etc/nginx/conf.d/certsight-test-console.conf
 limit_req_zone $binary_remote_addr zone=tc_general:10m rate=10r/s;
 limit_req_zone $binary_remote_addr zone=tc_actions:10m rate=12r/m;
-limit_conn_zone $binary_remote_addr zone=tc_conn:10m;
+# Separate zones per location -- /api/events connections are long-lived by
+# design (kept open for a whole page visit, one per browser tab), so a
+# shared zone let them silently consume the budget /api/run/'s own limit
+# was meant to police: a client with 3+ tabs open (or a couple of stale
+# reconnects) could saturate the shared counter on /api/events alone and
+# then have every /api/run POST rejected with no request-rate involved at
+# all, which is what a live 2026-07-21 investigation found happening.
+limit_conn_zone $binary_remote_addr zone=tc_conn_actions:10m;
+limit_conn_zone $binary_remote_addr zone=tc_conn_events:10m;
 limit_req_status 429;
 limit_conn_status 429;
 
@@ -170,14 +178,14 @@ server {
 
     location /api/run/ {
         limit_req zone=tc_actions burst=6 nodelay;
-        limit_conn tc_conn 3;
+        limit_conn tc_conn_actions 3;
         proxy_pass http://127.0.0.1:8091;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
 
     location /api/events {
-        limit_conn tc_conn 5;
+        limit_conn tc_conn_events 5;
         proxy_pass http://127.0.0.1:8091;
         proxy_http_version 1.1;
         proxy_buffering off;

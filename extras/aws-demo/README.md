@@ -42,9 +42,18 @@ itself only listens on `127.0.0.1:8091`) and rate-limits per client IP:
 
 | Path | Limit | Why |
 |---|---|---|
-| `/api/run/*` (the actual action endpoints -- spawn JVM, generate cert, bind port, etc.) | 12/min, burst 6 | These are the expensive ones (real subprocess/JVM/crypto work); this is the main cost/load control |
+| `/api/run/*` (the actual action endpoints -- spawn JVM, generate cert, bind port, etc.) | 12/min, burst 6, capped at 3 concurrent connections/IP | These are the expensive ones (real subprocess/JVM/crypto work); this is the main cost/load control |
 | `/api/events` (the SSE live-event stream) | not request-rate-limited, capped at 5 concurrent connections/IP | It's one long-lived connection per page load, not a request to throttle |
 | everything else (static assets, `/api/use-cases`) | 10 req/s, burst 20 | Generous -- just guards against a naive scraper/bot loop |
+
+`/api/run/*` and `/api/events` use *separate* connection-count zones even
+though both are per-IP -- they used to share one, which meant a client with
+several tabs open (each holding its own long-lived `/api/events` stream)
+could exhaust the shared counter on SSE connections alone and then have
+every `/api/run` click rejected with a `429` that had nothing to do with
+request rate. If `/api/run` clicks are failing with plenty of time between
+them, check concurrent connections/tabs before assuming the rate limit
+itself is too tight.
 
 Exceeding a limit gets a `429`, not a dropped connection. This bounds load
 per client but doesn't prevent many *different* IPs hammering it
