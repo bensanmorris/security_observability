@@ -53,6 +53,7 @@ if [[ "$POLICY_COUNT" -eq 0 ]]; then
     oc apply -f "$REPO_ROOT/tetragon-policies/certificate-file-access.yaml"
     oc apply -f "$REPO_ROOT/tetragon-policies/tcp-connect-tls.yaml"
     oc apply -f "$REPO_ROOT/tetragon-policies/experimental/tls-service-tracking.yaml"
+    oc apply -f "$REPO_ROOT/tetragon-policies/experimental/openshift/openssl3-cert-load.yaml"
 else
     echo "$POLICY_COUNT tracing polic(y/ies) already loaded."
 fi
