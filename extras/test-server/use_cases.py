@@ -34,12 +34,36 @@ from cryptography.x509.oid import NameOID
 class UseCaseResult:
     ok: bool
     detail: str
-    # The random token folded into every CN this run generated (see the
-    # per-use-case `token = uuid.uuid4().hex[:12]` lines below) -- returned
-    # to the browser so it can tell its own Kafka events apart from other
-    # visitors' on a shared/public test-server instance. Empty on failure,
-    # since a failed run never produces a cert for cert-analyzer to see.
+    # The random token folded into every CN this run generated (see
+    # _resolve_token() below) -- returned to the browser so it can tell its
+    # own Kafka events apart from other visitors' on a shared/public
+    # test-server instance. Empty on failure, since a failed run never
+    # produces a cert for cert-analyzer to see.
     token: str = ""
+
+
+_CLIENT_TOKEN_RE = re.compile(r'^[0-9a-f]{8,32}$')
+
+
+def _resolve_token(params: dict) -> str:
+    """Every use case folds this into the CN(s) it generates so the browser's
+    Kafka pane can filter to just its own activity (see app.js's `myTokens`).
+
+    app.js generates this token and remembers it *before* firing the
+    request, specifically so it's already known client-side before the run
+    can possibly produce a Kafka event -- the detection pipeline (Tetragon
+    kprobe -> cert-analyzer -> Kafka -> this server's SSE broadcast) can
+    complete faster than this HTTP request's own response reaches the
+    browser, and a server-generated token arriving only in that response
+    was consistently losing that race for fast/bundled detections (e.g.
+    the multi-cert chain use cases), silently dropping every event for the
+    run. Falls back to generating one here for non-browser callers (direct
+    curl/API use, tests) that don't supply one.
+    """
+    client_token = params.get("token")
+    if isinstance(client_token, str) and _CLIENT_TOKEN_RE.match(client_token):
+        return client_token
+    return uuid.uuid4().hex[:12]
 
 
 @dataclass
@@ -171,7 +195,7 @@ def _generate_and_read_fresh_cert(params: dict) -> UseCaseResult:
                 detail=f"expired_days must be between {_MIN_EXPIRED_DAYS} and {_MAX_EXPIRED_DAYS}",
             )
 
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     cn = f"certsight-test-{token}.local"
     path = _GENERATED_CERT_DIR / f"generated-{token}.crt"
 
@@ -314,7 +338,7 @@ def _generate_chain_with_missing_intermediates(params: dict) -> UseCaseResult:
     if error:
         return error
 
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     root_cert, intermediates, leaf_cn, leaf_cert = _build_5_tier_chain(token)
 
     # Always drop the N intermediates closest to the root -- this produces
@@ -368,7 +392,7 @@ def _generate_chain_across_multiple_files(params: dict) -> UseCaseResult:
     if error:
         return error
 
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     root_cert, intermediates, leaf_cn, leaf_cert = _build_5_tier_chain(token)
 
     # Same drop rule as the single-bundle use case above -- drop the N
@@ -458,7 +482,7 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
         with _active_tls_probe_lock:
             _active_tls_probe_count -= 1
 
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     cn = f"certsight-test-bind-{token}.local"
     cert_path = _GENERATED_CERT_DIR / f"bind-probe-{token}.crt"
     key_path = _GENERATED_CERT_DIR / f"bind-probe-{token}.key"
@@ -564,7 +588,7 @@ def _dial_outbound_tls_port(params: dict) -> UseCaseResult:
         with _active_connect_probe_lock:
             _active_connect_probe_count -= 1
 
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     cn = f"certsight-test-connect-{token}.local"
     cert_path = _GENERATED_CERT_DIR / f"connect-probe-{token}.crt"
     key_path = _GENERATED_CERT_DIR / f"connect-probe-{token}.key"
@@ -683,7 +707,7 @@ def _load_libssl():
 
 
 def _load_in_memory_cert_via_libssl(params: dict) -> UseCaseResult:
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     cn = f"certsight-test-asn1-{token}.local"
     cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size=2048)
     cert = x509.load_pem_x509_certificate(cert_pem)
@@ -840,7 +864,7 @@ def _run_java_keystore_cert(params: dict) -> UseCaseResult:
         _release()
         return UseCaseResult(ok=False, detail=f"failed to compile CertAgentTest.java: {e.stderr.strip()}")
 
-    token = uuid.uuid4().hex[:12]
+    token = _resolve_token(params)
     cn = f"certsight-test-jca-{token}.local"
     cert_pem, _key_pem = _generate_self_signed_cert(cn, key_size=2048)
 

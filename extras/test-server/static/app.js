@@ -105,12 +105,32 @@ async function loadUseCases() {
 }
 
 // Tracks the CN tokens this browser tab's own use-case runs have generated
-// (see use_cases.py's `token = uuid.uuid4().hex[:12]`, folded into every CN
-// it produces) so the Kafka pane can show only this visitor's activity
-// instead of everyone's on a shared/public test-server instance. Backed by
+// (see use_cases.py's _resolve_token(), folded into every CN it produces)
+// so the Kafka pane can show only this visitor's activity instead of
+// everyone's on a shared/public test-server instance. Backed by
 // sessionStorage so a reload doesn't lose it, but scoped to the tab -- a
 // fresh tab is a fresh "session" with no prior activity to filter in.
 const MY_TOKENS_KEY = 'certsight-my-tokens';
+
+// Generated here, client-side, rather than left to use_cases.py -- the
+// Kafka pane's SSE filter (connectEventStream() below) can only show an
+// event once its token is in `myTokens`, and the detection pipeline
+// (Tetragon kprobe -> cert-analyzer -> Kafka -> this page's SSE stream)
+// can complete faster than /api/run/<id>'s own HTTP response reaches this
+// tab -- a server-generated token, only known after that response, was
+// consistently losing that race for fast/bundled detections (e.g. the
+// multi-cert chain use cases publish several events within milliseconds),
+// silently dropping every event for the run with no way to recover it
+// after the fact. Generating and remembering the token before the request
+// is even sent closes the race instead of just narrowing it. Uses
+// getRandomValues() rather than crypto.randomUUID(), which MDN documents
+// as secure-context-only -- this page is plain HTTP on a non-localhost
+// origin (e.g. the AWS demo), not a secure context.
+function generateClientToken() {
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 function loadMyTokens() {
   try {
@@ -142,6 +162,11 @@ async function runUseCase(id, button, li) {
   for (const el of li.querySelectorAll('[data-param-name]')) {
     params[el.dataset.paramName] = el.type === 'checkbox' ? String(el.checked) : el.value;
   }
+  // Remembered *before* the request is sent -- see generateClientToken()'s
+  // comment above for why that ordering is what actually closes the race.
+  const clientToken = generateClientToken();
+  rememberMyToken(clientToken);
+  params.token = clientToken;
   try {
     const res = await fetch(`/api/run/${encodeURIComponent(id)}`, {
       method: 'POST',
@@ -161,6 +186,8 @@ async function runUseCase(id, button, li) {
       return;
     }
     const result = await res.json();
+    // Normally a no-op (result.token already equals clientToken) -- catches
+    // the fallback path if the server ever ends up minting its own token.
     rememberMyToken(result.token);
     setRichText(status, result.detail);
     status.className = result.ok ? 'ok' : 'error';
