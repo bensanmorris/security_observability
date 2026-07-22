@@ -2,9 +2,15 @@
 
 cert-analyzer can optionally publish a JSON event to Kafka each time a
 certificate is discovered for the first time (`KAFKA_ENABLED=true` /
-`[kafka] enabled = true`). This document covers standing up a throwaway,
-single-node Kafka broker on RHEL 9 to test that path locally, and how to
-verify and view the data it produces.
+`[kafka] enabled = true`), and optionally a further event each time an
+already-known certificate is re-accessed by a new process/pod
+(`[kafka] access_enabled = true`). This document covers standing up a
+throwaway, single-node Kafka broker on RHEL 9 to test that path locally, and
+how to verify and view the data it produces.
+
+Writing an actual consumer against these topics? See
+[CONSUMER-README.md](CONSUMER-README.md) for client code examples and links
+to the full event schemas.
 
 ---
 

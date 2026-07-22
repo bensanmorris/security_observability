@@ -115,12 +115,18 @@ class KafkaPublisher:
         self,
         bootstrap_servers: str,
         topic: str,
+        access_topic: str = '',
         security_protocol: str = 'PLAINTEXT',
         sasl_mechanism: str = '',
         sasl_username: str = '',
         sasl_password: str = '',  # nosec B107 - empty-string "not set" placeholder, not a credential
     ):
         self._topic = topic
+        # Empty string means certificate_accessed publishing is disabled --
+        # see access_enabled below. One producer serves both topics; there's
+        # no need for a second KafkaProducer/TCP connection per topic.
+        self._access_topic = access_topic
+        self.access_enabled = bool(access_topic)
         self._producer: Optional['KafkaProducer'] = None
         self._producer_kwargs: dict = {}
         self._last_connect_attempt: float = 0.0
@@ -217,9 +223,11 @@ class KafkaPublisher:
 
             label = bootstrap_servers or str(self._producer_kwargs.get('bootstrap_servers', ''))
             label_topic = topic or self._topic
+            if self._access_topic:
+                label_topic = f"{label_topic}, {self._access_topic}"
             logger.info(
                 f"Kafka producer connected — "
-                f"brokers: {label}, topic: {label_topic}"
+                f"brokers: {label}, topics: {label_topic}"
             )
             with self._lock:
                 self._producer = producer
@@ -288,8 +296,94 @@ class KafkaPublisher:
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
-        key = cert_info.unique_key
+        self._send(self._topic, cert_info.unique_key, message, cert_info.path)
 
+    def publish_access(
+        self,
+        cert_info: CertificateInfo,
+        process: str,
+        pid: int,
+        parent_process: str,
+        parent_pid: int,
+        namespace: str = '',
+        pod_name: str = '',
+        pod_uid: str = '',
+        node_name: str = '',
+        app_label: str = '',
+        container_name: str = '',
+        container_id: str = '',
+        container_image: str = '',
+    ) -> None:
+        """
+        Publish a certificate_accessed event for a distinct process/pod
+        re-accessing an already-known certificate.
+
+        No-op unless access_topic was configured (access_enabled is False by
+        default — see [kafka] access_enabled in cert-analyzer.conf). Callers
+        are expected to have already deduplicated per (process, parent_process,
+        pod_name, namespace, app_label, container_name) — see
+        CertificateAnalyzer._record_cert_process_access — so this fires once
+        per distinct accessor per cert, not once per raw file-access event.
+
+        Deliberately excludes cert metadata (subject, SANs, key info, FIPS
+        flags, ...) already carried by the certificate_discovered event on
+        the main topic; consumers join on cert_unique_key.
+
+        Message schema:
+        {
+            "schema_version":  1,
+            "event_type":      "certificate_accessed",
+            "accessed_at":     "2026-03-31T10:00:00.000000",   # ISO 8601 UTC
+            "cert_unique_key": "...",
+            "path":            "/etc/pki/tls/certs/ca-bundle.crt",
+            "cert_index":      0,
+            "serial_number":   "abc123",
+            "process":         "/usr/bin/curl",
+            "pid":             12345,
+            "parent_process":  "/usr/bin/bash",
+            "parent_pid":      12300,
+            "namespace":       "default",
+            "pod_name":        "my-pod-abc",
+            "pod_uid":         "...",
+            "node_name":       "...",
+            "app_label":       "my-app",
+            "container_name":  "main",
+            "container_id":    "...",
+            "container_image": "my-app:1.0"
+        }
+        """
+        if not KAFKA_AVAILABLE or not self.access_enabled:
+            return
+
+        message = {
+            'schema_version':   KAFKA_SCHEMA_VERSION,
+            'event_type':       'certificate_accessed',
+            'accessed_at':      datetime.utcnow().isoformat(),
+            'cert_unique_key':  cert_info.unique_key,
+            'path':             cert_info.path,
+            'cert_index':       cert_info.cert_index,
+            'serial_number':    cert_info.serial_number,
+            'process':          process,
+            'pid':              pid,
+            'parent_process':   parent_process,
+            'parent_pid':       parent_pid,
+            'namespace':        namespace,
+            'pod_name':         pod_name,
+            'pod_uid':          pod_uid,
+            'node_name':        node_name,
+            'app_label':        app_label,
+            'container_name':   container_name,
+            'container_id':     container_id,
+            'container_image':  container_image,
+        }
+
+        self._send(self._access_topic, cert_info.unique_key, message, cert_info.path)
+
+    def _send(self, topic: str, key: str, message: dict, log_label: str) -> None:
+        """
+        Shared connect-check-then-send path for publish() and publish_access().
+        log_label is only used for the warning logged on a send failure.
+        """
         with self._lock:
             producer = self._producer
             needs_connect = producer is None
@@ -324,12 +418,12 @@ class KafkaPublisher:
         # docstring.
         try:
             producer.send(
-                self._topic,
+                topic,
                 key=key,
                 value=message,
             ).add_errback(lambda exc, _producer=producer: self._on_error(_producer, exc))
         except Exception as e:
-            logger.warning(f"Kafka publish failed for {cert_info.path}: {e}")
+            logger.warning(f"Kafka publish failed for {log_label}: {e}")
             # Nullify the producer so the next publish attempt triggers reconnect
             with self._lock:
                 if self._producer is producer:

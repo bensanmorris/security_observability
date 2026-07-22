@@ -353,11 +353,15 @@ class CertificateAnalyzer:
 
     def _record_cert_process_access(self, cert_info: CertificateInfo, process: str, parent_process: str,
                                      pod_name: str = "", namespace: str = "",
-                                     app_label: str = "", container_name: str = "") -> None:
+                                     app_label: str = "", container_name: str = "") -> bool:
         """
         Record that `process` has accessed an already-known cert, capped at
         max_processes_per_cert distinct (process, parent_process, pod_name,
         namespace, app_label, container_name) tuples per cert.
+
+        Returns True the first time this exact tuple is seen for this cert
+        (the caller uses this to gate a one-time certificate_accessed Kafka
+        event), False for a repeat access or one dropped by the cap.
 
         pod_name/namespace/app_label/container_name describe *this specific
         access* (the caller's current event), not cert_info's own pod fields —
@@ -380,7 +384,8 @@ class CertificateAnalyzer:
         PrometheusMetrics.update_certificate_metrics.
         """
         key = (process, parent_process, pod_name, namespace, app_label, container_name)
-        if key not in cert_info._seen_processes:
+        is_new = key not in cert_info._seen_processes
+        if is_new:
             if len(cert_info._seen_processes) >= self._max_processes_per_cert:
                 logger.debug(
                     "cert_process_info fan-out cap (%s) reached for %s — "
@@ -388,11 +393,12 @@ class CertificateAnalyzer:
                     self._max_processes_per_cert, cert_info.path, process,
                 )
                 self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached').inc()
-                return
+                return False
             cert_info._seen_processes.add(key)
         self.metrics.record_cert_process_access(
             cert_info, process, parent_process, pod_name, namespace, app_label, container_name,
         )
+        return is_new
 
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
@@ -2310,6 +2316,11 @@ class CertificateAnalyzer:
             # *accessing* pod/container for this specific event, independent of
             # each cert_info's own (sticky, discoverer-attributed) pod fields.
             app_label, container_name = self._derive_app_label_and_container_name(tetragon_pod)
+            publish_access = self.kafka_publisher is not None and self.kafka_publisher.access_enabled
+            if publish_access:
+                pod_uid = tetragon_pod.uid if tetragon_pod is not None else ""
+                container_id = tetragon_pod.container.id if tetragon_pod is not None else ""
+                container_image = tetragon_pod.container.image.name if tetragon_pod is not None else ""
             for i, key in enumerate(matching_keys):
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
@@ -2328,10 +2339,18 @@ class CertificateAnalyzer:
                 # in this file.
                 self.log_certificate_status(cert_info, summary_only=True)
                 self.metrics.update_last_accessed(cert_info)
-                self._record_cert_process_access(
+                is_new_access = self._record_cert_process_access(
                     cert_info, process_name, parent_process,
                     pod_name, namespace, app_label, container_name,
                 )
+                if is_new_access and publish_access:
+                    self.kafka_publisher.publish_access(
+                        cert_info, process_name, pid, parent_process, parent_pid,
+                        namespace=namespace, pod_name=pod_name, pod_uid=pod_uid,
+                        node_name=cert_info.node_name, app_label=app_label,
+                        container_name=container_name, container_id=container_id,
+                        container_image=container_image,
+                    )
 
             if is_bundle:
                 logger.info(

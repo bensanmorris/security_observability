@@ -242,7 +242,9 @@ sudo systemctl enable --now cert-analyzer
 |---|---|---|
 | `enabled` | `false` | Publish certificate discovery events to Kafka |
 | `bootstrap_servers` | `localhost:9092` | Comma-separated broker addresses |
-| `topic` | `cert-analyzer-events` | Topic to publish events to |
+| `topic` | `cert-analyzer-events` | Topic to publish `certificate_discovered` events to |
+| `access_enabled` | `false` | Additionally publish `certificate_accessed` events — one per distinct process/pod that re-accesses an already-known certificate (capped by `max_processes_per_cert` above). Independent of `enabled`; off by default since this can be materially higher volume than discovery events on a busy node |
+| `access_topic` | `cert-analyzer-access-events` | Topic to publish `certificate_accessed` events to |
 | `security_protocol` | `PLAINTEXT` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` |
 | `sasl_mechanism` | _(unset)_ | SASL mechanism — required for `SASL_*` protocols |
 | `sasl_username` | _(unset)_ | SASL username |
@@ -272,5 +274,6 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Roadmap](extras/ROADMAP.md) - Planned and proposed improvements
 - [Presentation Q&A](extras/PRESENTATION-QA.md) - Questions and answers covering architecture, deployment, Java JCA/JNI hooking, and roadmap
 - [Local Kafka testing](extras/kafka/KAFKA-README.md) - Install a throwaway Kafka broker and view published events
+- [Consuming Kafka events (Python)](extras/kafka/CONSUMER-README.md) - Client code examples for reading `certificate_discovered` and `certificate_accessed` events
 - [Detection test console](extras/test-server/TEST-SERVER-README.md) - Local web UI for triggering individual certificate detections and watching the resulting Kafka events live
 - [AWS deployment demo](extras/aws-demo/README.md) - Stand up the full CertSight stack on a single EC2 instance with public dashboard and test console URLs

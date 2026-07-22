@@ -235,6 +235,8 @@ def main():
     kafka_enabled          = cfg(cp, 'kafka', 'enabled',           'KAFKA_ENABLED',           'false').lower() == 'true'
     kafka_bootstrap        = cfg(cp, 'kafka', 'bootstrap_servers', 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
     kafka_topic            = cfg(cp, 'kafka', 'topic',             'KAFKA_TOPIC',             'cert-analyzer-events')
+    kafka_access_enabled   = cfg(cp, 'kafka', 'access_enabled',    'KAFKA_ACCESS_ENABLED',    'false').lower() == 'true'
+    kafka_access_topic     = cfg(cp, 'kafka', 'access_topic',      'KAFKA_ACCESS_TOPIC',      'cert-analyzer-access-events')
     kafka_security         = cfg(cp, 'kafka', 'security_protocol', 'KAFKA_SECURITY_PROTOCOL', 'PLAINTEXT')
     kafka_sasl_mechanism   = cfg(cp, 'kafka', 'sasl_mechanism',    'KAFKA_SASL_MECHANISM',    '')
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
@@ -269,6 +271,7 @@ def main():
     if kafka_enabled:
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
         logger.info(f"Kafka topic:       {kafka_topic}")
+        logger.info(f"Kafka access events: {'enabled — topic: ' + kafka_access_topic if kafka_access_enabled else 'disabled'}")
         logger.info(f"Kafka security:    {kafka_security}")
     logger.info(f"Event rate metrics: {'enabled' if event_rate_metrics_enabled else 'disabled'}")
     logger.info(f"Bind probe:        {'enabled' if bind_probe_enabled else 'disabled'}")
@@ -297,6 +300,7 @@ def main():
         kafka_publisher = KafkaPublisher(
             bootstrap_servers=kafka_bootstrap,
             topic=kafka_topic,
+            access_topic=kafka_access_topic if kafka_access_enabled else '',
             security_protocol=kafka_security,
             sasl_mechanism=kafka_sasl_mechanism,
             sasl_username=kafka_sasl_username,

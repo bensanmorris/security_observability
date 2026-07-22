@@ -1,11 +1,14 @@
 # cert-analyzer — Surfaced Fields Reference
 
 The cert-analyzer surfaces certificate data through two independent channels:
-**Prometheus metrics** (always on, port 9090 by default) and an optional
-**Kafka event stream** (one JSON message per newly-discovered certificate).
+**Prometheus metrics** (always on, port 9090 by default) and two optional
+**Kafka event streams** — `certificate_discovered` (one message per
+newly-discovered certificate) and `certificate_accessed` (one message per
+distinct process/pod that subsequently re-accesses an already-known
+certificate).
 
 This document is a reference for engineers writing dashboards, alert rules,
-or consuming the Kafka topic.
+or consuming either Kafka topic.
 
 ---
 
@@ -310,3 +313,85 @@ the extension is present but no values are set.
 > **Alert guidance**: filter `is_ca="false"` on `tls_certificate_self_signed == 1` to target non-CA self-signed certificates — the genuinely risky case. Root CA certificates (`is_ca="true"`) are legitimately self-signed and can be excluded. `is_ca="unknown"` means the certificate has no Basic Constraints extension, which itself is unusual for a modern cert and worth alerting on alongside `is_self_signed=1`.
 >
 > Example PromQL: `tls_certificate_self_signed{is_ca="false"} == 1`
+
+---
+
+## Kafka event schema: certificate_accessed
+
+Disabled by default — set `[kafka] access_enabled = true` (in addition to
+`[kafka] enabled = true`) to publish these. Published to the configured
+`access_topic` each time a certificate already known to the analyzer is
+re-accessed by a **new** distinct `(process, parent_process, pod_name,
+namespace, app_label, container_name)` tuple — not on every raw file-access
+event. The same process/pod combination re-accessing the same cert again does
+not produce a second message. This mirrors — and is capped by the same
+`max_processes_per_cert` limit as — the `cert_process_info` Prometheus gauge
+(see [Certificate-to-process map](#certificate-to-process-map)).
+
+The certificate's own discovery is *not* re-published here — the discovering
+process/pod is already captured in that certificate's `certificate_discovered`
+event. This topic only covers subsequent accesses by other processes/pods.
+
+The message intentionally omits certificate metadata (subject, SANs, key
+info, FIPS status, etc.) already carried by `certificate_discovered` —
+consumers should join the two streams on `cert_unique_key` (equivalent to
+`certificate_discovered`'s partition key, `path:cert_index:serial_number`).
+
+The partition key is the same `cert_unique_key`, so all accesses for a given
+certificate land on the same partition.
+
+```json
+{
+  "schema_version":   1,
+  "event_type":       "certificate_accessed",
+  "accessed_at":      "2026-07-22T10:00:00.000000",
+
+  "cert_unique_key":  "/etc/ssl/certs/my-service.pem:0:123456789",
+  "path":             "/etc/ssl/certs/my-service.pem",
+  "cert_index":       0,
+  "serial_number":    "123456789",
+
+  "process":          "/usr/bin/curl",
+  "pid":              23456,
+  "parent_process":   "/usr/bin/bash",
+  "parent_pid":       23400,
+
+  "namespace":        "production",
+  "pod_name":         "debug-pod-x7z2q",
+  "pod_uid":          "b2c3d4e5-...",
+  "node_name":        "worker-1",
+  "app_label":        "debug-pod",
+  "container_name":   "main",
+  "container_id":     "containerd://def456",
+  "container_image":  "debug-tools:1.0"
+}
+```
+
+### Field reference
+
+| Field | Type | Description |
+|---|---|---|
+| `schema_version` | int | Same versioning scheme as `certificate_discovered` |
+| `event_type` | string | Always `"certificate_accessed"` |
+| `accessed_at` | ISO 8601 | UTC timestamp of this access event |
+| `cert_unique_key` | string | Join key back to the certificate's `certificate_discovered` event |
+| `path` | string | Filesystem path of the certificate file |
+| `cert_index` | int | 0-based index within a multi-cert PEM file |
+| `serial_number` | string | Decimal serial number |
+| `process` | string | Binary path of the accessing process |
+| `pid` | int | PID of that process |
+| `parent_process` | string | Binary path of the parent process; empty when Tetragon's process cache lacked the parent at event time |
+| `parent_pid` | int | PID of the parent process; `0` when unavailable |
+| `namespace` | string | Kubernetes namespace of the accessing pod; empty on bare-metal |
+| `pod_name` | string | Name of the accessing pod |
+| `pod_uid` | string | UID of the accessing pod |
+| `node_name` | string | Node the access occurred on |
+| `app_label` | string | Value of `app`, `app.kubernetes.io/name`, or `k8s-app` label on the accessing pod |
+| `container_name` | string | Container name within the accessing pod |
+| `container_id` | string | Full container ID including runtime prefix |
+| `container_image` | string | Image name and tag of the accessing container |
+
+> **Note**: these pod/container fields describe *this specific access* and
+> can differ from the pod/container fields on the certificate's own
+> `certificate_discovered` event, which stay sticky to whichever pod first
+> discovered the certificate.
