@@ -37,7 +37,10 @@ ZooKeeper) as a native systemd service:
 - Formats KRaft storage under `/var/lib/kafka/data` (once, on first install)
 - Installs and starts `kafka.service`
 - Waits for the broker to actually accept Kafka-protocol connections (not just for the process to start — see [Troubleshooting](#troubleshooting))
-- Creates the `cert-analyzer-events` topic
+- Creates the `cert-analyzer-events` and `cert-analyzer-access-events` topics
+  (the latter created unconditionally, even though `[kafka] access_enabled`
+  defaults to `false` — cheap to have it exist and idle rather than fail
+  later if you turn access events on after already running this script)
 
 It's plaintext/unauthenticated by design — matches cert-analyzer's own
 `PLAINTEXT` default `security_protocol`, and is not meant for anything
@@ -45,12 +48,12 @@ beyond local testing.
 
 The script is idempotent: re-running it skips the download/format/systemd
 steps if `kafka.service` is already active, and just re-verifies the
-broker and topic.
+broker and both topics.
 
-To use a different topic name:
+To use different topic names:
 
 ```bash
-CERT_ANALYZER_TOPIC=my-test-topic ./extras/kafka/install-kafka.sh
+CERT_ANALYZER_TOPIC=my-test-topic CERT_ANALYZER_ACCESS_TOPIC=my-test-access-topic ./extras/kafka/install-kafka.sh
 ```
 
 ---
@@ -64,6 +67,11 @@ Add to `/etc/cert-analyzer/cert-analyzer.conf` (or set the equivalent env vars):
 enabled = true
 bootstrap_servers = localhost:9092
 topic = cert-analyzer-events
+
+# Optional -- off by default. See CONSUMER-README.md for the
+# certificate_accessed schema.
+access_enabled = true
+access_topic = cert-analyzer-access-events
 ```
 
 Then restart cert-analyzer for the config to take effect.
