@@ -75,6 +75,43 @@ its ServiceAccount:
 oc adm policy add-scc-to-user privileged -z tetragon -n kube-system
 ```
 
+**On a locked-down/air-gapped host** where neither `helm.cilium.io` nor `quay.io` (the chart's
+image registry) is reachable, `helm repo add`/`helm install` above won't work — the repo add
+needs to fetch an index over HTTPS, and the install still needs to pull
+`quay.io/cilium/tetragon` (plus the operator and stdout-export sidecar images, both enabled by
+default) onto the cluster's nodes. Instead, on any machine with internet access:
+
+```bash
+helm repo add cilium https://helm.cilium.io
+helm pull cilium/tetragon --version 1.7.0                       # -> tetragon-1.7.0.tgz
+docker pull quay.io/cilium/tetragon:v1.7.0
+docker save quay.io/cilium/tetragon:v1.7.0 | gzip > tetragon-agent.tar.gz
+docker pull quay.io/cilium/tetragon-operator:v1.7.0
+docker save quay.io/cilium/tetragon-operator:v1.7.0 | gzip > tetragon-operator.tar.gz
+docker pull quay.io/cilium/hubble-export-stdout:v1.1.1
+docker save quay.io/cilium/hubble-export-stdout:v1.1.1 | gzip > hubble-export-stdout.tar.gz
+```
+
+(check `helm show values cilium/tetragon --version 1.7.0` for the exact image/tag pairs if
+using a different chart version — they can change between releases). Copy all four files onto
+the VM, `oc login`, then:
+
+```bash
+bash extras/openshift/scripts/deploy-tetragon-from-release.sh \
+  --chart /path/to/tetragon-1.7.0.tgz \
+  --agent-image-tar /path/to/tetragon-agent.tar.gz \
+  --operator-image-tar /path/to/tetragon-operator.tar.gz \
+  --export-stdout-image-tar /path/to/hubble-export-stdout.tar.gz
+```
+
+The script mirrors each image into a dedicated `tetragon-mirror` namespace in the cluster's
+internal registry, grants `kube-system` pull access to it, then runs `helm upgrade --install`
+against the local chart tarball with `--set <component>.image.override=<mirrored-ref>` for each
+image you supplied (the chart's templates check that field before falling back to
+`repository`/`tag` — confirmed against the real chart, not assumed), and finally binds the
+`privileged` SCC for you. `--skip-operator`/`--skip-export-stdout` are available if you've
+disabled those components entirely via `--extra-set`. Run it with no arguments for full usage.
+
 > Some clusters' `kube-system` namespace already carries
 > `pod-security.kubernetes.io/enforce: privileged` out of the box (true of the CRC bundle used
 > to validate this guide), in which case the Tetragon pod admits without the explicit grant
@@ -93,6 +130,12 @@ oc get events -n kube-system --field-selector reason=FailedCreate
 ---
 
 ## 2. Build and import the cert-analyzer image
+
+**On a locked-down/air-gapped host** where a local container build is impractical (no
+outbound network access for base images/pip, hardened build tooling, etc.), skip building
+entirely and use the pre-built images published to GHCR on every tagged release instead —
+see "Air-gapped install from pre-built release images" below. The rest of this section
+assumes a normal host that can build locally.
 
 Build exactly as documented in the main guide (from the repository root, not `extras/`):
 
@@ -236,6 +279,49 @@ unreachable on OpenShift.
 
 ---
 
+## Air-gapped install (pre-built release images, no local build)
+
+Alternative to steps 2–3 above (and to the build step in §6 below) for a locked-down host
+that can't build container images locally — no outbound network access for UBI/pip during
+the build, hardened build tooling disabled, etc. Every tagged release publishes ready-to-run
+images for both `cert-analyzer` and `cert-test-server` (the interactive test-console from §6)
+in two forms:
+
+- **Pushed to GHCR**: `ghcr.io/<owner>/cert-analyzer:<tag>-ubi9` /
+  `ghcr.io/<owner>/cert-test-server:<tag>-ubi9` (`-ubi8` variants also published). Usable
+  directly if the cluster/nodes have outbound HTTPS access to `ghcr.io` — e.g. via
+  `oc import-image` into an `ImageStream`, or by pointing `daemonset.yaml`/`test-server-pod.yaml`
+  straight at the GHCR reference instead of the internal registry path.
+- **Attached to the GitHub Release as `.tar.gz` files** (`docker save` format) — for a fully
+  air-gapped host with no registry egress at all. Download
+  `cert-analyzer-ubi9-<version>.tar.gz` and `cert-test-server-ubi9-<version>.tar.gz` (pick
+  `-ubi8` instead if the cluster's nodes are RHEL 8) from the repo's Releases page on any
+  machine that does have internet access, then copy them onto the locked-down VM (`scp`, USB,
+  whatever your environment allows).
+
+Both images are UBI-based (`registry.access.redhat.com/ubi9/python-311`) and run fine under
+OpenShift's `restricted-v2`/`hostaccess` SCCs exactly as described in §3 below — nothing about
+using a pre-built image changes the SCC/RBAC requirements.
+
+Once the tar files are on the VM and `oc login` has been run against the cluster:
+
+```bash
+bash extras/openshift/scripts/deploy-cert-analyzer-from-release.sh \
+  --image-tar /path/to/cert-analyzer-ubi9-<version>.tar.gz
+
+bash extras/openshift/scripts/deploy-test-server-from-release.sh \
+  --image-tar /path/to/cert-test-server-ubi9-<version>.tar.gz
+```
+
+Both scripts (also reachable via the [`openshift-utils.sh`](openshift/openshift-utils.sh) menu)
+do the same `podman load` → tag → push-to-internal-registry → apply/`oc set image` → rollout
+sequence as their build-from-source counterparts
+(`rebuild-redeploy-cert-analyzer.sh`/`deploy-test-server.sh`), just starting from `podman load`
+instead of `podman build`. `--kafka-host <ip>` works the same way as the other scripts (see §6
+below for why it's needed); omit it to auto-detect the host's default-route IP.
+
+---
+
 ## 4. Load Tetragon tracing policies
 
 Identical to the vanilla Kubernetes path — `TracingPolicy` is a cluster-scoped CRD:
@@ -331,7 +417,9 @@ bash extras/openshift/scripts/deploy-test-server.sh
 the internal registry (same reasoning as "Why a fresh tag, not just re-pushing `:latest`" below),
 applies/updates [`extras/openshift/test-server-pod.yaml`](openshift/test-server-pod.yaml), and
 port-forwards it for you — the script prints `http://localhost:8090` once it's confirmed the
-console is actually responding.
+console is actually responding. On a locked-down host that can't build the image locally, use
+`deploy-test-server-from-release.sh` instead — see "Air-gapped install from pre-built release
+images" above.
 
 If the Pod dies mid-demo (CRC is single-node, and this bare Pod has no priority class — it's a
 recurring preemption target for OpenShift's periodic operator-catalog refresh pods in
