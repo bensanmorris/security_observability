@@ -657,10 +657,9 @@ oc exec -n certsight <pod> -- curl -s http://localhost:8086/healthz
 oc exec -n certsight <pod> -- curl -s http://localhost:8086/readyz
 ```
 
-A 5-day test certificate should produce `tls_certificate_expiry_days` just under `5.0` and
-`tls_certificate_expiring_soon{threshold_days="7"} 1.0` — the exact condition
-`CertificateExpiringCritical`'s expression (`tls_certificate_expiry_days < 7 and
-tls_certificate_expiry_days > 0`) checks for. Where a live UWM Prometheus is available, confirm
+A 5-day test certificate should produce `tls_certificate_expiry_days` just under `5.0`,
+satisfying `CertificateExpiringCritical`'s expression (`tls_certificate_expiry_days < 7 and
+tls_certificate_expiry_days > 0`). Where a live UWM Prometheus is available, confirm
 the alert actually fires (`for: 5m`) via `Observe → Alerting` in the console rather than just
 checking the raw metric value.
 

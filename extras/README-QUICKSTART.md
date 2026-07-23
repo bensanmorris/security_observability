@@ -148,15 +148,15 @@ sudo podman logs cert-analyzer | tail -30 | grep -E "🔴|⚠️|✅"
 ```bash
 # Expired certificates
 echo "Expired certificates:"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expired.*1$' | head -3
+curl -s http://localhost:9090/metrics | grep '^tls_certificate_expiry_days' | awk '$NF < 0' | head -3
 
 # Certificates expiring within 7 days
 echo -e "\nCertificates expiring soon (< 7 days):"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expiring_soon.*"7".*1$' | head -3
+curl -s http://localhost:9090/metrics | grep '^tls_certificate_expiry_days' | awk '$NF > 0 && $NF < 7' | head -3
 
 # Certificates expiring within 30 days
 echo -e "\nCertificates expiring soon (< 30 days):"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expiring_soon.*"30".*1$' | head -3
+curl -s http://localhost:9090/metrics | grep '^tls_certificate_expiry_days' | awk '$NF > 0 && $NF < 30' | head -3
 ```
 
 ---

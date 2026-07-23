@@ -260,7 +260,7 @@ class PrometheusMetrics:
 
         # Certificate status
         #
-        # issuer/serial are included on all four so a dashboard can group by
+        # issuer/serial are included on both so a dashboard can group by
         # them to get a true distinct-certificate count (e.g. the same cert
         # served on several TLS-probed network endpoints, or present at
         # several file paths) instead of counting one row per observation.
@@ -276,22 +276,6 @@ class PrometheusMetrics:
         # series when checksum_enabled=false (the default), and grouping by a
         # label with the same value on every series is a no-op, so this is
         # free when the feature is off.
-        self.cert_expired = Gauge(
-            'tls_certificate_expired',
-            'Whether certificate is expired (1=expired, 0=valid)',
-            ['cert_path', 'cert_index', 'pod_name', 'namespace',
-             'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
-             'issuer', 'serial', 'checksum']
-        )
-
-        self.cert_expiring_soon = Gauge(
-            'tls_certificate_expiring_soon',
-            'Whether certificate expires within threshold (1=yes, 0=no)',
-            ['cert_path', 'threshold_days', 'cert_index', 'pod_name',
-             'namespace', 'workload_kind', 'workload_name', 'node_name',
-             'app_label', 'container_name', 'issuer', 'serial', 'checksum']
-        )
-
         self.cert_fips_compliant = Gauge(
             'tls_certificate_fips_compliant',
             'Whether certificate uses FIPS-approved algorithms (1=compliant, 0=non-compliant)',
@@ -549,38 +533,6 @@ class PrometheusMetrics:
         self.cert_valid_from.labels(**labels).set(info.not_before.replace(tzinfo=timezone.utc).timestamp())
         self.cert_last_accessed.labels(**labels).set(now.timestamp())
 
-        self.cert_expired.labels(
-            cert_path=info.path,
-            cert_index=str(info.cert_index),
-            pod_name=info.pod_name,
-            namespace=info.namespace,
-            workload_kind=info.workload_kind,
-            workload_name=info.workload_name,
-            node_name=info.node_name,
-            app_label=info.app_label,
-            container_name=info.container_name,
-            issuer=info.issuer[:100],
-            serial=info.serial_number,
-            checksum=info.checksum,
-        ).set(1 if info.is_expired else 0)
-
-        for threshold in [7, 30, 90]:
-            self.cert_expiring_soon.labels(
-                cert_path=info.path,
-                threshold_days=str(threshold),
-                cert_index=str(info.cert_index),
-                pod_name=info.pod_name,
-                namespace=info.namespace,
-                workload_kind=info.workload_kind,
-                workload_name=info.workload_name,
-                node_name=info.node_name,
-                app_label=info.app_label,
-                container_name=info.container_name,
-                issuer=info.issuer[:100],
-                serial=info.serial_number,
-                checksum=info.checksum,
-            ).set(1 if 0 < days_left < threshold else 0)
-
         if info.key_algorithm:
             self.cert_fips_compliant.labels(
                 cert_path=info.path,
@@ -633,7 +585,7 @@ class PrometheusMetrics:
         Called from LRUCache's on_evict callback when a cert falls out of
         known_certs, so Prometheus's own memory tracks cache occupancy instead
         of growing for the entire life of the process — update_certificate_metrics
-        creates ~10 new label-sets per newly-discovered cert and nothing
+        creates ~7 new label-sets per newly-discovered cert and nothing
         previously removed them on eviction, so every certificate ever seen
         stayed resident in the registry forever.
 
@@ -670,21 +622,6 @@ class PrometheusMetrics:
                 process, parent_process, info.node_name,
                 pod_name, namespace, app_label, container_name,
                 info.checksum,
-            ))
-
-        self._safe_remove(self.cert_expired, (
-            info.path, str(info.cert_index), info.pod_name, info.namespace,
-            info.workload_kind, info.workload_name, info.node_name,
-            info.app_label, info.container_name,
-            info.issuer[:100], info.serial_number, info.checksum,
-        ))
-
-        for threshold in (7, 30, 90):
-            self._safe_remove(self.cert_expiring_soon, (
-                info.path, str(threshold), str(info.cert_index), info.pod_name,
-                info.namespace, info.workload_kind, info.workload_name,
-                info.node_name, info.app_label, info.container_name,
-                info.issuer[:100], info.serial_number, info.checksum,
             ))
 
         if info.key_algorithm:

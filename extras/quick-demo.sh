@@ -63,11 +63,11 @@ echo ""
 echo "📈 Prometheus Metrics:"
 echo ""
 echo "Expired certificates:"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expired{.*}.*1$' | \
+curl -s http://localhost:9090/metrics | grep '^tls_certificate_expiry_days{' | awk '$NF < 0' | \
     grep "pki/tls/certs" | head -3 | sed 's/^/  /'
 echo ""
 echo "Expiring soon (< 7 days):"
-curl -s http://localhost:9090/metrics | grep 'tls_certificate_expiring_soon{.*threshold_days="7"}.*1$' | \
+curl -s http://localhost:9090/metrics | grep '^tls_certificate_expiry_days{' | awk '$NF > 0 && $NF < 7' | \
     grep "pki/tls/certs" | head -3 | sed 's/^/  /'
 echo ""
 

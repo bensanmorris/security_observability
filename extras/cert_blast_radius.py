@@ -24,8 +24,8 @@ import urllib.parse
 import urllib.request
 
 CATEGORICAL_SLOTS = 8
-# Matches the thresholds cert-analyzer's own tls_certificate_expiring_soon
-# metric buckets on (see extras/examples/grafana-dashboard.json).
+# Matches the thresholds the CertificateExpiringCritical/Warning alerting
+# rules use against tls_certificate_expiry_days (see extras/openshift/prometheus-rule.yaml).
 EXPIRY_THRESHOLDS = (0, 7, 30)  # expired / <7d critical / <30d warning / else good
 
 # Palette values (dataviz skill reference/palette.md), wired as CSS custom
