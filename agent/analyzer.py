@@ -1036,7 +1036,7 @@ class CertificateAnalyzer:
         node_name: str,
     ) -> None:
         """Apply pod/event context, update metrics, log, cache, and publish for a freshly-parsed file."""
-        # update_certificate_metrics() writes ~10 Prometheus series per cert.
+        # update_certificate_metrics() writes ~7 Prometheus series per cert.
         # A bundle file (e.g. a system CA trust store) can hold hundreds of
         # certs, so tracking every one individually turns a single file event
         # into thousands of new series in one burst — this is what drove

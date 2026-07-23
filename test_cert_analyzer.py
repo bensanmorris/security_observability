@@ -2915,7 +2915,7 @@ class TestMetricsCleanupOnEviction:
     def test_per_cert_series_removed_on_lru_eviction(self, analyzer, temp_dir):
         """
         Evicting a cert from known_certs must remove its cert_expiry_days,
-        cert_expired, cert_process_info, and cert_self_signed series --
+        cert_expiry_timestamp, cert_process_info, and cert_self_signed series --
         otherwise Prometheus keeps every cert ever discovered in memory
         forever, independent of whether the LRU cache actually evicted it.
         """
@@ -2931,7 +2931,7 @@ class TestMetricsCleanupOnEviction:
 
         gauges = (
             analyzer.metrics.cert_expiry_days,
-            analyzer.metrics.cert_expired,
+            analyzer.metrics.cert_expiry_timestamp,
             analyzer.metrics.cert_process_info,
             analyzer.metrics.cert_self_signed,
         )

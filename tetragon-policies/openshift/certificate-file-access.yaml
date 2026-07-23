@@ -1,0 +1,45 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: certificate-file-access
+spec:
+  kprobes:
+  - call: "fd_install"
+    syscall: false
+    return: false
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "file"
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: "Postfix"
+        values:
+        - ".crt"
+        - ".pem"
+        - ".cert"
+        - ".cer"
+        - ".jks"
+        - ".keystore"
+        - ".truststore"
+        - ".p12"
+        - ".pfx"
+      # OpenShift/Kubernetes-specific exclusion: kubelet bind-mounts the same
+      # handful of underlying CA bundles/service-account certs into every
+      # pod's projected volume under /var/lib/kubelet/pods/. Without this,
+      # fd_install fires once per pod per mount for what's usually the same
+      # underlying cert content, so known_certs cardinality grows roughly
+      # linearly with pod count rather than with distinct certs on the node
+      # -- on a real cluster this dwarfs every other source of tracked certs
+      # combined. Filtering here means the event never leaves the kernel for
+      # these paths at all. Not needed in the bare-metal RPM policy
+      # (tetragon-policies/certificate-file-access.yaml) since that path
+      # doesn't exist there.
+      - index: 1
+        operator: "NotPrefix"
+        values:
+        - "/var/lib/kubelet/pods/"
+      matchActions:
+      - action: Post

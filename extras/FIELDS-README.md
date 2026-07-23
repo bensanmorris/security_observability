@@ -58,10 +58,17 @@ observed loading them (see below).
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `tls_certificate_expired` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `issuer`, `serial`, `checksum` | `1` if expired, `0` if valid. `checksum` is empty unless `checksum_enabled=true` |
-| `tls_certificate_expiring_soon` | Gauge | above + `threshold_days` | `1` if expiring within threshold, `0` otherwise. Emitted for thresholds `7`, `30`, and `90` days |
 | `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
 | `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `is_ca`, `issuer`, `serial`, `checksum` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
+
+There is no separate "expired" or "expiring soon" gauge — both are derivable from
+`tls_certificate_expiry_days` (see above) with a plain comparison, exactly how
+`CertificateExpiringCritical`/`CertificateExpiringWarning`/`CertificateExpired` in
+`extras/openshift/prometheus-rule.yaml` already alert (`tls_certificate_expiry_days < 0`
+for expired, `< 7 and > 0` / `< 30 and > 7` for the two warning tiers). Pre-computing
+these as their own boolean gauges used to cost 4 extra Prometheus series per certificate
+(one "expired" plus three "expiring_soon" threshold buckets) for values a query can derive
+for free.
 
 ### Certificate-to-process map
 

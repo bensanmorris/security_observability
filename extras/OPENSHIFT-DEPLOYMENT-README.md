@@ -325,15 +325,27 @@ below for why it's needed); omit it to auto-detect the host's default-route IP.
 Identical to the vanilla Kubernetes path — `TracingPolicy` is a cluster-scoped CRD:
 
 ```bash
-kubectl apply -f tetragon-policies/certificate-file-access.yaml
+kubectl apply -f tetragon-policies/openshift/certificate-file-access.yaml
 kubectl apply -f tetragon-policies/tcp-connect-tls.yaml
 kubectl apply -f tetragon-policies/experimental/tls-service-tracking.yaml
 kubectl apply -f tetragon-policies/experimental/openshift/openssl3-cert-load.yaml
 kubectl get tracingpolicies
 ```
 
-Note the last policy is the OpenShift-specific variant, not
+Note the first and last policies are OpenShift-specific variants, not
+`tetragon-policies/certificate-file-access.yaml` or
 `tetragon-policies/experimental/openssl3-cert-load.yaml` — see below for why.
+
+**`certificate-file-access` variant**: adds a kernel-side `NotPrefix` exclusion for
+`/var/lib/kubelet/pods/` on top of the bare-metal policy's extension filter. Kubelet
+bind-mounts the same handful of underlying CA bundles/service-account certs into every
+pod's projected volume, so without this exclusion the fd_install hook fires once per pod
+per mount for what's usually the same underlying cert — on a real cluster this is the
+dominant source of tracked-certificate cardinality (and the periodic Prometheus-scrape
+CPU cost that comes from serializing all of them), not distinct certs actually present on
+the node. Filtering at the kernel boundary means these events never reach cert-analyzer
+at all. Not applicable to the bare-metal RPM policy, since `/var/lib/kubelet/pods/`
+doesn't exist on a non-Kubernetes host.
 
 **Known gap on containerized nodes — two distinct failure classes.** The `java-fips-nss-cert` and
 `java-non-fips-cert` experimental uprobe policies still fail to load on the OpenShift/CRC
@@ -645,10 +657,9 @@ oc exec -n certsight <pod> -- curl -s http://localhost:8086/healthz
 oc exec -n certsight <pod> -- curl -s http://localhost:8086/readyz
 ```
 
-A 5-day test certificate should produce `tls_certificate_expiry_days` just under `5.0` and
-`tls_certificate_expiring_soon{threshold_days="7"} 1.0` — the exact condition
-`CertificateExpiringCritical`'s expression (`tls_certificate_expiry_days < 7 and
-tls_certificate_expiry_days > 0`) checks for. Where a live UWM Prometheus is available, confirm
+A 5-day test certificate should produce `tls_certificate_expiry_days` just under `5.0`,
+satisfying `CertificateExpiringCritical`'s expression (`tls_certificate_expiry_days < 7 and
+tls_certificate_expiry_days > 0`). Where a live UWM Prometheus is available, confirm
 the alert actually fires (`for: 5m`) via `Observe → Alerting` in the console rather than just
 checking the raw metric value.
 
