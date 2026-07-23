@@ -79,22 +79,20 @@ oc adm policy add-scc-to-user privileged -z tetragon -n kube-system
 image registry) is reachable, `helm repo add`/`helm install` above won't work — the repo add
 needs to fetch an index over HTTPS, and the install still needs to pull
 `quay.io/cilium/tetragon` (plus the operator and stdout-export sidecar images, both enabled by
-default) onto the cluster's nodes. Instead, on any machine with internet access:
+default) onto the cluster's nodes. Instead, on any machine with internet access, run
+[`extras/openshift/scripts/fetch-tetragon-images.sh`](openshift/scripts/fetch-tetragon-images.sh):
 
 ```bash
-helm repo add cilium https://helm.cilium.io
-helm pull cilium/tetragon --version 1.7.0                       # -> tetragon-1.7.0.tgz
-docker pull quay.io/cilium/tetragon:v1.7.0
-docker save quay.io/cilium/tetragon:v1.7.0 | gzip > tetragon-agent.tar.gz
-docker pull quay.io/cilium/tetragon-operator:v1.7.0
-docker save quay.io/cilium/tetragon-operator:v1.7.0 | gzip > tetragon-operator.tar.gz
-docker pull quay.io/cilium/hubble-export-stdout:v1.1.1
-docker save quay.io/cilium/hubble-export-stdout:v1.1.1 | gzip > hubble-export-stdout.tar.gz
+bash extras/openshift/scripts/fetch-tetragon-images.sh --output-dir ./tetragon-release --version 1.7.0
 ```
 
-(check `helm show values cilium/tetragon --version 1.7.0` for the exact image/tag pairs if
-using a different chart version — they can change between releases). Copy all four files onto
-the VM, `oc login`, then:
+It `helm pull`s the chart, then `helm template`s it to discover exactly which images the
+current values actually reference (so a chart version that adds/removes an image, or values
+you override via `--extra-set`, don't leave the list stale), and pulls + saves each one as a
+`.tar.gz` next to the chart — no manual `docker pull`/`docker save`/tag bookkeeping. It ends by
+printing the exact `deploy-tetragon-from-release.sh` command to run with the files it just
+produced. Copy the whole output directory onto the VM, `oc login`, then run that command — or
+build it yourself:
 
 ```bash
 bash extras/openshift/scripts/deploy-tetragon-from-release.sh \
