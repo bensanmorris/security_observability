@@ -71,9 +71,15 @@ this deployment doesn't publish to Kafka.
 To use a locally built image rather than the published GHCR release:
 
 ```bash
---set image.repository=image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer \
+--set image.registry=image-registry.openshift-image-registry.svc:5000 \
+--set image.repository=certsight/cert-analyzer \
 --set image.tag=latest
 ```
+
+`demo.testServer.image` and `demo.prometheus.image` follow the same `registry`/`repository`/
+`tag` shape. If every image you use is mirrored under the same registry host, set
+`global.imageRegistry` once instead of `image.registry` (and the demo ones, if enabled)
+separately -- see "Air-gapped install" below.
 
 See `values.yaml` for every other setting (alert threshold, log level, scan paths, resource
 limits, which TracingPolicies/monitoring resources to install, etc).
@@ -83,11 +89,11 @@ limits, which TracingPolicies/monitoring resources to install, etc).
 `helm install` itself has no air-gap concerns -- this chart has no `dependencies:` block, so
 there's no `helm dependency update`/chart-repo fetch involved, just a local directory once
 you've copied the repo in. The only internet-dependent part is images: every default
-`*.repository`/`*.image` value in `values.yaml` points at GHCR or quay.io, which won't be
-reachable. Mirror first, then install -- `helm install` only creates objects that *reference*
-an image by name; the kubelet does the actual pull later when it schedules the pod, so
-installing before the image is reachable just leaves pods stuck in `ImagePullBackOff` rather
-than failing the install outright.
+`image`/`demo.testServer.image`/`demo.prometheus.image` in `values.yaml` points at GHCR or
+quay.io, which won't be reachable. Mirror first, then install -- `helm install` only creates
+objects that *reference* an image by name; the kubelet does the actual pull later when it
+schedules the pod, so installing before the image is reachable just leaves pods stuck in
+`ImagePullBackOff` rather than failing the install outright.
 
 1. **Tetragon first, and it must finish before this chart's `TracingPolicy` objects can be
    created** -- they need the `cilium.io/v1alpha1` CRD already registered, or the API server
@@ -104,21 +110,43 @@ than failing the install outright.
 
    ```bash
    helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
-     --set image.repository=image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer \
+     --set image.registry=image-registry.openshift-image-registry.svc:5000 \
+     --set image.repository=certsight/cert-analyzer \
      --set image.tag=dev-<timestamp> \
      --set kafka.bootstrapServers=<kafka-host-ip>:9092
    ```
 
 3. **Same for `cert-test-server`** if using `demo.testServer.enabled=true` --
    `deploy-test-server-from-release.sh` mirrors it the same way; point
-   `demo.testServer.image.repository`/`demo.testServer.image.tag` at the result.
+   `demo.testServer.image.registry`/`.repository`/`.tag` at the result.
 
 4. **Same for `demo.prometheus.enabled=true`.** On a connected machine, pull and save a
    *pinned* version (not `:latest` -- see why in the script's `--help`):
    `docker pull quay.io/prometheus/prometheus:v2.54.1 && docker save quay.io/prometheus/prometheus:v2.54.1 | gzip > prometheus-v2.54.1.tar.gz`.
    Copy the tar over, then `extras/openshift/scripts/mirror-prometheus-image.sh --image-tar
-   prometheus-v2.54.1.tar.gz` mirrors it and prints the exact `--set demo.prometheus.image=...`
-   to use.
+   prometheus-v2.54.1.tar.gz` mirrors it and prints the exact `--set` flags to use.
+
+**If all three end up mirrored under the same registry host** (the common case -- the scripts
+above all push to `<internal-registry>/<namespace>/<image-name>`), set `global.imageRegistry`
+once instead of three separate `*.registry` overrides. It replaces the registry host on
+*every* image the chart renders, so only use it when that's true for all of them -- if even
+one (e.g. a `demo.prometheus` you deliberately left pointed at the real `quay.io`) should stay
+on a different host, override that image's own `.registry` instead:
+
+```bash
+helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
+  --set global.imageRegistry=image-registry.openshift-image-registry.svc:5000 \
+  --set image.repository=certsight/cert-analyzer \
+  --set image.tag=dev-<timestamp> \
+  --set demo.testServer.enabled=true \
+  --set demo.testServer.image.repository=certsight/cert-test-server \
+  --set demo.testServer.image.tag=dev-<timestamp> \
+  --set demo.testServer.kafka.host=<kafka-host-ip> \
+  --set demo.prometheus.enabled=true \
+  --set demo.prometheus.image.repository=certsight/prometheus \
+  --set demo.prometheus.image.tag=v2.54.1 \
+  --set kafka.bootstrapServers=<kafka-host-ip>:9092
+```
 
 ## External metrics access
 

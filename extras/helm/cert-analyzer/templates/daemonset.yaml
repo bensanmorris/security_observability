@@ -23,7 +23,7 @@ spec:
       {{- end }}
       containers:
       - name: analyzer
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: "{{ include "cert-analyzer.image" (dict "registry" .Values.image.registry "repository" .Values.image.repository "tag" .Values.image.tag "global" .Values.global.imageRegistry) }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         env:
         - name: TETRAGON_ADDR

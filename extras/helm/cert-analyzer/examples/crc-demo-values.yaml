@@ -11,12 +11,22 @@
 #   oc get daemonset cert-expiry-monitor -n certsight -o jsonpath='{.spec.template.spec.containers[0].image}'
 #   oc get pod cert-test-server -n certsight -o jsonpath='{.spec.containers[0].image}'
 #
+# cert-analyzer and cert-test-server are both locally built and pushed to this cluster's
+# internal registry. demo-prometheus is NOT mirrored -- this cluster has real internet
+# access, so it genuinely runs the upstream quay.io image (chart default, no override
+# needed) rather than an air-gapped copy. Deliberately NOT using global.imageRegistry here,
+# even though the first two share a registry host -- that value applies to every image in
+# the chart including demo-prometheus, which would incorrectly redirect it too. See the
+# README's Air-gapped install section for a global.imageRegistry example where all three
+# images genuinely share one mirror host.
+#
 # Usage:
 #   helm install cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
 #   helm upgrade cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
 
 image:
-  repository: image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer
+  registry: image-registry.openshift-image-registry.svc:5000
+  repository: certsight/cert-analyzer
   tag: dev-1784827058
 
 kafka:
@@ -33,7 +43,8 @@ demo:
   testServer:
     enabled: true
     image:
-      repository: image-registry.openshift-image-registry.svc:5000/certsight/cert-test-server
+      registry: image-registry.openshift-image-registry.svc:5000
+      repository: certsight/cert-test-server
       tag: dev-1784286324
     kafka:
       host: "192.168.122.144"

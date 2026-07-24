@@ -5,11 +5,20 @@
 # Deliberately no Namespace object in templates/ -- Helm's --create-namespace flag handles
 # creation, and templating a Namespace risks it being deleted on `helm uninstall`.
 
+global:
+  # Replaces the registry host on every image below (image.registry,
+  # demo.testServer.image.registry, demo.prometheus.image.registry) when set -- lets an
+  # air-gapped install where everything is mirrored under one internal registry set this
+  # once instead of three times. Leave empty to use each image's own default registry.
+  imageRegistry: ""
+
 image:
-  # Default points at this project's published GHCR release image (UBI9). Point at the
-  # in-cluster registry instead for a locally built image, e.g.
-  # image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer
-  repository: ghcr.io/bensanmorris/cert-analyzer
+  # Defaults point at this project's published GHCR release image (UBI9). Point at the
+  # in-cluster registry instead for a locally built image, e.g. registry:
+  # image-registry.openshift-image-registry.svc:5000, repository: certsight/cert-analyzer --
+  # or set global.imageRegistry once instead if every image below shares the same host.
+  registry: ghcr.io
+  repository: bensanmorris/cert-analyzer
   tag: v0.86-ubi9
   pullPolicy: IfNotPresent
 
@@ -153,7 +162,8 @@ demo:
   testServer:
     enabled: false
     image:
-      repository: ghcr.io/bensanmorris/cert-test-server
+      registry: ghcr.io
+      repository: bensanmorris/cert-test-server
       tag: v0.86-ubi9
       pullPolicy: IfNotPresent
     kafka:
@@ -178,7 +188,10 @@ demo:
 
   prometheus:
     enabled: false
-    image: quay.io/prometheus/prometheus:latest
+    image:
+      registry: quay.io
+      repository: prometheus/prometheus
+      tag: latest
     resources:
       limits:
         memory: 256Mi

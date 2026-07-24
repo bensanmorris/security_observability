@@ -57,7 +57,7 @@ spec:
     # avoids an extra pull; needs root and default capabilities so chmod on a directory it
     # doesn't own actually works, plus spc_t so SELinux doesn't block the chmod regardless
     # of UID/capabilities.
-    image: "{{ .Values.demo.testServer.image.repository }}:{{ .Values.demo.testServer.image.tag }}"
+    image: "{{ include "cert-analyzer.image" (dict "registry" .Values.demo.testServer.image.registry "repository" .Values.demo.testServer.image.repository "tag" .Values.demo.testServer.image.tag "global" .Values.global.imageRegistry) }}"
     imagePullPolicy: {{ .Values.demo.testServer.image.pullPolicy }}
     command: ["chmod", "0777", "/var/certsight-test-server"]
     volumeMounts:
@@ -69,7 +69,7 @@ spec:
         type: spc_t
   containers:
   - name: test-server
-    image: "{{ .Values.demo.testServer.image.repository }}:{{ .Values.demo.testServer.image.tag }}"
+    image: "{{ include "cert-analyzer.image" (dict "registry" .Values.demo.testServer.image.registry "repository" .Values.demo.testServer.image.repository "tag" .Values.demo.testServer.image.tag "global" .Values.global.imageRegistry) }}"
     imagePullPolicy: {{ .Values.demo.testServer.image.pullPolicy }}
     env:
     - name: TEST_SERVER_KAFKA_HOST
