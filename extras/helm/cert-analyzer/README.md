@@ -113,11 +113,12 @@ than failing the install outright.
    `deploy-test-server-from-release.sh` mirrors it the same way; point
    `demo.testServer.image.repository`/`demo.testServer.image.tag` at the result.
 
-4. **`demo.prometheus.enabled=true` has no equivalent mirror script yet** -- unlike the two
-   above, nothing in this repo produces a `docker save` tar for
-   `quay.io/prometheus/prometheus`. Leave it disabled in an air-gapped install until one
-   exists, or mirror it manually (`docker pull`/`save` on a connected machine, `scp`, `podman
-   load`+tag+push, same pattern as the scripts above) and point `demo.prometheus.image` at it.
+4. **Same for `demo.prometheus.enabled=true`.** On a connected machine, pull and save a
+   *pinned* version (not `:latest` -- see why in the script's `--help`):
+   `docker pull quay.io/prometheus/prometheus:v2.54.1 && docker save quay.io/prometheus/prometheus:v2.54.1 | gzip > prometheus-v2.54.1.tar.gz`.
+   Copy the tar over, then `extras/openshift/scripts/mirror-prometheus-image.sh --image-tar
+   prometheus-v2.54.1.tar.gz` mirrors it and prints the exact `--set demo.prometheus.image=...`
+   to use.
 
 ## External metrics access
 
