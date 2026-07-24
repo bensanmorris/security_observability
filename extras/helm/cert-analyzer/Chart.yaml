@@ -2,7 +2,7 @@ apiVersion: v2
 name: cert-analyzer
 description: Tetragon-driven certificate expiry and discovery monitor for OpenShift
 type: application
-version: 0.1.0
+version: 0.3.0
 appVersion: "0.86"
 keywords:
   - tls

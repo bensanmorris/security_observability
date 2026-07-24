@@ -9,16 +9,39 @@ is) -- this chart is a Helm-native re-expression of the same manifests, not a ne
 
 ## Out of scope
 
-This chart deploys the cert-analyzer product only. It does **not** install:
+This chart deploys the cert-analyzer product plus optional demo/test tooling. It does **not**
+install:
 
 - **Tetragon itself.** Install it first via its own upstream chart:
   `helm repo add cilium https://helm.cilium.io && helm install tetragon cilium/tetragon -n kube-system`
   (or `extras/openshift/scripts/deploy-tetragon-from-release.sh` for an air-gapped host).
-- **Demo/test tooling** (`extras/openshift/test-server-pod.yaml`, `demo-prometheus.yaml`) --
-  those are for driving/demoing the product, not part of it. Apply them separately if needed.
 - **OpenShift User Workload Monitoring enablement** -- a cluster-wide setting
   (`cluster-monitoring-config` ConfigMap), out of this chart's blast radius. Turn it on before
   `monitoring.serviceMonitor.enabled=true` will have anything to scrape it.
+
+## Demo/test tooling
+
+`demo.testServer.enabled` (default `false`) adds the interactive test-console Pod
+(`extras/test-server/`) so you can trigger use cases (write a cert, bind/connect over TLS,
+load a JKS/PKCS12 keystore) in-cluster and visually confirm cert-expiry-monitor picks them up
+-- the fastest way to validate a fresh install actually works end-to-end, not just that the
+pods are Running. `demo.prometheus.enabled` (default `false`) adds a throwaway Prometheus the
+test-console's blast-radius/chain-explorer panels query; everything else in the test-console
+works without it.
+
+```bash
+helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
+  --set kafka.bootstrapServers=<kafka-host-ip>:9092 \
+  --set demo.testServer.enabled=true \
+  --set demo.testServer.kafka.host=<kafka-host-ip> \
+  --set demo.prometheus.enabled=true
+
+oc port-forward -n certsight pod/cert-test-server 8090:8090
+# open http://localhost:8090
+```
+
+Both are demo/test tooling, not part of the deployed product -- leave them off for anything
+resembling a real pilot install.
 
 ## Install
 
@@ -41,6 +64,15 @@ To use a locally built image rather than the published GHCR release:
 
 See `values.yaml` for every other setting (alert threshold, log level, scan paths, resource
 limits, which TracingPolicies/monitoring resources to install, etc).
+
+## External metrics access
+
+`route.enabled` (default `true`) creates an OpenShift Route exposing `/metrics` outside the
+cluster -- not for OpenShift's own monitoring (that's `monitoring.serviceMonitor`, a separate
+in-cluster path via UWM), but for anything external that scrapes it directly, e.g. a
+host-level Prometheus feeding a Grafana instance that isn't part of this chart. The host is
+left unset so OpenShift assigns its standard `<name>-<namespace>.<router subdomain>` default
+rather than hardcoding one cluster's subdomain; set `route.host` to override.
 
 ## Upgrade
 

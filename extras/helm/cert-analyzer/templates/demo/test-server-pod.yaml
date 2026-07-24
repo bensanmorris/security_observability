@@ -1,0 +1,120 @@
+{{- if .Values.demo.testServer.enabled }}
+# Interactive test-console Pod for demos: runs extras/test-server/ in-cluster so use cases
+# (file writes, TLS binds/connects, PKCS12/JKS loads) happen inside the cluster and get
+# picked up by the same Tetragon + cert-expiry-monitor already watching the node. See
+# extras/test-server/TEST-SERVER-README.md for what it does; this is a visual/manual way to
+# confirm the DaemonSet above is actually seeing and processing events.
+#
+# Drive it:
+#   oc port-forward -n {{ .Release.Namespace }} pod/cert-test-server 8090:8090
+#   # then open http://localhost:8090
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-test-server
+  namespace: {{ .Release.Namespace }}
+---
+# hostmount-anyuid (the narrower SCC that just permits a hostPath volume) is NOT enough:
+# kubelet's DirectoryOrCreate labels a fresh hostPath dir with the confined container_t
+# SELinux type, and a normal container gets an AVC write denial against it regardless of
+# DAC permissions. The fix is the spc_t (super-privileged container) SELinux type below,
+# which requires the privileged SCC (seLinuxContext: RunAsAny) to request. This Pod is
+# purely a demo/test tool, not part of the deployed product, so the wider grant here
+# doesn't affect cert-analyzer's own security posture.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-test-server-privileged-scc
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: cert-test-server
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cert-test-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: cert-test-server
+spec:
+  serviceAccountName: cert-test-server
+  # A bare Pod with no controller to recreate it -- matches cert-expiry-monitor's
+  # priorityClassName to avoid the same scheduler-preemption risk on a memory-constrained
+  # single-node cluster.
+  {{- with .Values.priorityClassName }}
+  priorityClassName: {{ . }}
+  {{- end }}
+  initContainers:
+  - name: fix-cert-dir-perms
+    # kubelet's DirectoryOrCreate creates the hostPath below as root:root 0755 the first
+    # time -- unwritable by the main container's non-root image UID. Reusing the same image
+    # avoids an extra pull; needs root and default capabilities so chmod on a directory it
+    # doesn't own actually works, plus spc_t so SELinux doesn't block the chmod regardless
+    # of UID/capabilities.
+    image: "{{ .Values.demo.testServer.image.repository }}:{{ .Values.demo.testServer.image.tag }}"
+    imagePullPolicy: {{ .Values.demo.testServer.image.pullPolicy }}
+    command: ["chmod", "0777", "/var/certsight-test-server"]
+    volumeMounts:
+    - name: generated-certs
+      mountPath: /var/certsight-test-server
+    securityContext:
+      runAsUser: 0
+      seLinuxOptions:
+        type: spc_t
+  containers:
+  - name: test-server
+    image: "{{ .Values.demo.testServer.image.repository }}:{{ .Values.demo.testServer.image.tag }}"
+    imagePullPolicy: {{ .Values.demo.testServer.image.pullPolicy }}
+    env:
+    - name: TEST_SERVER_KAFKA_HOST
+      value: {{ required "demo.testServer.kafka.host is required when demo.testServer.enabled=true -- a node-reachable Kafka host IP" .Values.demo.testServer.kafka.host | quote }}
+    - name: TEST_SERVER_KAFKA_PORT
+      value: {{ .Values.demo.testServer.kafka.port | quote }}
+    - name: TEST_SERVER_PROMETHEUS_URL
+      # server.py defaults to http://127.0.0.1:9090, correct only in the standalone
+      # deployment where a real Prometheus and cert-analyzer share a host. In-cluster,
+      # cert-analyzer's own :9090 only exposes raw /metrics for scraping, not a query API --
+      # this needs a real Prometheus query endpoint for blast_radius.py/chain_explorer.py,
+      # e.g. demo.prometheus below.
+      value: {{ .Values.demo.testServer.prometheusUrl | default (printf "http://demo-prometheus.%s.svc:9090" .Release.Namespace) | quote }}
+    - name: TEST_SERVER_CERT_DIR
+      # Overrides use_cases.py's /dev/shm default -- /dev/shm is a private per-container
+      # tmpfs here, invisible to cert-analyzer's /host bind mount no matter what's written
+      # there; this path is hostPath-backed (volumes below) so it's the same file on both
+      # sides of that mount.
+      value: "/var/certsight-test-server"
+    resources:
+      {{- toYaml .Values.demo.testServer.resources | nindent 6 }}
+    ports:
+    - containerPort: 8090
+      name: http
+      protocol: TCP
+    volumeMounts:
+    - name: generated-certs
+      mountPath: /var/certsight-test-server
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      # spc_t so writes into the hostPath mount above aren't AVC-denied.
+      seLinuxOptions:
+        type: spc_t
+  volumes:
+  - name: generated-certs
+    # Mounted at the *same* path in both places deliberately: cert-analyzer resolves
+    # Tetragon-reported paths as HOST_PREFIX + path, so a cert this container writes to
+    # /var/certsight-test-server/x.crt only resolves to a real file at cert-analyzer's
+    # /host/var/certsight-test-server/x.crt if that's genuinely where it landed on the
+    # node -- i.e. hostPath and mountPath must match.
+    hostPath:
+      path: /var/certsight-test-server
+      type: DirectoryOrCreate
+  restartPolicy: Never
+{{- end }}

@@ -54,6 +54,12 @@ hostPrefix: /host
 alertThresholdDays: 30
 logLevel: DEBUG
 
+# agent/config.py defaults this to true. Set to false to match a cluster where it's been
+# deliberately disabled -- check the live DaemonSet's env before assuming the default here
+# matches what's actually running (`oc get daemonset cert-expiry-monitor -n certsight -o
+# jsonpath='{.spec.template.spec.containers[0].env}'`).
+fipsComplianceEnabled: true
+
 certScan:
   # Comma-separated host paths for the periodic filesystem scanner. Empty disables that
   # thread entirely so cert discovery is purely event-driven (Tetragon kprobes/uprobes).
@@ -101,6 +107,16 @@ tlsOutboundPorts:
 service:
   type: ClusterIP
 
+route:
+  # Exposes the metrics Service externally via an OpenShift Route (host defaults to the
+  # standard <name>-<namespace>.<router subdomain> pattern -- left unset here so it works on
+  # any cluster rather than hardcoding this one's apps-crc.testing subdomain). Needed if
+  # anything outside the cluster scrapes /metrics directly, e.g. a host-level Prometheus
+  # feeding a Grafana instance that isn't part of this chart.
+  enabled: true
+  # Empty lets OpenShift assign its standard default host.
+  host: ""
+
 monitoring:
   serviceMonitor:
     # Requires the Prometheus Operator CRDs -- OpenShift's User Workload Monitoring
@@ -130,3 +146,43 @@ rbac:
   # above.
   podReader:
     enabled: true
+
+# Demo/test tooling -- not part of the deployed product, but a good way to visually confirm
+# the DaemonSet above is actually seeing and processing events end-to-end. Off by default.
+demo:
+  testServer:
+    enabled: false
+    image:
+      repository: ghcr.io/bensanmorris/cert-test-server
+      tag: v0.86-ubi9
+      pullPolicy: IfNotPresent
+    kafka:
+      # Required when demo.testServer.enabled is true -- a node-reachable Kafka host IP (the
+      # test-server publishes its own use-case events independently of cert-analyzer's own
+      # kafka.bootstrapServers above).
+      host: ""
+      port: "9092"
+    # Needs demo.prometheus.enabled=true (or another real Prometheus reachable at this URL)
+    # for the test-console's blast-radius/chain-explorer panels specifically -- everything
+    # else in the test-console works without it. Empty defaults to the in-chart
+    # demo-prometheus Service in this release's own namespace (see templates/demo/
+    # test-server-pod.yaml); override only if pointing at a Prometheus outside this chart.
+    prometheusUrl: ""
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: 500m
+      requests:
+        memory: 64Mi
+        cpu: 100m
+
+  prometheus:
+    enabled: false
+    image: quay.io/prometheus/prometheus:latest
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: 200m
+      requests:
+        memory: 64Mi
+        cpu: 50m
