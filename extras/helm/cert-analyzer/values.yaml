@@ -68,8 +68,12 @@ tetragon:
 # host-root hostPath mount below.
 hostPrefix: /host
 
+# DEBUG is chatty on a busy node and, before agent/analyzer.py's per-event detection logs
+# were demoted to DEBUG, was actively costing measurable CPU on repeat access to already-
+# known certs (e.g. a control-plane component re-opening its own service-account CA). INFO
+# is the sane default; set DEBUG only when actively troubleshooting.
 alertThresholdDays: 30
-logLevel: DEBUG
+logLevel: INFO
 
 # agent/config.py defaults this to true. Set to false to match a cluster where it's been
 # deliberately disabled -- check the live DaemonSet's env before assuming the default here

@@ -2285,7 +2285,7 @@ class CertificateAnalyzer:
                 logger.debug("Skipping self-generated event from PID %s", pid)
                 return
 
-        logger.info(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
+        logger.debug(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
 
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
@@ -2301,7 +2301,7 @@ class CertificateAnalyzer:
         with self._known_paths_lock:
             matching_keys = list(self._known_paths.get(cert_path, ()))
         if matching_keys:
-            logger.info(f"Re-detected known certificate file: {cert_path}")
+            logger.debug(f"Re-detected known certificate file: {cert_path}")
             # A bundle file re-accessed by many distinct processes (e.g. the
             # system CA bundle opened by dozens of unrelated binaries) would
             # otherwise mint a cert_process_info series per (cached cert,
