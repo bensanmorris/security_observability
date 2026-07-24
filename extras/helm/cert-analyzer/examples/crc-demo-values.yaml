@@ -1,0 +1,62 @@
+# Known-working values for the local CRC (OpenShift Local) demo/pilot cluster at
+# api.crc.testing -- this is exactly what release "cert-analyzer" in the certsight namespace
+# is running as of 2026-07-24, arrived at by adopting the pre-existing hand-applied manifests
+# under Helm management (see README.md's "Adopting pre-existing (non-Helm) resources") and
+# verifying every resource's actual content, not just release status.
+#
+# image.tag / demo.testServer.image.tag are dev-<epoch> tags from local `podman build` +
+# push-to-internal-registry (see extras/openshift/scripts/rebuild-redeploy-cert-analyzer.sh /
+# deploy-test-server.sh) -- they're ephemeral and WILL go stale the next time either image is
+# rebuilt. Check the live tag before reusing this file verbatim:
+#   oc get daemonset cert-expiry-monitor -n certsight -o jsonpath='{.spec.template.spec.containers[0].image}'
+#   oc get pod cert-test-server -n certsight -o jsonpath='{.spec.containers[0].image}'
+#
+# cert-analyzer and cert-test-server are both locally built and pushed to this cluster's
+# internal registry. demo-prometheus is NOT mirrored -- this cluster has real internet
+# access, so it genuinely runs the upstream quay.io image (chart default, no override
+# needed) rather than an air-gapped copy. Deliberately NOT using global.imageRegistry here,
+# even though the first two share a registry host -- that value applies to every image in
+# the chart including demo-prometheus, which would incorrectly redirect it too. See the
+# README's Air-gapped install section for a global.imageRegistry example where all three
+# images genuinely share one mirror host.
+#
+# pullPolicy: IfNotPresent overrides the chart's default of Always -- that default exists
+# because image.tag/demo.testServer.image.tag default to a floating latest-ubi9 (see
+# values.yaml), but the dev-<epoch> tags below are immutable/unique per build, so
+# IfNotPresent is correct here and avoids an unnecessary registry round-trip on every pod
+# restart.
+#
+# Usage:
+#   helm install cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
+#   helm upgrade cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
+
+image:
+  registry: image-registry.openshift-image-registry.svc:5000
+  repository: certsight/cert-analyzer
+  tag: dev-1784827058
+  pullPolicy: IfNotPresent
+
+kafka:
+  # Host's libvirt/default-route IP -- the DaemonSet runs with hostNetwork: true so this must
+  # be reachable directly from the node, not a ClusterIP. See
+  # extras/OPENSHIFT-DEPLOYMENT-README.md's Kafka reachability section.
+  bootstrapServers: "192.168.122.144:9092"
+
+# This cluster runs with FIPS checking deliberately disabled -- agent/config.py otherwise
+# defaults it to true.
+fipsComplianceEnabled: false
+
+demo:
+  testServer:
+    enabled: true
+    image:
+      registry: image-registry.openshift-image-registry.svc:5000
+      repository: certsight/cert-test-server
+      tag: dev-1784286324
+      pullPolicy: IfNotPresent
+    kafka:
+      host: "192.168.122.144"
+    # prometheusUrl left unset -- defaults to this release's own in-chart demo-prometheus
+    # Service, which is enabled below.
+  prometheus:
+    enabled: true

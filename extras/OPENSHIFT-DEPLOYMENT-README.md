@@ -15,6 +15,12 @@ OpenShift 4.20.
 All commands below assume `oc` is authenticated against the target cluster and, where noted,
 that `KUBECONFIG`/`oc project` is pointed at the `certsight` namespace.
 
+**Prefer Helm?** Steps 3-5 below (SCC binding, DaemonSet, tracing policies, ServiceMonitor,
+PrometheusRule) are also packaged as a chart at
+[`extras/helm/cert-analyzer/`](helm/cert-analyzer/README.md) — same manifests, one
+`helm install`. The manual walkthrough below is still the reference for *why* each field is
+set the way it is; read it first if something needs debugging.
+
 ---
 
 ## Local rehearsal with CRC (OpenShift Local)

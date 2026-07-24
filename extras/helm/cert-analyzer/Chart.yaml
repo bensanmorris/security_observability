@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cert-analyzer
+description: Tetragon-driven certificate expiry and discovery monitor for OpenShift
+type: application
+version: 0.5.0
+appVersion: "0.86"
+keywords:
+  - tls
+  - certificates
+  - tetragon
+  - openshift
+  - ebpf
+home: https://github.com/bensanmorris/security_observability
+sources:
+  - https://github.com/bensanmorris/security_observability

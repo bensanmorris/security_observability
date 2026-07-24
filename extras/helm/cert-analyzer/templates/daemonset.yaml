@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cert-expiry-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cert-analyzer.labels" . | nindent 4 }}
+    app: cert-expiry-monitor
+spec:
+  selector:
+    matchLabels:
+      app: cert-expiry-monitor
+  template:
+    metadata:
+      labels:
+        app: cert-expiry-monitor
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      hostNetwork: true
+      hostPID: true
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+      - name: analyzer
+        image: "{{ include "cert-analyzer.image" (dict "registry" .Values.image.registry "repository" .Values.image.repository "tag" .Values.image.tag "global" .Values.global.imageRegistry) }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: TETRAGON_ADDR
+          value: {{ .Values.tetragon.addr | quote }}
+        - name: METRICS_PORT
+          value: {{ .Values.ports.metrics | quote }}
+        - name: HEALTH_PORT
+          value: {{ .Values.ports.health | quote }}
+        - name: ALERT_THRESHOLD_DAYS
+          value: {{ .Values.alertThresholdDays | quote }}
+        - name: LOG_LEVEL
+          value: {{ .Values.logLevel | quote }}
+        - name: FIPS_COMPLIANCE_ENABLED
+          value: {{ .Values.fipsComplianceEnabled | quote }}
+        - name: CERT_SCAN_PATHS
+          value: {{ .Values.certScan.paths | quote }}
+        - name: SCAN_INTERVAL_SECONDS
+          value: {{ .Values.certScan.intervalSeconds | quote }}
+        - name: READINESS_GRACE_PERIOD_SECONDS
+          value: {{ .Values.readiness.gracePeriodSeconds | quote }}
+        - name: READINESS_STALENESS_SECONDS
+          value: {{ .Values.readiness.stalenessSeconds | quote }}
+        - name: HOST_PREFIX
+          value: {{ .Values.hostPrefix | quote }}
+        - name: KAFKA_ENABLED
+          value: {{ .Values.kafka.enabled | quote }}
+        {{- if .Values.kafka.enabled }}
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: {{ required "kafka.bootstrapServers is required when kafka.enabled=true (a node-reachable host:port, not a ClusterIP -- this DaemonSet runs with hostNetwork: true)" .Values.kafka.bootstrapServers | quote }}
+        {{- end }}
+        - name: BIND_PROBE_ENABLED
+          value: {{ .Values.bindProbeEnabled | quote }}
+        - name: CONNECT_PROBE_ENABLED
+          value: {{ .Values.connectProbeEnabled | quote }}
+        - name: TLS_OUTBOUND_PORTS
+          value: {{ join "," .Values.tlsOutboundPorts | quote }}
+        volumeMounts:
+        - name: tetragon-sock
+          mountPath: {{ .Values.tetragon.socketHostPath }}
+        - name: host-root
+          mountPath: /host
+          readOnly: true
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        ports:
+        - containerPort: {{ .Values.ports.metrics }}
+          name: metrics
+          protocol: TCP
+        - containerPort: {{ .Values.ports.health }}
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: {{ .Values.ports.health }}
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: {{ .Values.ports.health }}
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          failureThreshold: 2
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          # Deliberately no seccompProfile -- see README.md. Setting one, even
+          # RuntimeDefault, has been observed to make every SCC including hostaccess reject
+          # the pod on some OpenShift/CRC builds.
+      securityContext:
+        # No fixed runAsUser -- the hostaccess SCC's MustRunAsRange assigns one from the
+        # namespace's allocated UID range automatically. supplementalGroups: [0] is needed to
+        # read/write the root:root mode-0660 Tetragon gRPC socket on the host.
+        supplementalGroups:
+        - 0
+      volumes:
+      - name: tetragon-sock
+        hostPath:
+          path: {{ .Values.tetragon.socketHostPath }}
+          type: DirectoryOrCreate
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists

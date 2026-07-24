@@ -1,0 +1,126 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: certificate-expiry-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cert-analyzer.labels" . | nindent 4 }}
+    role: alert-rules
+spec:
+  groups:
+  - name: certificates
+    interval: 1m
+    rules:
+    - alert: CertificateExpiringSoon
+      expr: tls_certificate_expiry_days < 30 and tls_certificate_expiry_days > 7
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "Certificate {{`{{ $labels.cert_path }}`}} expires soon"
+        description: "Certificate {{`{{ $labels.common_name }}`}} expires in {{`{{ $value | humanizeDuration }}`}} (path: {{`{{ $labels.cert_path }}`}}{{`{{ if $labels.checksum }}`}}, sha256: {{`{{ $labels.checksum }}`}}{{`{{ end }}`}})"
+
+    - alert: CertificateExpiringCritical
+      expr: tls_certificate_expiry_days < 7 and tls_certificate_expiry_days > 0
+      for: 5m
+      labels:
+        severity: critical
+        component: certificate
+      annotations:
+        summary: "Certificate {{`{{ $labels.cert_path }}`}} expires very soon!"
+        description: "Certificate {{`{{ $labels.common_name }}`}} expires in {{`{{ $value | humanizeDuration }}`}} (path: {{`{{ $labels.cert_path }}`}}{{`{{ if $labels.checksum }}`}}, sha256: {{`{{ $labels.checksum }}`}}{{`{{ end }}`}}). IMMEDIATE ACTION REQUIRED!"
+
+    - alert: CertificateExpired
+      expr: tls_certificate_expiry_days < 0
+      for: 1m
+      labels:
+        severity: critical
+        component: certificate
+      annotations:
+        summary: "Certificate {{`{{ $labels.cert_path }}`}} has EXPIRED"
+        description: "Certificate {{`{{ $labels.common_name }}`}} expired {{`{{ $value | humanizeDuration }}`}} ago (path: {{`{{ $labels.cert_path }}`}}{{`{{ if $labels.checksum }}`}}, sha256: {{`{{ $labels.checksum }}`}}{{`{{ end }}`}}). SERVICE MAY BE AFFECTED!"
+
+    - alert: CertificateAnalyzerDown
+      expr: up{job="cert-expiry-monitor"} == 0
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "Certificate analyzer is down"
+        description: "The certificate expiry monitor has been down for more than 5 minutes"
+
+    - alert: CertificateAnalysisErrors
+      expr: rate(tls_certificate_analysis_errors_total[5m]) > 0.1
+      for: 10m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "High rate of certificate analysis errors"
+        description: "Certificate analyzer is experiencing {{`{{ $value }}`}} errors per second analyzing certificates"
+
+    - alert: TetragonVersionMismatch
+      expr: cert_analyzer_tetragon_version_match == 0
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer built against wrong Tetragon version"
+        description: >
+          The cert-analyzer was built against a different Tetragon version than
+          the one currently running. Proto incompatibilities may cause silent
+          event processing failures. Check the cert_analyzer_tetragon_version
+          metric for build_version and runtime_version labels, then rebuild the
+          cert-analyzer image against the runtime version.
+
+    - alert: CertAnalyzerNotReady
+      expr: kube_pod_container_status_ready{container="analyzer"} == 0
+      for: 5m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer pod is not ready on {{`{{ $labels.node }}`}}"
+        description: >
+          The cert-analyzer container has been reporting not-ready for more than
+          5 minutes. This means the readiness probe (/readyz) is failing —
+          either the Tetragon event stream has stalled or no events have been
+          seen within the staleness window. Check the pod logs and the
+          cert_analyzer_healthy metric.
+
+    - alert: KeystorePasswordFailed
+      expr: increase(tls_certificate_analysis_errors_total{error_type=~"jks_password_failed|pkcs12_password_failed"}[1h]) > 0
+      for: 0m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer cannot open one or more keystores"
+        description: >
+          One or more JKS or PKCS12 keystore files could not be opened because
+          all passwords failed. Affected keystores are being skipped and their
+          certificates are not being monitored. Set the JKS_PASSWORD or
+          PKCS12_PASSWORD environment variable to the correct password, or use
+          a password map file for multiple keystores. Check the analyzer logs
+          for the specific file paths that failed.
+
+    - alert: CertAnalyzerCacheNearCapacity
+      expr: cert_analyzer_cache_known_certs_size / cert_analyzer_cache_max_size > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        component: certificate
+      annotations:
+        summary: "cert-analyzer known_certs cache is over 90% full"
+        description: >
+          The known_certs LRU cache is approaching its cap. Entries are being
+          evicted and certificates will be re-analyzed on next access, adding
+          CPU overhead. Consider increasing CACHE_MAX_SIZE and the container
+          memory limit proportionally. Current size can be checked via the
+          cert_analyzer_cache_known_certs_size and cert_analyzer_cache_max_size
+          metrics.
+{{- end }}

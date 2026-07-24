@@ -1,0 +1,216 @@
+# Install into a dedicated namespace with:
+#   helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
+#     --set kafka.bootstrapServers=<host-ip>:9092
+#
+# Deliberately no Namespace object in templates/ -- Helm's --create-namespace flag handles
+# creation, and templating a Namespace risks it being deleted on `helm uninstall`.
+
+global:
+  # Replaces the registry host on every image below (image.registry,
+  # demo.testServer.image.registry, demo.prometheus.image.registry) when set -- lets an
+  # air-gapped install where everything is mirrored under one internal registry set this
+  # once instead of three times. Leave empty to use each image's own default registry.
+  imageRegistry: ""
+
+image:
+  # No vX.Y-ubi9 tags actually exist on GHCR as of 2026-07-24 -- confirmed via
+  # `skopeo list-tags docker://ghcr.io/bensanmorris/cert-analyzer`, only main-ubi9/
+  # latest-ubi9/sha-<commit>-ubi9 are published, despite build.yml's `on: push: tags: 'v*'`
+  # trigger and several real vX.Y tags (up to v0.86) having been pushed -- the versioned-tag
+  # publish step isn't producing output; needs investigating as a separate CI issue.
+  # latest-ubi9 here as a stopgap so a zero-override `helm install` actually pulls something
+  # that exists. Because it's a floating tag, pair it with pullPolicy: Always below (not the
+  # default IfNotPresent) or a node that already pulled it once won't notice new content
+  # landing on the same tag later -- same footgun as demo.prometheus.image's :latest.
+  # Point at the in-cluster registry instead for a locally built image, e.g. registry:
+  # image-registry.openshift-image-registry.svc:5000, repository: certsight/cert-analyzer --
+  # or set global.imageRegistry once instead if every image below shares the same host.
+  registry: ghcr.io
+  repository: bensanmorris/cert-analyzer
+  tag: latest-ubi9
+  pullPolicy: Always
+
+serviceAccount:
+  name: cert-expiry-monitor
+
+# Binds the OpenShift 'hostaccess' SCC (hostNetwork/hostPID/hostPath, namespace-allocated
+# non-root UID) to serviceAccount.name -- required for the DaemonSet below to be admitted on
+# OpenShift. Leave enabled unless you're installing on vanilla Kubernetes, where the
+# system:openshift:scc:hostaccess ClusterRole doesn't exist.
+scc:
+  hostaccess:
+    enabled: true
+
+# Matches openshift-marketplace's catalog-refresh pods so this DaemonSet isn't preempted on a
+# memory-constrained single-node cluster (see daemonset.yaml comment history). Set to "" to
+# fall back to the cluster default (priority 0).
+priorityClassName: system-cluster-critical
+
+resources:
+  limits:
+    memory: 512Mi
+    cpu: 200m
+  requests:
+    memory: 128Mi
+    cpu: 100m
+
+ports:
+  metrics: 9090
+  health: 8086
+
+tetragon:
+  # Correct for cilium/tetragon chart 1.6+ (confirmed against 1.7.0) -- the gRPC socket lives
+  # here, not /var/run/cilium/tetragon (that path is only the JSON export log file).
+  addr: "unix:///var/run/tetragon/tetragon.sock"
+  socketHostPath: /var/run/tetragon
+
+# Prefix cert-analyzer strips/resolves Tetragon-reported host paths against; must match the
+# host-root hostPath mount below.
+hostPrefix: /host
+
+# DEBUG is chatty on a busy node and, before agent/analyzer.py's per-event detection logs
+# were demoted to DEBUG, was actively costing measurable CPU on repeat access to already-
+# known certs (e.g. a control-plane component re-opening its own service-account CA). INFO
+# is the sane default; set DEBUG only when actively troubleshooting.
+alertThresholdDays: 30
+logLevel: INFO
+
+# agent/config.py defaults this to true. Set to false to match a cluster where it's been
+# deliberately disabled -- check the live DaemonSet's env before assuming the default here
+# matches what's actually running (`oc get daemonset cert-expiry-monitor -n certsight -o
+# jsonpath='{.spec.template.spec.containers[0].env}'`).
+fipsComplianceEnabled: true
+
+certScan:
+  # Comma-separated host paths for the periodic filesystem scanner. Empty disables that
+  # thread entirely so cert discovery is purely event-driven (Tetragon kprobes/uprobes).
+  paths: ""
+  intervalSeconds: 3600
+
+readiness:
+  gracePeriodSeconds: 60
+  stalenessSeconds: 300
+
+kafka:
+  enabled: true
+  # Required when kafka.enabled is true, e.g. "10.0.1.5:9092". The DaemonSet runs with
+  # hostNetwork: true, so this must be an address reachable directly from the node (not a
+  # ClusterIP Service) -- typically the Kafka host's own IP with its listeners bound off
+  # localhost and the port open through the host firewall.
+  bootstrapServers: ""
+
+# Off by default upstream (agent/config.py) -- needed for the bind-probe/connect-probe Kafka
+# events used by the test-server's tls-bind-probe and tcp_connect use cases.
+bindProbeEnabled: true
+connectProbeEnabled: true
+
+# Ports the tcp-connect-tls TracingPolicy filters on at the kernel boundary (see
+# templates/policies/tcp-connect-tls.yaml). Also rendered as cert-analyzer's own
+# TLS_OUTBOUND_PORTS env var so the two can't drift out of sync the way the plain-manifest
+# deployment could.
+tlsOutboundPorts:
+  - "443"
+  - "636"
+  - "2376"
+  - "4443"
+  - "5671"
+  - "5672"
+  - "5986"
+  - "6380"
+  - "6443"
+  - "8140"
+  - "8443"
+  - "8883"
+  - "9093"
+  - "9094"
+  - "9443"
+
+service:
+  type: ClusterIP
+
+route:
+  # Exposes the metrics Service externally via an OpenShift Route (host defaults to the
+  # standard <name>-<namespace>.<router subdomain> pattern -- left unset here so it works on
+  # any cluster rather than hardcoding this one's apps-crc.testing subdomain). Needed if
+  # anything outside the cluster scrapes /metrics directly, e.g. a host-level Prometheus
+  # feeding a Grafana instance that isn't part of this chart.
+  enabled: true
+  # Empty lets OpenShift assign its standard default host.
+  host: ""
+
+monitoring:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs -- OpenShift's User Workload Monitoring
+    # (cluster-monitoring-config's enableUserWorkload: true) provides these.
+    enabled: true
+    interval: 30s
+  prometheusRule:
+    enabled: true
+
+# TracingPolicy CRDs (cilium.io/v1alpha1) are cluster-scoped -- one copy of each is enough
+# for the whole cluster regardless of how many cert-analyzer releases are installed. If you
+# install this chart more than once in the same cluster, set these to false on every release
+# but one to avoid fighting over ownership on `helm uninstall`.
+policies:
+  certificateFileAccess:
+    enabled: true
+  tcpConnectTls:
+    enabled: true
+  tlsServiceTracking:
+    enabled: true
+  opensslCertLoad:
+    enabled: true
+
+rbac:
+  # Cluster-scoped ClusterRole/ClusterRoleBinding granting read access to pods/workload
+  # controllers, used for pod-enrichment lookups. Same one-per-cluster caveat as policies
+  # above.
+  podReader:
+    enabled: true
+
+# Demo/test tooling -- not part of the deployed product, but a good way to visually confirm
+# the DaemonSet above is actually seeing and processing events end-to-end. Off by default.
+demo:
+  testServer:
+    enabled: false
+    image:
+      # Same gap as image.tag above -- no vX.Y-ubi9 tags exist on GHCR for this image
+      # either, only main-ubi9/latest-ubi9/sha-<commit>-ubi9. latest-ubi9 + pullPolicy:
+      # Always for the same reason.
+      registry: ghcr.io
+      repository: bensanmorris/cert-test-server
+      tag: latest-ubi9
+      pullPolicy: Always
+    kafka:
+      # Required when demo.testServer.enabled is true -- a node-reachable Kafka host IP (the
+      # test-server publishes its own use-case events independently of cert-analyzer's own
+      # kafka.bootstrapServers above).
+      host: ""
+      port: "9092"
+    # Needs demo.prometheus.enabled=true (or another real Prometheus reachable at this URL)
+    # for the test-console's blast-radius/chain-explorer panels specifically -- everything
+    # else in the test-console works without it. Empty defaults to the in-chart
+    # demo-prometheus Service in this release's own namespace (see templates/demo/
+    # test-server-pod.yaml); override only if pointing at a Prometheus outside this chart.
+    prometheusUrl: ""
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: 500m
+      requests:
+        memory: 64Mi
+        cpu: 100m
+
+  prometheus:
+    enabled: false
+    image:
+      registry: quay.io
+      repository: prometheus/prometheus
+      tag: latest
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: 200m
+      requests:
+        memory: 64Mi
+        cpu: 50m

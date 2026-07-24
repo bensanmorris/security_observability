@@ -37,9 +37,23 @@ spec:
       # these paths at all. Not needed in the bare-metal RPM policy
       # (tetragon-policies/certificate-file-access.yaml) since that path
       # doesn't exist there.
+      # /run/secrets/kubernetes.io/serviceaccount/ (and its /var/run alias) is where every
+      # pod sees its own projected service-account volume from inside its mount namespace --
+      # Tetragon reports fd_install paths in the accessing process's own namespace view, so
+      # this is a distinct string from the kubelet bind-mount path above, not covered by it.
+      # Confirmed live on the CRC pilot cluster (2026-07-24): cluster-version-operator alone
+      # re-opened its own .../ca.crt ~6,400 times/minute in a recurring ~4-minute-period
+      # burst (retrying against an unreachable update service, typical of a disconnected
+      # cluster) -- 93% of all cert-file-access events during that burst, for a CA bundle
+      # that's identical across virtually every pod on the node and carries no
+      # per-pod-unique expiry information worth tracking. Scoped to this one path, not a
+      # broader /run/secrets/ sweep -- other paths under there (webhook serving certs, etcd
+      # client certs) are genuine leaf certs this tool exists to monitor.
       - index: 1
         operator: "NotPrefix"
         values:
         - "/var/lib/kubelet/pods/"
+        - "/run/secrets/kubernetes.io/serviceaccount/"
+        - "/var/run/secrets/kubernetes.io/serviceaccount/"
       matchActions:
       - action: Post

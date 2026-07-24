@@ -1,0 +1,19 @@
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cert-expiry-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cert-analyzer.labels" . | nindent 4 }}
+    app: cert-expiry-monitor
+spec:
+  {{- with .Values.route.host }}
+  host: {{ . | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: cert-expiry-monitor
+  port:
+    targetPort: metrics
+{{- end }}
