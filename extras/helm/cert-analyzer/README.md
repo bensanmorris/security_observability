@@ -50,6 +50,19 @@ helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
   --set kafka.bootstrapServers=<kafka-host-ip>:9092
 ```
 
+`examples/crc-demo-values.yaml` is a real, verified-working values file -- the exact
+configuration currently running in the `certsight` namespace on the local CRC pilot cluster
+(`api.crc.testing`), captured after adopting it under Helm and confirming every resource's
+live content matches what the chart renders:
+
+```bash
+helm install cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
+```
+
+Its `image.tag`/`demo.testServer.image.tag` are ephemeral local-build tags that go stale the
+next time either image is rebuilt -- see the comments in that file for how to check the
+current live tag before reusing it.
+
 `kafka.bootstrapServers` must be a node-reachable `host:port` (not a ClusterIP Service) --
 the DaemonSet runs with `hostNetwork: true`, same constraint as the old
 `deploy-cert-analyzer-from-release.sh --kafka-host` flag. Set `kafka.enabled=false` instead if
