@@ -37,10 +37,22 @@ spec:
       # underlying cert content, so known_certs cardinality grows roughly linearly with pod
       # count rather than with distinct certs on the node. Filtering here means the event
       # never leaves the kernel for these paths at all.
+      #
+      # /run/secrets/kubernetes.io/serviceaccount/ (and its /var/run alias) is the same
+      # projected volume as seen from inside each pod's own mount namespace -- a distinct
+      # string from the kubelet path above, not covered by it. Confirmed live on the CRC
+      # pilot cluster (2026-07-24): cluster-version-operator alone re-opened its own
+      # .../ca.crt ~6,400 times/minute in a recurring burst, 93% of all cert-file-access
+      # events during that window, for a CA bundle identical across virtually every pod on
+      # the node. Scoped to this one path, not a broader /run/secrets/ sweep -- other paths
+      # under there (webhook serving certs, etcd client certs) are genuine leaf certs this
+      # tool exists to monitor.
       - index: 1
         operator: "NotPrefix"
         values:
         - "/var/lib/kubelet/pods/"
+        - "/run/secrets/kubernetes.io/serviceaccount/"
+        - "/var/run/secrets/kubernetes.io/serviceaccount/"
       matchActions:
       - action: Post
 {{- end }}
