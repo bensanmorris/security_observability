@@ -101,3 +101,42 @@ oc get pod -n certsight -l app=cert-expiry-monitor \
 # expect "hostaccess"
 kubectl get tracingpolicies
 ```
+
+## Adopting pre-existing (non-Helm) resources
+
+If `extras/openshift/*.yaml` was applied by hand before this chart existed, `helm install`
+can take over those objects in place instead of erroring on "already exists" -- stamp each
+one with Helm's ownership metadata first:
+
+```bash
+for obj in serviceaccount/cert-expiry-monitor rolebinding/cert-expiry-monitor-hostaccess-scc \
+           service/cert-expiry-monitor daemonset/cert-expiry-monitor route/cert-expiry-monitor \
+           servicemonitor/cert-expiry-monitor prometheusrule/certificate-expiry-alerts; do
+  oc annotate $obj -n certsight meta.helm.sh/release-name=cert-analyzer \
+    meta.helm.sh/release-namespace=certsight --overwrite
+  oc label $obj -n certsight app.kubernetes.io/managed-by=Helm --overwrite
+done
+for obj in clusterrole/cert-expiry-monitor-pod-reader clusterrolebinding/cert-expiry-monitor-pod-reader \
+           tracingpolicy/certificate-file-access tracingpolicy/tcp-connect-tls \
+           tracingpolicy/tls-service-tracking tracingpolicy/openssl3-cert-load; do
+  oc annotate $obj meta.helm.sh/release-name=cert-analyzer \
+    meta.helm.sh/release-namespace=certsight --overwrite
+  oc label $obj app.kubernetes.io/managed-by=Helm --overwrite
+done
+
+helm install cert-analyzer ./cert-analyzer -n certsight --set ...
+```
+
+**Verify content actually landed -- don't trust `STATUS: deployed` alone.** Confirmed against
+a real adoption: if an adopted CRD object's live spec differs from what the chart renders
+(e.g. a `TracingPolicy` that had drifted from the checked-in policy file), the *first*
+`helm install` can silently skip patching that object's spec while still reporting success --
+and because Helm records the chart's *intended* values as if they'd been applied, a follow-up
+`helm upgrade` with the same values sees no diff against its own bookkeeping and also skips
+it. `metadata.generation` not incrementing across the install/upgrade is the tell. The fix:
+`oc apply -f` the specific rendered resource once to force real content (this also updates
+Helm's own baseline, so future `helm upgrade`s reconcile normally afterward), or force a diff
+by upgrading with genuinely different values first. Built-in types (Deployment, DaemonSet,
+Service, RBAC) reconciled correctly on first adoption in testing -- this was only observed on
+`cilium.io/v1alpha1 TracingPolicy` CRD objects with actual live/chart drift; objects whose
+live content already matched the chart adopted cleanly regardless of kind.
