@@ -161,8 +161,15 @@ rather than hardcoding one cluster's subdomain; set `route.host` to override.
 
 ```bash
 helm upgrade cert-analyzer ./cert-analyzer -n certsight --reuse-values \
-  --set image.tag=v0.87-ubi9
+  --set image.tag=<new-tag>
 ```
+
+`<new-tag>` -- as of 2026-07-24 there are no `vX.Y-ubi9` tags actually published on GHCR for
+either image (confirmed via `skopeo list-tags`), only `main-ubi9`/`latest-ubi9`/
+`sha-<commit>-ubi9`, despite `build.yml` supposedly building one on every `vX.Y` tag push.
+That's a gap in the release pipeline, not this chart -- `image.tag`/
+`demo.testServer.image.tag` default to `latest-ubi9` as a stopgap (paired with
+`pullPolicy: Always`, since it's a floating tag) until it's fixed.
 
 ## Uninstall
 

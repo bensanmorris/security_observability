@@ -20,6 +20,12 @@
 # README's Air-gapped install section for a global.imageRegistry example where all three
 # images genuinely share one mirror host.
 #
+# pullPolicy: IfNotPresent overrides the chart's default of Always -- that default exists
+# because image.tag/demo.testServer.image.tag default to a floating latest-ubi9 (see
+# values.yaml), but the dev-<epoch> tags below are immutable/unique per build, so
+# IfNotPresent is correct here and avoids an unnecessary registry round-trip on every pod
+# restart.
+#
 # Usage:
 #   helm install cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
 #   helm upgrade cert-analyzer ./cert-analyzer -n certsight -f examples/crc-demo-values.yaml
@@ -28,6 +34,7 @@ image:
   registry: image-registry.openshift-image-registry.svc:5000
   repository: certsight/cert-analyzer
   tag: dev-1784827058
+  pullPolicy: IfNotPresent
 
 kafka:
   # Host's libvirt/default-route IP -- the DaemonSet runs with hostNetwork: true so this must
@@ -46,6 +53,7 @@ demo:
       registry: image-registry.openshift-image-registry.svc:5000
       repository: certsight/cert-test-server
       tag: dev-1784286324
+      pullPolicy: IfNotPresent
     kafka:
       host: "192.168.122.144"
     # prometheusUrl left unset -- defaults to this release's own in-chart demo-prometheus

@@ -13,14 +13,22 @@ global:
   imageRegistry: ""
 
 image:
-  # Defaults point at this project's published GHCR release image (UBI9). Point at the
-  # in-cluster registry instead for a locally built image, e.g. registry:
+  # No vX.Y-ubi9 tags actually exist on GHCR as of 2026-07-24 -- confirmed via
+  # `skopeo list-tags docker://ghcr.io/bensanmorris/cert-analyzer`, only main-ubi9/
+  # latest-ubi9/sha-<commit>-ubi9 are published, despite build.yml's `on: push: tags: 'v*'`
+  # trigger and several real vX.Y tags (up to v0.86) having been pushed -- the versioned-tag
+  # publish step isn't producing output; needs investigating as a separate CI issue.
+  # latest-ubi9 here as a stopgap so a zero-override `helm install` actually pulls something
+  # that exists. Because it's a floating tag, pair it with pullPolicy: Always below (not the
+  # default IfNotPresent) or a node that already pulled it once won't notice new content
+  # landing on the same tag later -- same footgun as demo.prometheus.image's :latest.
+  # Point at the in-cluster registry instead for a locally built image, e.g. registry:
   # image-registry.openshift-image-registry.svc:5000, repository: certsight/cert-analyzer --
   # or set global.imageRegistry once instead if every image below shares the same host.
   registry: ghcr.io
   repository: bensanmorris/cert-analyzer
-  tag: v0.86-ubi9
-  pullPolicy: IfNotPresent
+  tag: latest-ubi9
+  pullPolicy: Always
 
 serviceAccount:
   name: cert-expiry-monitor
@@ -162,10 +170,13 @@ demo:
   testServer:
     enabled: false
     image:
+      # Same gap as image.tag above -- no vX.Y-ubi9 tags exist on GHCR for this image
+      # either, only main-ubi9/latest-ubi9/sha-<commit>-ubi9. latest-ubi9 + pullPolicy:
+      # Always for the same reason.
       registry: ghcr.io
       repository: bensanmorris/cert-test-server
-      tag: v0.86-ubi9
-      pullPolicy: IfNotPresent
+      tag: latest-ubi9
+      pullPolicy: Always
     kafka:
       # Required when demo.testServer.enabled is true -- a node-reachable Kafka host IP (the
       # test-server publishes its own use-case events independently of cert-analyzer's own
