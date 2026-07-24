@@ -78,6 +78,47 @@ To use a locally built image rather than the published GHCR release:
 See `values.yaml` for every other setting (alert threshold, log level, scan paths, resource
 limits, which TracingPolicies/monitoring resources to install, etc).
 
+## Air-gapped install
+
+`helm install` itself has no air-gap concerns -- this chart has no `dependencies:` block, so
+there's no `helm dependency update`/chart-repo fetch involved, just a local directory once
+you've copied the repo in. The only internet-dependent part is images: every default
+`*.repository`/`*.image` value in `values.yaml` points at GHCR or quay.io, which won't be
+reachable. Mirror first, then install -- `helm install` only creates objects that *reference*
+an image by name; the kubelet does the actual pull later when it schedules the pod, so
+installing before the image is reachable just leaves pods stuck in `ImagePullBackOff` rather
+than failing the install outright.
+
+1. **Tetragon first, and it must finish before this chart's `TracingPolicy` objects can be
+   created** -- they need the `cilium.io/v1alpha1` CRD already registered, or the API server
+   rejects them outright.
+   `extras/openshift/scripts/deploy-tetragon-from-release.sh` mirrors its images and installs
+   it end-to-end from a `scp`'d chart tarball + `docker save` image tars.
+
+2. **Mirror the cert-analyzer image.**
+   `extras/openshift/scripts/deploy-cert-analyzer-from-release.sh` already does the mirroring
+   half of this (load the release tar → find the internal registry route → tag → push) before
+   going on to do its own `oc apply`/`oc set image` deploy. Run it through the push step, note
+   the `image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer:dev-<tag>`
+   it prints, then use that instead of its own deploy steps:
+
+   ```bash
+   helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
+     --set image.repository=image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer \
+     --set image.tag=dev-<timestamp> \
+     --set kafka.bootstrapServers=<kafka-host-ip>:9092
+   ```
+
+3. **Same for `cert-test-server`** if using `demo.testServer.enabled=true` --
+   `deploy-test-server-from-release.sh` mirrors it the same way; point
+   `demo.testServer.image.repository`/`demo.testServer.image.tag` at the result.
+
+4. **`demo.prometheus.enabled=true` has no equivalent mirror script yet** -- unlike the two
+   above, nothing in this repo produces a `docker save` tar for
+   `quay.io/prometheus/prometheus`. Leave it disabled in an air-gapped install until one
+   exists, or mirror it manually (`docker pull`/`save` on a connected machine, `scp`, `podman
+   load`+tag+push, same pattern as the scripts above) and point `demo.prometheus.image` at it.
+
 ## External metrics access
 
 `route.enabled` (default `true`) creates an OpenShift Route exposing `/metrics` outside the
