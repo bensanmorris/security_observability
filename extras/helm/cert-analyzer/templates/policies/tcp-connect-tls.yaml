@@ -1,0 +1,27 @@
+{{- if .Values.policies.tcpConnectTls.enabled }}
+# Port list is sourced from values.tlsOutboundPorts, the same list rendered into
+# cert-analyzer's TLS_OUTBOUND_PORTS env var (templates/daemonset.yaml) -- Tetragon filters
+# events here at the kernel boundary, cert-analyzer applies the same list as a Python-side
+# guard, and both must agree or events are silently dropped by one side.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: tcp-connect-tls
+spec:
+  kprobes:
+  - call: "tcp_connect"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "DPort"
+        values:
+        {{- range .Values.tlsOutboundPorts }}
+        - {{ . | quote }}
+        {{- end }}
+      matchActions:
+      - action: Post
+{{- end }}

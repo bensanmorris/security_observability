@@ -1,0 +1,21 @@
+cert-analyzer installed into namespace "{{ .Release.Namespace }}".
+
+Check the DaemonSet is admitted under the expected SCC:
+  oc get pod -n {{ .Release.Namespace }} -l app=cert-expiry-monitor -o jsonpath='{.items[0].metadata.annotations.openshift\.io/scc}'
+  # expect "hostaccess", not a fallback like "anyuid" or "privileged"
+
+Tail logs:
+  oc logs -n {{ .Release.Namespace }} -l app=cert-expiry-monitor --tail=20
+  # expect: "Connecting to Tetragon at {{ .Values.tetragon.addr }}"
+  #         "Tetragon version OK -- build and runtime both at vX.Y.Z"
+  #         "Listening for Tetragon certificate events..."
+
+Confirm the TracingPolicies loaded cluster-wide:
+  kubectl get tracingpolicies
+
+{{- if not .Values.monitoring.serviceMonitor.enabled }}
+
+monitoring.serviceMonitor.enabled is false -- cert-expiry-monitor's /metrics endpoint exists
+but nothing is scraping it. Enable it once OpenShift's User Workload Monitoring is on
+(cluster-monitoring-config ConfigMap, enableUserWorkload: true).
+{{- end }}

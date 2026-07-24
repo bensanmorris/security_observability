@@ -1,0 +1,132 @@
+# Install into a dedicated namespace with:
+#   helm install cert-analyzer ./cert-analyzer -n certsight --create-namespace \
+#     --set kafka.bootstrapServers=<host-ip>:9092
+#
+# Deliberately no Namespace object in templates/ -- Helm's --create-namespace flag handles
+# creation, and templating a Namespace risks it being deleted on `helm uninstall`.
+
+image:
+  # Default points at this project's published GHCR release image (UBI9). Point at the
+  # in-cluster registry instead for a locally built image, e.g.
+  # image-registry.openshift-image-registry.svc:5000/certsight/cert-analyzer
+  repository: ghcr.io/bensanmorris/cert-analyzer
+  tag: v0.86-ubi9
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: cert-expiry-monitor
+
+# Binds the OpenShift 'hostaccess' SCC (hostNetwork/hostPID/hostPath, namespace-allocated
+# non-root UID) to serviceAccount.name -- required for the DaemonSet below to be admitted on
+# OpenShift. Leave enabled unless you're installing on vanilla Kubernetes, where the
+# system:openshift:scc:hostaccess ClusterRole doesn't exist.
+scc:
+  hostaccess:
+    enabled: true
+
+# Matches openshift-marketplace's catalog-refresh pods so this DaemonSet isn't preempted on a
+# memory-constrained single-node cluster (see daemonset.yaml comment history). Set to "" to
+# fall back to the cluster default (priority 0).
+priorityClassName: system-cluster-critical
+
+resources:
+  limits:
+    memory: 512Mi
+    cpu: 200m
+  requests:
+    memory: 128Mi
+    cpu: 100m
+
+ports:
+  metrics: 9090
+  health: 8086
+
+tetragon:
+  # Correct for cilium/tetragon chart 1.6+ (confirmed against 1.7.0) -- the gRPC socket lives
+  # here, not /var/run/cilium/tetragon (that path is only the JSON export log file).
+  addr: "unix:///var/run/tetragon/tetragon.sock"
+  socketHostPath: /var/run/tetragon
+
+# Prefix cert-analyzer strips/resolves Tetragon-reported host paths against; must match the
+# host-root hostPath mount below.
+hostPrefix: /host
+
+alertThresholdDays: 30
+logLevel: DEBUG
+
+certScan:
+  # Comma-separated host paths for the periodic filesystem scanner. Empty disables that
+  # thread entirely so cert discovery is purely event-driven (Tetragon kprobes/uprobes).
+  paths: ""
+  intervalSeconds: 3600
+
+readiness:
+  gracePeriodSeconds: 60
+  stalenessSeconds: 300
+
+kafka:
+  enabled: true
+  # Required when kafka.enabled is true, e.g. "10.0.1.5:9092". The DaemonSet runs with
+  # hostNetwork: true, so this must be an address reachable directly from the node (not a
+  # ClusterIP Service) -- typically the Kafka host's own IP with its listeners bound off
+  # localhost and the port open through the host firewall.
+  bootstrapServers: ""
+
+# Off by default upstream (agent/config.py) -- needed for the bind-probe/connect-probe Kafka
+# events used by the test-server's tls-bind-probe and tcp_connect use cases.
+bindProbeEnabled: true
+connectProbeEnabled: true
+
+# Ports the tcp-connect-tls TracingPolicy filters on at the kernel boundary (see
+# templates/policies/tcp-connect-tls.yaml). Also rendered as cert-analyzer's own
+# TLS_OUTBOUND_PORTS env var so the two can't drift out of sync the way the plain-manifest
+# deployment could.
+tlsOutboundPorts:
+  - "443"
+  - "636"
+  - "2376"
+  - "4443"
+  - "5671"
+  - "5672"
+  - "5986"
+  - "6380"
+  - "6443"
+  - "8140"
+  - "8443"
+  - "8883"
+  - "9093"
+  - "9094"
+  - "9443"
+
+service:
+  type: ClusterIP
+
+monitoring:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs -- OpenShift's User Workload Monitoring
+    # (cluster-monitoring-config's enableUserWorkload: true) provides these.
+    enabled: true
+    interval: 30s
+  prometheusRule:
+    enabled: true
+
+# TracingPolicy CRDs (cilium.io/v1alpha1) are cluster-scoped -- one copy of each is enough
+# for the whole cluster regardless of how many cert-analyzer releases are installed. If you
+# install this chart more than once in the same cluster, set these to false on every release
+# but one to avoid fighting over ownership on `helm uninstall`.
+policies:
+  certificateFileAccess:
+    enabled: true
+  tcpConnectTls:
+    enabled: true
+  tlsServiceTracking:
+    enabled: true
+  opensslCertLoad:
+    enabled: true
+
+rbac:
+  # Cluster-scoped ClusterRole/ClusterRoleBinding granting read access to pods/workload
+  # controllers, used for pod-enrichment lookups. Same one-per-cluster caveat as policies
+  # above.
+  podReader:
+    enabled: true

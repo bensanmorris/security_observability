@@ -1,0 +1,19 @@
+{{- if .Values.policies.tlsServiceTracking.enabled }}
+# Bind-probe: feeds cert-analyzer's BIND_PROBE_ENABLED path (templates/daemonset.yaml).
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: tls-service-tracking
+spec:
+  kprobes:
+  - call: "security_socket_bind"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    - index: 1
+      type: "sockaddr"
+    selectors:
+    - matchActions:
+      - action: Post
+{{- end }}

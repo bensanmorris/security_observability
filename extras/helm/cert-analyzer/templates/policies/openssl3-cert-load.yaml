@@ -1,0 +1,40 @@
+{{- if .Values.policies.opensslCertLoad.enabled }}
+# Container variant of tetragon-policies/experimental/openssl3-cert-load.yaml: the Tetragon
+# DaemonSet only mounts host /proc (at /procRoot, used internally for cgroup resolution), not
+# host /usr/lib64, so the uprobe path is rewritten through /procRoot/1/root/ to reach the
+# host's real root filesystem via PID 1's procfs root symlink -- the same trick Tetragon
+# itself relies on. Don't use the plain (non-/procRoot) policy on OpenShift/Kubernetes.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openssl3-cert-load
+spec:
+  uprobes:
+  # SSL_CTX_use_certificate_file / SSL_CTX_use_certificate_chain_file: hooks applications
+  # that load certificate files explicitly via OpenSSL (openssl s_client -CAfile, nginx,
+  # Apache, Java via OpenSSL, etc).
+  - path: "/procRoot/1/root/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_file"
+    - "SSL_CTX_use_certificate_chain_file"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "string"
+  # SSL_CTX_use_certificate_ASN1: hooks explicit in-memory DER certificate loading via
+  # libssl. arg2 is a plain single pointer to the DER bytes, read atomically in eBPF at hook
+  # entry via bpf_probe_read_user (char_buf), avoiding the double-pointer problem of
+  # d2i_X509 which can't be safely resolved from userspace after function return.
+  - path: "/procRoot/1/root/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_CTX_use_certificate_ASN1"
+    args:
+    - index: 0
+      type: "uint64"
+    - index: 1
+      type: "int32"
+    - index: 2
+      type: "char_buf"
+      sizeArgIndex: 2
+{{- end }}

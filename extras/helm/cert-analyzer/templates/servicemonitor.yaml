@@ -1,0 +1,18 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cert-expiry-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cert-analyzer.labels" . | nindent 4 }}
+    app: cert-expiry-monitor
+spec:
+  selector:
+    matchLabels:
+      app: cert-expiry-monitor
+  endpoints:
+  - port: metrics
+    interval: {{ .Values.monitoring.serviceMonitor.interval }}
+    path: /metrics
+{{- end }}
