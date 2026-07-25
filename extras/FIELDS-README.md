@@ -122,11 +122,14 @@ Only emitted when `bind_probe_enabled=true` or `connect_probe_enabled=true` (bot
 | `cert_analyzer_tetragon_version_match` | Gauge | `node_name` | `1` if build and runtime Tetragon versions match, `0` if mismatched |
 | `cert_analyzer_build` | Info | `node_name` | `version` (cert-analyzer) and `tetragon_build_version`. `node_name`-labeled so a fleet-wide view can show which analyzer version is running per node |
 | `cert_analyzer_scrape_interval_seconds` | Gauge | `node_name` | Observed wall-clock interval since the previous `/metrics` scrape of this node. Computed at scrape time rather than read from Prometheus config, so it reflects actual scheduler drift/overhead; absent on a node's first-ever scrape |
+| `cert_analyzer_last_scrape_timestamp_seconds` | Gauge | `node_name` | Unix timestamp of this scrape of `/metrics`. Present from the very first scrape (unlike the interval metric above); `time() - this` gives a per-node staleness indicator that keeps growing if Prometheus stops reaching this node |
 | `cert_analyzer_cache_known_certs_size` | Gauge | — | Current number of entries in the known-certs LRU cache |
 | `cert_analyzer_cache_processed_paths_size` | Gauge | — | Current number of entries in the processed-paths LRU cache |
 | `cert_analyzer_cache_password_failed_size` | Gauge | — | Current number of entries in the password-failed LRU cache |
 | `cert_analyzer_cache_max_size` | Gauge | — | Configured `max_size` for all LRU caches |
 | `kafka_delivery_errors_total` | Counter | — | Cumulative async Kafka delivery failures |
+| `kafka_connected_at_timestamp_seconds` | Gauge | `node_name` | Unix timestamp of the last successful Kafka producer connection. Absent if Kafka is disabled or has never connected |
+| `kafka_last_published_timestamp_seconds` | Gauge | `node_name` | Unix timestamp of the last message successfully acked by the broker. Absent if Kafka is disabled or nothing has published yet |
 | `tetragon_policy_info` | Gauge | `name`, `namespace`, `state` | One series per tracing policy, value always `1`. Stale series are removed when a policy is deleted or changes state. `namespace` is empty for cluster-scoped policies |
 | `tetragon_policies_total` | Gauge | `state` | Count of tracing policies in each state. All state values are always emitted (including `0`) so alert rules can rely on the series being present |
 

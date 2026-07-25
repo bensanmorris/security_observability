@@ -273,6 +273,36 @@
               "instant": true,
               "format": "table",
               "refId": "I"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "time() - kafka_connected_at_timestamp_seconds{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "J"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "time() - kafka_last_published_timestamp_seconds{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "K"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "time() - cert_analyzer_last_scrape_timestamp_seconds{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "L"
             }
           ],
           "transformations": [
@@ -297,6 +327,9 @@
                   "Time 7": true,
                   "Time 8": true,
                   "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true,
+                  "Time 12": true,
                   "__name__": true,
                   "instance": true,
                   "job": true,
@@ -312,12 +345,15 @@
                   "Value #A": 1,
                   "version": 2,
                   "Value #I": 3,
-                  "Value #B": 4,
-                  "build_version": 5,
-                  "runtime_version": 6,
-                  "Value #D": 7,
-                  "Value #E": 8,
-                  "Value #F": 9
+                  "Value #L": 4,
+                  "Value #B": 5,
+                  "build_version": 6,
+                  "runtime_version": 7,
+                  "Value #D": 8,
+                  "Value #E": 9,
+                  "Value #F": 10,
+                  "Value #J": 11,
+                  "Value #K": 12
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -329,7 +365,10 @@
                   "Value #E": "Policy Errors",
                   "Value #F": "Kafka Err/s",
                   "version": "Analyzer Version",
-                  "Value #I": "Scraping Interval"
+                  "Value #I": "Scraping Interval",
+                  "Value #J": "Kafka Connected",
+                  "Value #K": "Kafka Last Published",
+                  "Value #L": "Last Scraped"
                 }
               }
             }
@@ -594,6 +633,144 @@
                     "value": 1
                   }
                 ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Kafka Connected"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.displayMode",
+                    "value": "color-background"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "thresholds"
+                    }
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "Never / Disabled"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Kafka Last Published"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.displayMode",
+                    "value": "color-background"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 900
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "thresholds"
+                    }
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "Never / Disabled"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Last Scraped"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.displayMode",
+                    "value": "color-background"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 180
+                        },
+                        {
+                          "color": "red",
+                          "value": 600
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "thresholds"
+                    }
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "No Data"
+                  }
+                ]
               }
             ]
           }
@@ -675,7 +852,10 @@
                   "retry_queue_max_size": 17,
                   "alert_threshold_days": 18,
                   "Value #B": 19,
-                  "scan_paths": 20
+                  "scan_paths": 20,
+                  "kafka_enabled": 21,
+                  "kafka_bootstrap_servers": 22,
+                  "prometheus_port": 23
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -698,7 +878,10 @@
                   "scan_paths": "Scan Paths",
                   "Value #B": "Scan Interval (s)",
                   "new_cert_events_per_second": "New Cert Rate Limit (events/s)",
-                  "retry_queue_max_size": "Retry Queue Max Size"
+                  "retry_queue_max_size": "Retry Queue Max Size",
+                  "kafka_enabled": "Kafka Enabled",
+                  "kafka_bootstrap_servers": "Kafka Brokers",
+                  "prometheus_port": "Prometheus Port"
                 }
               }
             }

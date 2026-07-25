@@ -254,7 +254,7 @@ def _run_once(args: argparse.Namespace, iteration: Optional[int] = None) -> None
               f'"soak-bundle-{run_id}|soak-canary-{run_id}"')
         print()
         print('curl -s http://cert-expiry-monitor-certsight.apps-<cluster-domain>/metrics '
-              f'| grep -c \'CN="soak-bundle-{run_id}\'')
+              f'| grep -c \'common_name="soak-bundle-{run_id}\'')
         print(f'# Expect {args.count} once the background parse finishes')
         print()
 
