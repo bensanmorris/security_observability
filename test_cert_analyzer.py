@@ -4350,10 +4350,26 @@ class TestScrapeIntervalMetric:
             if isinstance(c, _ScrapeIntervalCollector)
         )
 
-    def test_first_collect_yields_nothing(self, analyzer):
-        """No prior scrape to diff against, so nothing is reported yet."""
+    def _by_name(self, metrics, name):
+        return next(m for m in metrics if m.name == name)
+
+    def test_first_collect_yields_no_interval(self, analyzer):
+        """No prior scrape to diff against, so the interval metric is absent."""
         collector = self._collector(analyzer)
-        assert list(collector.collect()) == []
+        metrics = list(collector.collect())
+        assert all(m.name != 'cert_analyzer_scrape_interval_seconds' for m in metrics)
+
+    def test_first_collect_yields_last_scrape_timestamp(self, analyzer):
+        """Unlike the interval, last-scrape timestamp has nothing to diff
+        against, so it's reported starting on the very first scrape."""
+        collector = self._collector(analyzer)
+        before = time.time()
+        metrics = list(collector.collect())
+        after = time.time()
+
+        sample = self._by_name(metrics, 'cert_analyzer_last_scrape_timestamp_seconds').samples[0]
+        assert before <= sample.value <= after
+        assert sample.labels['node_name'] == analyzer.metrics._node_name
 
     def test_second_collect_reports_elapsed_interval(self, analyzer):
         """The second collect() reports the wall-clock gap since the first."""
@@ -4362,10 +4378,21 @@ class TestScrapeIntervalMetric:
         time.sleep(0.05)
         metrics = list(collector.collect())
 
-        assert len(metrics) == 1
-        sample = metrics[0].samples[0]
+        sample = self._by_name(metrics, 'cert_analyzer_scrape_interval_seconds').samples[0]
         assert sample.value >= 0.05
         assert sample.labels['node_name'] == analyzer.metrics._node_name
+
+    def test_second_collect_advances_last_scrape_timestamp(self, analyzer):
+        """last_scrape_timestamp reflects wall-clock time, not the monotonic
+        clock the interval calculation is based on."""
+        collector = self._collector(analyzer)
+        first = list(collector.collect())
+        first_ts = self._by_name(first, 'cert_analyzer_last_scrape_timestamp_seconds').samples[0].value
+        time.sleep(0.05)
+        second = list(collector.collect())
+        second_ts = self._by_name(second, 'cert_analyzer_last_scrape_timestamp_seconds').samples[0].value
+
+        assert second_ts > first_ts
 
     def test_registration_does_not_prime_last_scrape(self, analyzer):
         """

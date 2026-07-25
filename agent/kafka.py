@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 
 from .constants import _NODE_NAME
 from .models import CertificateInfo
@@ -28,6 +28,18 @@ except ImportError:
 _kafka_delivery_errors = Counter(
     'kafka_delivery_errors_total',
     'Total number of Kafka message delivery failures (async, broker-side)',
+    ['node_name'],
+)
+
+_kafka_connected_at_timestamp = Gauge(
+    'kafka_connected_at_timestamp_seconds',
+    'Unix timestamp of the last successful Kafka producer connection',
+    ['node_name'],
+)
+
+_kafka_last_published_timestamp = Gauge(
+    'kafka_last_published_timestamp_seconds',
+    'Unix timestamp of the last message successfully acked by the broker',
     ['node_name'],
 )
 
@@ -121,6 +133,7 @@ class KafkaPublisher:
         sasl_username: str = '',
         sasl_password: str = '',  # nosec B107 - empty-string "not set" placeholder, not a credential
     ):
+        self.bootstrap_servers = bootstrap_servers
         self._topic = topic
         # Empty string means certificate_accessed publishing is disabled --
         # see access_enabled below. One producer serves both topics; there's
@@ -229,6 +242,7 @@ class KafkaPublisher:
                 f"Kafka producer connected — "
                 f"brokers: {label}, topics: {label_topic}"
             )
+            _kafka_connected_at_timestamp.labels(node_name=_NODE_NAME).set(time.time())
             with self._lock:
                 self._producer = producer
             return True
@@ -417,17 +431,25 @@ class KafkaPublisher:
         # this thread is blocked waiting on the Sender thread — see class
         # docstring.
         try:
-            producer.send(
+            future = producer.send(
                 topic,
                 key=key,
                 value=message,
-            ).add_errback(lambda exc, _producer=producer: self._on_error(_producer, exc))
+            )
+            future.add_callback(self._on_success)
+            future.add_errback(lambda exc, _producer=producer: self._on_error(_producer, exc))
         except Exception as e:
             logger.warning(f"Kafka publish failed for {log_label}: {e}")
             # Nullify the producer so the next publish attempt triggers reconnect
             with self._lock:
                 if self._producer is producer:
                     self._producer = None
+
+    def _on_success(self, _record_metadata) -> None:
+        # kafka-python invokes this from its own I/O thread, same as _on_error --
+        # it only ever sets a Gauge, which is thread-safe on its own, so no
+        # locking is needed here.
+        _kafka_last_published_timestamp.labels(node_name=_NODE_NAME).set(time.time())
 
     def _on_error(self, producer, exc: Exception) -> None:
         # kafka-python invokes errbacks from its own internal I/O thread, so this

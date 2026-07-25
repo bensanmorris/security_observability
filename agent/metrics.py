@@ -52,6 +52,20 @@ class _ScrapeIntervalCollector:
             yield metric
         self._last_scrape = now
 
+        # Separate from the interval above: wall-clock (time.time(), not
+        # time.monotonic()) so a dashboard can compute "how long ago" via
+        # time() - this, the same pattern used for the Kafka connected/
+        # published timestamps. Yielded on every scrape, including the first,
+        # unlike the interval metric above which has nothing to diff against
+        # yet on that one.
+        last_scrape_metric = GaugeMetricFamily(
+            'cert_analyzer_last_scrape_timestamp_seconds',
+            'Unix timestamp of this scrape of /metrics',
+            labels=['node_name'],
+        )
+        last_scrape_metric.add_metric([self._node_name], time.time())
+        yield last_scrape_metric
+
 
 class _ScrapeThrottleMiddleware:
     """

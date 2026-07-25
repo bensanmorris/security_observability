@@ -328,7 +328,8 @@ def main():
                                    new_cert_events_per_second=new_cert_events_per_second,
                                    retry_queue_max_size=retry_queue_max_size,
                                    scan_paths=scan_paths,
-                                   scan_interval_seconds=scan_interval)
+                                   scan_interval_seconds=scan_interval,
+                                   metrics_port=metrics_port)
 
     health = HealthServer(
         analyzer=analyzer,

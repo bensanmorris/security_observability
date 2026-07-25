@@ -149,7 +149,8 @@ class CertificateAnalyzer:
                  new_cert_events_per_second: float = 50.0,
                  retry_queue_max_size: int = 2000,
                  scan_paths: Optional[list] = None,
-                 scan_interval_seconds: int = 3600):
+                 scan_interval_seconds: int = 3600,
+                 metrics_port: int = 9090):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -236,6 +237,9 @@ class CertificateAnalyzer:
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
             'scan_paths':                          ','.join(self._scan_paths),
+            'kafka_enabled':                       str(kafka_publisher is not None).lower(),
+            'kafka_bootstrap_servers':              kafka_publisher.bootstrap_servers if kafka_publisher is not None else '',
+            'prometheus_port':                     str(metrics_port),
         })
         self.metrics.scan_interval_seconds.labels(node_name=_NODE_NAME).set(scan_interval_seconds)
         # cert_path -> set of known_certs keys for that path. Lets process_event's
