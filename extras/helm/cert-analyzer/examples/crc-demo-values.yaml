@@ -1,6 +1,6 @@
 # Known-working values for the local CRC (OpenShift Local) demo/pilot cluster at
 # api.crc.testing -- this is exactly what release "cert-analyzer" in the certsight namespace
-# is running as of 2026-07-24, arrived at by adopting the pre-existing hand-applied manifests
+# is running as of 2026-07-28, arrived at by adopting the pre-existing hand-applied manifests
 # under Helm management (see README.md's "Adopting pre-existing (non-Helm) resources") and
 # verifying every resource's actual content, not just release status.
 #
@@ -33,7 +33,7 @@
 image:
   registry: image-registry.openshift-image-registry.svc:5000
   repository: certsight/cert-analyzer
-  tag: dev-1784827058
+  tag: dev-1784897419
   pullPolicy: IfNotPresent
 
 kafka:
@@ -60,3 +60,20 @@ demo:
     # Service, which is enabled below.
   prometheus:
     enabled: true
+
+# Disabled for this pilot on 2026-07-28: py-spy profiling (local bare-metal RPM install vs
+# this CRC pod, same 60s/100Hz window) showed CRC running ~4x hotter in active-CPU samples
+# (122 -> 31 after this change), traced to real security_socket_bind/tcp_connect event
+# throughput being processed by the analyzer, not to metrics cardinality or config drift
+# (local's /metrics is actually larger). Turning these off removes the two TracingPolicy
+# CRs entirely (Tetragon stops generating the events) and tells the app not to expect them,
+# so nothing is left half-wired. Re-enable by flipping all four back to true. Known side
+# effect while disabled: Grafana panels backed by tls_socket_bind_events_total /
+# tls_tcp_connect_events_total will read flat, not broken.
+policies:
+  tcpConnectTls:
+    enabled: false
+  tlsServiceTracking:
+    enabled: false
+bindProbeEnabled: false
+connectProbeEnabled: false
