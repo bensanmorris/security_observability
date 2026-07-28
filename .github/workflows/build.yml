@@ -96,7 +96,8 @@ jobs:
       id: version
       run: |
         if [[ "${{ github.ref_type }}" == "tag" ]]; then
-          echo "value=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          VERSION="${{ github.ref_name }}"
+          echo "value=${VERSION#v}" >> $GITHUB_OUTPUT
         else
           echo "value=${{ github.sha }}" >> $GITHUB_OUTPUT
         fi
