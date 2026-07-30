@@ -715,6 +715,15 @@ of forwarding:
 The same two-layer pattern is used for the API server (port 6443, via the cluster's
 built-in `kubernetes` Service in the `default` namespace) and the test server (port 8090).
 
+**Why not just an OpenShift Route?** The Helm chart's `route.enabled`
+([`extras/helm/cert-analyzer/README.md`](helm/cert-analyzer/README.md#external-metrics-access))
+is the right answer on a real cluster, where the router's wildcard subdomain resolves to a
+real, externally-reachable IP. It doesn't help on CRC: `crc setup` points `*.apps-crc.testing`
+at `127.0.0.1`, same as everything else on the VM, so a Route's hostname is no more reachable
+from another host than the bare Service was. A Route also can't stand in for the API-server or
+test-server forwarding below either way — Routes only proxy HTTP(S) on 80/443, not arbitrary
+raw TCP ports like 6443/8090.
+
 `oc port-forward` is not persistent — it exits if the API server restarts or the host is
 suspended. A systemd user service wrapping a restart-loop daemon
 ([`extras/openshift/scripts/certsight-port-forwarding-daemon.sh`](openshift/scripts/certsight-port-forwarding-daemon.sh))
