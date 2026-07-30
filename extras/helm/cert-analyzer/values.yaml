@@ -154,6 +154,23 @@ monitoring:
 policies:
   certificateFileAccess:
     enabled: true
+    # Adds a matchBinaries NotIn exclusion for the core cluster-operator binaries listed
+    # below, so their own cert/CA-bundle reads never leave the kernel -- they're
+    # control-plane components, not application workloads this tool exists to monitor. Off
+    # by default; CRC pilot enables it via examples/crc-demo-values.yaml. Mirrors the
+    # standalone tetragon-policies/openshift/certificate-file-access-crc.yaml used on
+    # non-Helm clusters -- keep operatorBinaries below in sync with that file's list.
+    excludeOperatorBinaries: false
+    operatorBinaries:
+      - "/usr/bin/kubelet"
+      - "/usr/bin/etcd"
+      - "/usr/bin/cluster-etcd-operator"
+      - "/usr/bin/kube-apiserver"
+      - "/usr/bin/cluster-image-registry-operator"
+      - "/usr/bin/oauth-apiserver"
+      - "/usr/bin/cluster-samples-operator-watch"
+      - "/usr/bin/cluster-network-operator"
+      - "/usr/bin/cluster-kube-storage-version-migrator-operator"
   tcpConnectTls:
     enabled: true
   tlsServiceTracking:

@@ -353,6 +353,27 @@ the node. Filtering at the kernel boundary means these events never reach cert-a
 at all. Not applicable to the bare-metal RPM policy, since `/var/lib/kubelet/pods/`
 doesn't exist on a non-Kubernetes host.
 
+**CRC pilot variant**: on CRC specifically, apply
+[`tetragon-policies/openshift/certificate-file-access-crc.yaml`](../tetragon-policies/openshift/certificate-file-access-crc.yaml)
+*instead of* the plain OpenShift variant above:
+
+```bash
+kubectl apply -f tetragon-policies/openshift/certificate-file-access-crc.yaml
+```
+
+It's a superset of the OpenShift variant — same kubelet/service-account-projection
+exclusions, plus a `matchBinaries` `NotIn` filter excluding the core cluster-operator
+binaries (`kubelet`, `etcd`, `cluster-etcd-operator`, `kube-apiserver`,
+`cluster-image-registry-operator`, `oauth-apiserver`, `cluster-samples-operator-watch`,
+`cluster-network-operator`, `cluster-kube-storage-version-migrator-operator`) so their own
+cert/CA-bundle reads never leave the kernel — they're control-plane components, not app
+workloads this tool exists to monitor. Both variants use the same `metadata.name`
+(`certificate-file-access`), so applying one is a clean CR replace of the other, not an
+additive second policy — never apply both, since two overlapping `fd_install` kprobes would
+double-count every matching event. Not swept up by `tetragon-policies/apply-policies.sh`
+(the bare-metal RPM host loader only globs `tetragon-policies/*.yaml` and
+`experimental/*.yaml`) — like the plain OpenShift variant, this one is applied manually only.
+
 **Known gap on containerized nodes — two distinct failure classes.** The `java-fips-nss-cert` and
 `java-non-fips-cert` experimental uprobe policies still fail to load on the OpenShift/CRC
 Tetragon DaemonSet with `adding tracing policy failed: open <path>: no such file or directory`.

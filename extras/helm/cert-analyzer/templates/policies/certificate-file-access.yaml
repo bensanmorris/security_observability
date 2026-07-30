@@ -53,6 +53,20 @@ spec:
         - "/var/lib/kubelet/pods/"
         - "/run/secrets/kubernetes.io/serviceaccount/"
         - "/var/run/secrets/kubernetes.io/serviceaccount/"
+      {{- if .Values.policies.certificateFileAccess.excludeOperatorBinaries }}
+      # CRC-pilot addition (see values.yaml): excludes core cluster-operator binaries so
+      # their own cert/CA-bundle reads never leave the kernel -- they're control-plane
+      # components, not application workloads this tool exists to monitor. Off by default;
+      # enabled via examples/crc-demo-values.yaml. Same effect as the standalone
+      # tetragon-policies/openshift/certificate-file-access-crc.yaml for non-Helm clusters --
+      # keep the binary list in values.yaml's operatorBinaries in sync with that file.
+      matchBinaries:
+      - operator: "NotIn"
+        values:
+        {{- range .Values.policies.certificateFileAccess.operatorBinaries }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
       matchActions:
       - action: Post
 {{- end }}
