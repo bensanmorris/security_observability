@@ -75,11 +75,26 @@ policies:
     enabled: false
   tlsServiceTracking:
     enabled: false
-  # Excludes core cluster-operator binaries (kubelet, etcd, kube-apiserver, etc. -- see
-  # values.yaml's operatorBinaries for the full list) from certificate-file-access so their
-  # own cert/CA-bundle reads don't add noise -- they're control-plane components, not
-  # application workloads this tool exists to monitor.
+  # Excludes core cluster-operator binaries from certificate-file-access so their own
+  # cert/CA-bundle reads don't add noise -- they're control-plane components, not
+  # application workloads this tool exists to monitor. operatorBinaries is spelled out here
+  # (not left to values.yaml's default) because `helm upgrade --reuse-values -f` merges this
+  # file against the *previous release's* stored config, not the chart's current defaults --
+  # a nested list that's only in values.yaml and was never part of any prior release's config
+  # gets silently dropped (renders as an empty matchBinaries values: array, i.e. excludes
+  # nothing). Keep this in sync with values.yaml's operatorBinaries and
+  # tetragon-policies/openshift/certificate-file-access-crc.yaml.
   certificateFileAccess:
     excludeOperatorBinaries: true
+    operatorBinaries:
+      - "/usr/bin/kubelet"
+      - "/usr/bin/etcd"
+      - "/usr/bin/cluster-etcd-operator"
+      - "/usr/bin/kube-apiserver"
+      - "/usr/bin/cluster-image-registry-operator"
+      - "/usr/bin/oauth-apiserver"
+      - "/usr/bin/cluster-samples-operator-watch"
+      - "/usr/bin/cluster-network-operator"
+      - "/usr/bin/cluster-kube-storage-version-migrator-operator"
 bindProbeEnabled: false
 connectProbeEnabled: false
