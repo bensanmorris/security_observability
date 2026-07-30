@@ -1,0 +1,68 @@
+# CRC-specific superset of tetragon-policies/openshift/certificate-file-access.yaml -- apply
+# this one INSTEAD OF that file on CRC, not in addition to it. Both use the same
+# metadata.name ("certificate-file-access") on purpose: applying either one is a
+# server-side-apply replace of the same TracingPolicy CR, so `kubectl apply -f` this file
+# cleanly swaps out the generic OpenShift variant rather than installing a second kprobe on
+# fd_install that would double-fire (and double-count) every matching event alongside it.
+#
+# Not swept up by tetragon-policies/apply-policies.sh -- that script only applies
+# tetragon-policies/*.yaml and experimental/*.yaml (the bare-metal RPM host loader). Policies
+# under openshift/ are only ever applied manually via `kubectl apply -f`, matching how the
+# plain openshift/certificate-file-access.yaml variant is already deployed (see
+# extras/OPENSHIFT-DEPLOYMENT-README.md section 4). This keeps the CRC operator-binary
+# exclusion below from ever landing on a bare-metal RHEL host by accident, where those
+# operator binaries don't exist anyway.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: certificate-file-access
+spec:
+  kprobes:
+  - call: "fd_install"
+    syscall: false
+    return: false
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "file"
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: "Postfix"
+        values:
+        - ".crt"
+        - ".pem"
+        - ".cert"
+        - ".cer"
+        - ".jks"
+        - ".keystore"
+        - ".truststore"
+        - ".p12"
+        - ".pfx"
+      # Same kubelet bind-mount / projected service-account volume dedup as
+      # tetragon-policies/openshift/certificate-file-access.yaml -- see that
+      # file for the full rationale (CRC is single-node OpenShift under the hood).
+      - index: 1
+        operator: "NotPrefix"
+        values:
+        - "/var/lib/kubelet/pods/"
+        - "/run/secrets/kubernetes.io/serviceaccount/"
+        - "/var/run/secrets/kubernetes.io/serviceaccount/"
+      # CRC-specific: exclude the core cluster-operator binaries whose own
+      # cert/CA-bundle reads add load and noise without being certs this tool
+      # exists to track (they're control-plane components, not app workloads).
+      matchBinaries:
+      - operator: "NotIn"
+        values:
+        - "/usr/bin/kubelet"
+        - "/usr/bin/etcd"
+        - "/usr/bin/cluster-etcd-operator"
+        - "/usr/bin/kube-apiserver"
+        - "/usr/bin/cluster-image-registry-operator"
+        - "/usr/bin/oauth-apiserver"
+        - "/usr/bin/cluster-samples-operator-watch"
+        - "/usr/bin/cluster-network-operator"
+        - "/usr/bin/cluster-kube-storage-version-migrator-operator"
+      matchActions:
+      - action: Post
