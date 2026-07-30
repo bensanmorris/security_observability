@@ -699,3 +699,77 @@ a host reboot without re-running every step above by hand, use the menu-driven
 [`extras/openshift/openshift-utils.sh`](openshift/openshift-utils.sh) — it currently offers
 "start the soak demo from a reboot", "rebuild/redeploy cert-analyzer", and "build/deploy the
 interactive test-console Pod" (§6 above), and is the home for future OpenShift utility scripts.
+
+---
+
+## External metrics access via persistent port-forwarding daemon
+
+When Prometheus and Grafana run outside the CRC VM and need to scrape `/metrics` at an
+externally reachable address, CRC's default `127.0.0.1`-only binding requires two layers
+of forwarding:
+
+1. `oc port-forward` — bridges the in-cluster `cert-expiry-monitor` Service to
+   `localhost:9090` on the CRC host.
+2. `socat` — binds the host's external IP and forwards to `localhost:9090`.
+
+The same two-layer pattern is used for the API server (port 6443, via the cluster's
+built-in `kubernetes` Service in the `default` namespace) and the test server (port 8090).
+
+**Why not just an OpenShift Route?** The Helm chart's `route.enabled`
+([`extras/helm/cert-analyzer/README.md`](helm/cert-analyzer/README.md#external-metrics-access))
+is the right answer on a real cluster, where the router's wildcard subdomain resolves to a
+real, externally-reachable IP. It doesn't help on CRC: `crc setup` points `*.apps-crc.testing`
+at `127.0.0.1`, same as everything else on the VM, so a Route's hostname is no more reachable
+from another host than the bare Service was. A Route also can't stand in for the API-server or
+test-server forwarding below either way — Routes only proxy HTTP(S) on 80/443, not arbitrary
+raw TCP ports like 6443/8090.
+
+`oc port-forward` is not persistent — it exits if the API server restarts or the host is
+suspended. A systemd user service wrapping a restart-loop daemon
+([`extras/openshift/scripts/certsight-port-forwarding-daemon.sh`](openshift/scripts/certsight-port-forwarding-daemon.sh))
+keeps all forwarders running automatically.
+
+### Install (one-time)
+
+```bash
+bash extras/openshift/scripts/install-certsight-port-forwarding-service.sh
+```
+
+This copies `certsight-port-forwarding-daemon.sh` and `certsight-port-forwarding.service` into
+`~/.config/systemd/user/`, enables the service, and starts it. The daemon waits for the
+cluster to be reachable before starting forwarders, and restarts each forwarder individually
+on failure within 5 seconds.
+
+`HOST_IP` is auto-detected from the default route. All ports default to the chart's own defaults
+(metrics: 9090, test server: 8090, API: 6443). Override any of these via flags or the systemd
+service unit's `ExecStart` line:
+
+```
+ExecStart=/bin/bash %h/.config/systemd/user/certsight-port-forwarding-daemon.sh \
+  --host-ip <ip> \
+  --metrics-pod-port 9090 \
+  --metrics-host-port 9091 \
+  --test-server-port 8090
+```
+
+Run `certsight-port-forwarding-daemon.sh --help` for the full option list.
+
+### After `crc start` / reboot
+
+The service starts automatically on login (`WantedBy=default.target`). No manual action
+needed — the daemon's `wait_for_cluster` loop handles the delay between the VM coming up
+and the API server being ready.
+
+### Manual control
+
+```bash
+systemctl --user status certsight-port-forwarding.service
+systemctl --user restart certsight-port-forwarding.service
+journalctl --user -u certsight-port-forwarding.service -n 50
+```
+
+### Verify
+
+```bash
+curl http://<host-ip>:9090/metrics | head -5
+```

@@ -157,6 +157,18 @@ host-level Prometheus feeding a Grafana instance that isn't part of this chart. 
 left unset so OpenShift assigns its standard `<name>-<namespace>.<router subdomain>` default
 rather than hardcoding one cluster's subdomain; set `route.host` to override.
 
+**Not sufficient on CRC.** The Route only helps if its hostname actually resolves to something
+reachable from outside the cluster -- true on a real OpenShift cluster, where the router's
+wildcard subdomain has a real external IP/LoadBalancer behind it. On CRC, `*.apps-crc.testing`
+(and `api.crc.testing`) are configured by `crc setup` to resolve to `127.0.0.1`, same as
+everything else on the VM -- so a Route's hostname is exactly as unreachable from another host
+as the raw Service was. For CRC specifically (or any cluster whose router subdomain isn't
+externally resolvable), use the persistent port-forwarding daemon instead -- see "External
+metrics access via persistent port-forwarding daemon" in
+[`OPENSHIFT-DEPLOYMENT-README.md`](../../OPENSHIFT-DEPLOYMENT-README.md#external-metrics-access-via-persistent-port-forwarding-daemon).
+It also covers the API server and test-console ports, neither of which a Route can expose
+anyway (Routes only proxy HTTP(S) on 80/443, not arbitrary raw TCP ports like 6443/8090).
+
 ## Upgrade
 
 ```bash
