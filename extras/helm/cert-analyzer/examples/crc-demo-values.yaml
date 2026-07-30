@@ -75,5 +75,11 @@ policies:
     enabled: false
   tlsServiceTracking:
     enabled: false
+  # Excludes core cluster-operator binaries (kubelet, etcd, kube-apiserver, etc. -- see
+  # values.yaml's operatorBinaries for the full list) from certificate-file-access so their
+  # own cert/CA-bundle reads don't add noise -- they're control-plane components, not
+  # application workloads this tool exists to monitor.
+  certificateFileAccess:
+    excludeOperatorBinaries: true
 bindProbeEnabled: false
 connectProbeEnabled: false
