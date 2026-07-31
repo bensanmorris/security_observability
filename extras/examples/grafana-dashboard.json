@@ -2924,8 +2924,8 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "rate(tls_certificate_events_total[5m])",
-              "legendFormat": "{{event_type}} / {{status}}",
+              "expr": "rate(tls_certificate_events_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{event_type}} / {{status}} @ {{node_name}}",
               "refId": "A"
             }
           ],
@@ -2976,8 +2976,8 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "rate(tls_certificate_analysis_errors_total[5m])",
-              "legendFormat": "{{error_type}}",
+              "expr": "rate(tls_certificate_analysis_errors_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{error_type}} @ {{node_name}}",
               "refId": "A"
             }
           ],
@@ -3845,6 +3845,61 @@
                 "align": "auto",
                 "displayMode": "auto",
                 "filterable": true
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "id": 52,
+          "title": "TLS Probe Outcome Rate",
+          "description": "Rate of TLS port probe attempts triggered by bind/connect events, by outcome and node.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 137
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(tls_port_probes_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{status}} @ {{node_name}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
               }
             },
             "overrides": []

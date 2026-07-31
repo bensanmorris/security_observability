@@ -677,9 +677,7 @@ class TestLargeFileBackgroundProcessing:
 
         analyzer.metrics.update_certificate_metrics = flaky_update
 
-        errors_before = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='finish_error'
-        )._value.get()
+        errors_before = analyzer.metrics.cert_analysis_errors.labels(error_type='finish_error', node_name=analyzer.metrics._node_name)._value.get()
 
         analyzer.process_event(self._make_event(bundle_path))
 
@@ -687,9 +685,7 @@ class TestLargeFileBackgroundProcessing:
         # certs 0,1,3,4 must have landed in the cache; only cert 2 was lost.
         assert len(matching) == 4
 
-        errors_after = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='finish_error'
-        )._value.get()
+        errors_after = analyzer.metrics.cert_analysis_errors.labels(error_type='finish_error', node_name=analyzer.metrics._node_name)._value.get()
         assert errors_after == errors_before + 1
 
     def test_large_file_worker_exception_is_logged_and_counted(self, analyzer, temp_dir, caplog):
@@ -705,17 +701,13 @@ class TestLargeFileBackgroundProcessing:
 
         analyzer.analyze_certificate = boom
 
-        errors_before = analyzer.metrics.cert_events_total.labels(
-            event_type='processing', status='error'
-        )._value.get()
+        errors_before = analyzer.metrics.cert_events_total.labels(event_type='processing', status='error', node_name=analyzer.metrics._node_name)._value.get()
 
         with caplog.at_level(logging.ERROR, logger="agent.analyzer"):
             analyzer.process_event(self._make_event(bundle_path))
             self._wait_for_background_processing(analyzer, bundle_path)
 
-        errors_after = analyzer.metrics.cert_events_total.labels(
-            event_type='processing', status='error'
-        )._value.get()
+        errors_after = analyzer.metrics.cert_events_total.labels(event_type='processing', status='error', node_name=analyzer.metrics._node_name)._value.get()
         assert errors_after == errors_before + 1
         assert any("Error processing large certificate file" in r.message
                    for r in caplog.records)
@@ -1228,9 +1220,9 @@ class TestNewCertRateLimiting:
         path = os.path.join(temp_dir, "rl-metric.pem")
         TestCertificateGeneration.save_certificate_pem(cert, path)
 
-        before = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited')._value.get()
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited', node_name=analyzer.metrics._node_name)._value.get()
         self._analyze_new(analyzer, path)
-        after = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited')._value.get()
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='rate_limited', node_name=analyzer.metrics._node_name)._value.get()
         assert after == before + 1
 
     def test_zero_rate_disables_limiter_and_never_queues(self, analyzer, temp_dir):
@@ -1321,7 +1313,7 @@ class TestRateLimitRetryQueue:
         analyzer._new_cert_rate_limiter = bucket
         analyzer._retry_queue_max_size = 1
 
-        before = analyzer.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped')._value.get()
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped', node_name=analyzer.metrics._node_name)._value.get()
 
         for i in range(3):
             cert, _ = TestCertificateGeneration.generate_certificate(f"drop{i}.example.com", 365)
@@ -1329,7 +1321,7 @@ class TestRateLimitRetryQueue:
             TestCertificateGeneration.save_certificate_pem(cert, path)
             self._analyze_new(analyzer, path)
 
-        after = analyzer.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped')._value.get()
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped', node_name=analyzer.metrics._node_name)._value.get()
         assert after == before + 2  # first entry stays, next two each evict one
 
     def test_queue_depth_metric_tracks_size(self, analyzer, temp_dir):
@@ -1560,13 +1552,9 @@ class TestPKCS12Parsing:
 
         # Second call — should return immediately without attempting passwords
         # We verify by checking the error counter does not increment again
-        before = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='pkcs12_password_failed'
-        )._value.get()
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed', node_name=analyzer.metrics._node_name)._value.get()
         analyzer.parse_pkcs12_certificates(p12_path)
-        after = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='pkcs12_password_failed'
-        )._value.get()
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed', node_name=analyzer.metrics._node_name)._value.get()
         assert after == before  # no additional error increment on second call
 
     def test_parse_p12_password_list_does_not_include_changeme_or_password(
@@ -2326,13 +2314,9 @@ class TestJKSParsing:
         assert jks_path in analyzer.password_failed_paths
 
         # Second call — error counter must not increment again
-        before = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='jks_password_failed'
-        )._value.get()
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='jks_password_failed', node_name=analyzer.metrics._node_name)._value.get()
         analyzer.parse_jks_certificates(jks_path)
-        after = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='jks_password_failed'
-        )._value.get()
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='jks_password_failed', node_name=analyzer.metrics._node_name)._value.get()
         assert after == before
 
     def test_parse_jks_password_list_does_not_include_changeme_or_password(
@@ -3099,15 +3083,11 @@ class TestCertProcessInfoFanoutCap:
         analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
         cert_info = cert_infos[0]
 
-        before = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='process_fanout_cap_reached'
-        )._value.get()
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached', node_name=analyzer.metrics._node_name)._value.get()
 
         analyzer._record_cert_process_access(cert_info, "/usr/bin/other", "")
 
-        after = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='process_fanout_cap_reached'
-        )._value.get()
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached', node_name=analyzer.metrics._node_name)._value.get()
         assert after == before + 1
 
 
@@ -5334,13 +5314,9 @@ class TestCertificateParsingExceptions:
     def test_extract_info_increments_error_metric_on_failure(self, analyzer):
         """extract_certificate_info increments extraction_error metric when it returns None."""
         cert = _BrokenCert(break_subject=True)
-        before = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='extraction_error'
-        )._value.get()
+        before = analyzer.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=analyzer.metrics._node_name)._value.get()
         analyzer.extract_certificate_info(cert, "/tmp/bad.pem", "test", 1)
-        after = analyzer.metrics.cert_analysis_errors.labels(
-            error_type='extraction_error'
-        )._value.get()
+        after = analyzer.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=analyzer.metrics._node_name)._value.get()
         assert after == before + 1
 
     def test_analyze_certificate_skips_broken_cert_in_bundle(self, analyzer, temp_dir):
@@ -8125,7 +8101,7 @@ class TestPortProbe:
 
         synthetic_path = f'tls-bind-probe://127.0.0.1:{port}'
         assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
-        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success')._value.get() == 1
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success', node_name=probe_analyzer.metrics._node_name)._value.get() == 1
 
     def test_probe_records_negotiated_protocol_and_cipher(self, probe_analyzer, temp_dir):
         """A successful probe records the negotiated TLS protocol/cipher on tls_certificate_negotiated_protocol."""
@@ -8156,12 +8132,12 @@ class TestPortProbe:
         finally:
             stop.set()
 
-        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='skipped')._value.get() == 1
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='skipped', node_name=probe_analyzer.metrics._node_name)._value.get() == 1
 
     def test_probe_fails_on_connection_refused(self, probe_analyzer):
         """Connection to a closed port increments the failed counter."""
         probe_analyzer._probe_tls_endpoint('127.0.0.1', 1, '/usr/sbin/nginx', 1234, '', None)
-        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed')._value.get() == 1
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed', node_name=probe_analyzer.metrics._node_name)._value.get() == 1
 
     def test_probe_fails_on_plain_tcp_port(self, probe_analyzer):
         """Connecting to a non-TLS port (no TLS handshake) increments the failed counter."""
@@ -8182,7 +8158,7 @@ class TestPortProbe:
             threading.Thread(target=_accept, daemon=True).start()
             probe_analyzer._probe_tls_endpoint('127.0.0.1', port, '/usr/sbin/nginx', 1234, '', None)
 
-        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed')._value.get() == 1
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed', node_name=probe_analyzer.metrics._node_name)._value.get() == 1
 
     def test_probe_publishes_to_kafka_on_success(self, probe_analyzer, temp_dir):
         """Discovered cert is forwarded to the Kafka publisher when configured."""
@@ -8398,7 +8374,7 @@ class TestPortProbe:
         connect_path = f'tls-connect-probe://127.0.0.1:{port}'
         assert any(k.startswith(bind_path + ':') for k in probe_analyzer.known_certs)
         assert any(k.startswith(connect_path + ':') for k in probe_analyzer.known_certs)
-        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success')._value.get() == 2
+        assert probe_analyzer.metrics.tls_port_probes_total.labels(status='success', node_name=probe_analyzer.metrics._node_name)._value.get() == 2
         assert mock_kafka.publish.call_count == 2
 
     def test_probe_in_flight_cleared_after_successful_probe(self, probe_analyzer, temp_dir):

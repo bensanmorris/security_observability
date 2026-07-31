@@ -263,13 +263,13 @@ class PrometheusMetrics:
         self.cert_events_total = Counter(
             'tls_certificate_events_total',
             'Total number of certificate events detected',
-            ['event_type', 'status']
+            ['event_type', 'status', 'node_name']
         )
 
         self.cert_analysis_errors = Counter(
             'tls_certificate_analysis_errors_total',
             'Total number of certificate analysis errors',
-            ['error_type']
+            ['error_type', 'node_name']
         )
 
         # Certificate status
@@ -452,7 +452,7 @@ class PrometheusMetrics:
         self.tls_port_probes_total = Counter(
             'tls_port_probes_total',
             'Total number of TLS port probe attempts triggered by bind or outbound connect events',
-            ['status'],  # success, failed, skipped
+            ['status', 'node_name'],  # status: success, failed, skipped
         )
 
         self.tls_tcp_connect_events_total = Counter(
