@@ -396,7 +396,7 @@ class CertificateAnalyzer:
                     "not tracking additional process %r",
                     self._max_processes_per_cert, cert_info.path, process,
                 )
-                self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached').inc()
+                self.metrics.cert_analysis_errors.labels(error_type='process_fanout_cap_reached', node_name=self.metrics._node_name).inc()
                 return False
             cert_info._seen_processes.add(key)
         self.metrics.record_cert_process_access(
@@ -435,7 +435,7 @@ class CertificateAnalyzer:
                 f"Skipping JKS file {cert_path}: pyjks not installed. "
                 "Add 'pyjks' to requirements.txt to enable JKS support."
             )
-            self.metrics.cert_analysis_errors.labels(error_type='jks_unavailable').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='jks_unavailable', node_name=self.metrics._node_name).inc()
             return []
 
         # Skip files that have already failed — avoids repeating crypto work on
@@ -473,7 +473,7 @@ class CertificateAnalyzer:
                 f"Could not open JKS {cert_path}: all passwords failed. "
                 "Set JKS_PASSWORD env var if the keystore uses a custom password."
             )
-            self.metrics.cert_analysis_errors.labels(error_type='jks_password_failed').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='jks_password_failed', node_name=self.metrics._node_name).inc()
             self.password_failed_paths.add(cert_path)
             self._update_cache_metrics()
             return []
@@ -535,11 +535,11 @@ class CertificateAnalyzer:
                 p12_data = f.read()
         except FileNotFoundError:
             logger.debug(f"PKCS12 file not found: {cert_path}")
-            self.metrics.cert_analysis_errors.labels(error_type='file_not_found').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='file_not_found', node_name=self.metrics._node_name).inc()
             return []
         except PermissionError:
             logger.debug(f"Permission denied reading PKCS12: {cert_path}")
-            self.metrics.cert_analysis_errors.labels(error_type='permission_denied').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='permission_denied', node_name=self.metrics._node_name).inc()
             return []
 
         p12 = None
@@ -560,7 +560,7 @@ class CertificateAnalyzer:
                 f"Could not open PKCS12 {cert_path}: all passwords failed. "
                 "Set PKCS12_PASSWORD env var if the file uses a custom password."
             )
-            self.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed', node_name=self.metrics._node_name).inc()
             self.password_failed_paths.add(cert_path)
             self._update_cache_metrics()
             return []
@@ -649,15 +649,15 @@ class CertificateAnalyzer:
 
         except FileNotFoundError:
             logger.debug(f"Certificate file not found: {cert_path}")
-            self.metrics.cert_analysis_errors.labels(error_type='file_not_found').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='file_not_found', node_name=self.metrics._node_name).inc()
             return []
         except PermissionError:
             logger.debug(f"Permission denied reading certificate: {cert_path}")
-            self.metrics.cert_analysis_errors.labels(error_type='permission_denied').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='permission_denied', node_name=self.metrics._node_name).inc()
             return []
         except Exception as e:
             logger.debug(f"Error reading certificate {cert_path}: {e}")
-            self.metrics.cert_analysis_errors.labels(error_type='read_error').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='read_error', node_name=self.metrics._node_name).inc()
             return []
 
     def extract_certificate_info(
@@ -681,21 +681,21 @@ class CertificateAnalyzer:
             subject = cert.subject.rfc4514_string()
         except Exception as e:
             logger.warning(f"Could not extract subject from cert {cert_index} in {cert_path}: {e}")
-            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=self.metrics._node_name).inc()
             return None
 
         try:
             issuer = cert.issuer.rfc4514_string()
         except Exception as e:
             logger.warning(f"Could not extract issuer from cert {cert_index} in {cert_path}: {e}")
-            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=self.metrics._node_name).inc()
             return None
 
         try:
             serial_number = str(cert.serial_number)
         except Exception as e:
             logger.warning(f"Could not extract serial number from cert {cert_index} in {cert_path}: {e}")
-            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=self.metrics._node_name).inc()
             return None
 
         # Use the UTC-aware property where available, fall back to the naive
@@ -711,7 +711,7 @@ class CertificateAnalyzer:
                 not_after = not_after.replace(tzinfo=None)
         except Exception as e:
             logger.warning(f"Could not extract validity dates from cert {cert_index} in {cert_path}: {e}")
-            self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=self.metrics._node_name).inc()
             return None
 
         try:
@@ -1004,7 +1004,7 @@ class CertificateAnalyzer:
         except Exception as e:
             logger.error(f"Unexpected error parsing certificates from {cert_path}: {e}",
                          exc_info=True)
-            self.metrics.cert_analysis_errors.labels(error_type='parse_error').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='parse_error', node_name=self.metrics._node_name).inc()
             return []
 
         if not certs:
@@ -1021,11 +1021,11 @@ class CertificateAnalyzer:
                     # the error metric — skip this cert and continue with others
                     continue
                 cert_infos.append(cert_info)
-                self.metrics.cert_events_total.labels(event_type='analysis', status='success').inc()
+                self.metrics.cert_events_total.labels(event_type='analysis', status='success', node_name=self.metrics._node_name).inc()
             except Exception as e:
                 logger.error(f"Error extracting certificate info from {cert_path} (cert {idx}): {e}")
-                self.metrics.cert_events_total.labels(event_type='analysis', status='failed').inc()
-                self.metrics.cert_analysis_errors.labels(error_type='extraction_error').inc()
+                self.metrics.cert_events_total.labels(event_type='analysis', status='failed', node_name=self.metrics._node_name).inc()
+                self.metrics.cert_analysis_errors.labels(error_type='extraction_error', node_name=self.metrics._node_name).inc()
 
         self.processed_paths.add(cert_path)
         self._update_cache_metrics()
@@ -1086,9 +1086,9 @@ class CertificateAnalyzer:
                     f"{cert_info.path}: {e}", exc_info=True
                 )
                 self.metrics.cert_events_total.labels(
-                    event_type='processing', status='error'
+                    event_type='processing', status='error', node_name=self.metrics._node_name
                 ).inc()
-                self.metrics.cert_analysis_errors.labels(error_type='finish_error').inc()
+                self.metrics.cert_analysis_errors.labels(error_type='finish_error', node_name=self.metrics._node_name).inc()
 
         if is_bundle:
             remaining = len(cert_infos) - metrics_cap
@@ -1165,7 +1165,7 @@ class CertificateAnalyzer:
             return cert_infos
 
         self._log_rate_limited_new_cert(cert_path)
-        self.metrics.cert_analysis_errors.labels(error_type='rate_limited').inc()
+        self.metrics.cert_analysis_errors.labels(error_type='rate_limited', node_name=self.metrics._node_name).inc()
         self._enqueue_rate_limited_retry(
             cert_path, process_name, pid, namespace,
             tetragon_pod, parent_process, parent_pid, node_name,
@@ -1198,7 +1198,7 @@ class CertificateAnalyzer:
             if len(self._retry_queue) >= self._retry_queue_max_size:
                 dropped = self._retry_queue.popleft()
                 self._retry_queue_paths.discard(dropped.cert_path)
-                self.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped').inc()
+                self.metrics.cert_analysis_errors.labels(error_type='retry_queue_dropped', node_name=self.metrics._node_name).inc()
                 logger.warning(
                     f"Rate-limit retry queue full ({self._retry_queue_max_size}) -- "
                     f"dropped oldest queued file {dropped.cert_path} to make room for {cert_path}"
@@ -1348,7 +1348,7 @@ class CertificateAnalyzer:
                     logger.error(f"Error processing large certificate file {cert_path}: {e}",
                                  exc_info=True)
                     self.metrics.cert_events_total.labels(
-                        event_type='processing', status='error'
+                        event_type='processing', status='error', node_name=self.metrics._node_name
                     ).inc()
             finally:
                 with self._new_path_lock:
@@ -1360,7 +1360,7 @@ class CertificateAnalyzer:
             # the file will be retried on its next qualifying event.
             with self._new_path_lock:
                 self._large_file_in_flight.discard(cert_path)
-            self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached').inc()
+            self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached', node_name=self.metrics._node_name).inc()
 
     def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
         """Populate all Tetragon Pod proto fields onto cert_info."""
@@ -2003,7 +2003,7 @@ class CertificateAnalyzer:
 
         if endpoint_key in self._probed_endpoints:
             logger.debug("TLS probe: already probed %s", synthetic_path)
-            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            self.metrics.tls_port_probes_total.labels(status='skipped', node_name=self.metrics._node_name).inc()
             return
 
         ctx = ssl.create_default_context()
@@ -2023,26 +2023,26 @@ class CertificateAnalyzer:
                 cipher_name = cipher[0] if cipher else None
         except Exception as e:
             logger.debug(f"TLS probe failed {host}:{port}: {e}")
-            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
         finally:
             if raw_sock is not None:
                 raw_sock.close()
 
         if not der_bytes:
-            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
 
         try:
             cert = x509.load_der_x509_certificate(der_bytes, default_backend())
         except Exception as e:
             logger.debug(f"TLS probe: DER parse failed for {host}:{port}: {e}")
-            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
 
         cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid)
         if cert_info is None:
-            self.metrics.tls_port_probes_total.labels(status='failed').inc()
+            self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
 
         if tetragon_pod is not None:
@@ -2061,7 +2061,7 @@ class CertificateAnalyzer:
         if self.kafka_publisher is not None:
             self.kafka_publisher.publish(cert_info)
 
-        self.metrics.tls_port_probes_total.labels(status='success').inc()
+        self.metrics.tls_port_probes_total.labels(status='success', node_name=self.metrics._node_name).inc()
         logger.info(
             f"TLS probe: discovered cert at {host}:{port} "
             f"CN={cert_info.common_name} process={process_name} "
@@ -2151,7 +2151,7 @@ class CertificateAnalyzer:
             # this endpoint will be retried on its next qualifying event.
             with self._probe_in_flight_lock:
                 self._probe_in_flight.discard(endpoint_key)
-            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            self.metrics.tls_port_probes_total.labels(status='skipped', node_name=self.metrics._node_name).inc()
             return
         logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
 
@@ -2223,7 +2223,7 @@ class CertificateAnalyzer:
             # this endpoint will be retried on its next qualifying event.
             with self._probe_in_flight_lock:
                 self._probe_in_flight.discard(endpoint_key)
-            self.metrics.tls_port_probes_total.labels(status='skipped').inc()
+            self.metrics.tls_port_probes_total.labels(status='skipped', node_name=self.metrics._node_name).inc()
             return
         logger.debug(
             f"Scheduled TLS outbound probe {daddr}:{dport} pid={pid} process={process_name}"
@@ -2667,7 +2667,7 @@ class CertificateAnalyzer:
                         except Exception as e:
                             logger.error(f"Error processing event: {e}", exc_info=True)
                             self.metrics.cert_events_total.labels(
-                                event_type='processing', status='error'
+                                event_type='processing', status='error', node_name=self.metrics._node_name
                             ).inc()
 
                     # Stream ended without error — Tetragon closed it cleanly
