@@ -3170,11 +3170,13 @@ class TestCacheHitReDetection:
             cert_path=disk_path, cert_index='0', serial='42',
             process='/usr/bin/cat', parent_process='', node_name='',
             pod_name='', namespace='', app_label='', container_name='', checksum='',
+            spki_hash='',
         )._value.get()
         firefox_val = gauge.labels(
             cert_path=disk_path, cert_index='0', serial='42',
             process='/usr/lib64/firefox/firefox', parent_process='', node_name='',
             pod_name='', namespace='', app_label='', container_name='', checksum='',
+            spki_hash='',
         )._value.get()
 
         assert cat_val == 1, "original discoverer's series must survive the re-detection"
@@ -3231,7 +3233,7 @@ class TestCacheHitReDetection:
             serial='42', common_name='', san_dns_names='', san_ip_addresses='',
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
-            checksum='', key_usage='', extended_key_usage='',
+            checksum='', spki_hash='', key_usage='', extended_key_usage='',
         )._value.get()
         assert before == 0.0
 
@@ -3242,7 +3244,7 @@ class TestCacheHitReDetection:
             serial='42', common_name='', san_dns_names='', san_ip_addresses='',
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
-            checksum='', key_usage='', extended_key_usage='',
+            checksum='', spki_hash='', key_usage='', extended_key_usage='',
         )._value.get()
         assert after > 0.0
 
@@ -3453,6 +3455,188 @@ class TestChecksum:
         # Must still return cert info — checksum failure is non-fatal
         assert len(cert_infos) == 1
         assert cert_infos[0].checksum == ""
+
+
+class TestSpkiHash:
+    """
+    Tests for SHA-256 SubjectPublicKeyInfo (SPKI) hash computation.
+
+    Unlike checksum (SHA-256 of the whole DER cert, disabled by default),
+    spki_hash is a hash of the public key alone and defaults to *enabled* --
+    it's the mechanism a downstream consumer uses to detect "key reuse"
+    across a renewal (same key, new serial/validity/checksum). See
+    analyzer.spki_hash_enabled, set from the config file or
+    SPKI_HASH_ENABLED env var in main().
+    """
+
+    def test_spki_hash_enabled_by_default(self, analyzer):
+        """spki_hash_enabled defaults to True on a new analyzer instance."""
+        assert analyzer.spki_hash_enabled is True
+
+    def test_spki_hash_populated_by_default(self, analyzer, temp_dir):
+        """spki_hash is a non-empty hex string without touching spki_hash_enabled."""
+        cert, _ = TestCertificateGeneration.generate_certificate("spki.example.com", 365)
+        path = os.path.join(temp_dir, "spki.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        assert cert_infos[0].spki_hash != ""
+        assert len(cert_infos[0].spki_hash) == 64  # SHA-256 hex digest is always 64 chars
+
+    def test_spki_hash_empty_when_disabled(self, analyzer, temp_dir):
+        """spki_hash field is empty string when spki_hash_enabled is explicitly False."""
+        analyzer.spki_hash_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("spki-off.example.com", 365)
+        path = os.path.join(temp_dir, "spki-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        assert cert_infos[0].spki_hash == ""
+
+    def test_spki_hash_is_valid_sha256_hex(self, analyzer, temp_dir):
+        """spki_hash contains only valid lowercase hexadecimal characters."""
+        cert, _ = TestCertificateGeneration.generate_certificate("spki-hex.example.com", 365)
+        path = os.path.join(temp_dir, "spki-hex.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        spki_hash = cert_infos[0].spki_hash
+        assert all(c in '0123456789abcdef' for c in spki_hash)
+
+    def test_spki_hash_matches_manual_computation(self, analyzer, temp_dir):
+        """spki_hash matches SHA-256 of the DER-encoded SubjectPublicKeyInfo."""
+        import hashlib
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        cert, _ = TestCertificateGeneration.generate_certificate("spki-manual.example.com", 365)
+        path = os.path.join(temp_dir, "spki-manual.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        certs = analyzer.parse_certificates(path)
+        spki_der = certs[0].public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        expected = hashlib.sha256(spki_der).hexdigest()
+
+        assert cert_infos[0].spki_hash == expected
+
+    def test_spki_hash_differs_for_different_keys(self, analyzer, temp_dir):
+        """Two certificates with independently generated keys produce different spki_hash."""
+        cert1, _ = TestCertificateGeneration.generate_certificate("spki-a.example.com", 365)
+        cert2, _ = TestCertificateGeneration.generate_certificate("spki-b.example.com", 365)
+        path1 = os.path.join(temp_dir, "spki-a.pem")
+        path2 = os.path.join(temp_dir, "spki-b.pem")
+        TestCertificateGeneration.save_certificate_pem(cert1, path1)
+        TestCertificateGeneration.save_certificate_pem(cert2, path2)
+
+        infos1 = analyzer.analyze_certificate(path1, "test", 1)
+        infos2 = analyzer.analyze_certificate(path2, "test", 1)
+
+        assert infos1[0].spki_hash != infos2[0].spki_hash
+
+    def test_spki_hash_same_for_renewed_cert_reusing_key(self, analyzer, temp_dir):
+        """
+        The core use case: a "renewed" certificate built from the *same* private
+        key as an earlier one (different serial number, different validity
+        window -- as a real renewal-in-place would look) produces an identical
+        spki_hash despite a different checksum. This is what lets a downstream
+        consumer flag "key reuse detected" by comparing spki_hash across
+        successive discoveries of the same certificate identity.
+        """
+        private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048, backend=default_backend()
+        )
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "renewed.example.com"),
+        ])
+
+        def _build(not_before_days_ago, not_after_days_ahead):
+            return x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(
+                private_key.public_key()
+            ).serial_number(
+                x509.random_serial_number()
+            ).not_valid_before(
+                datetime.utcnow() - timedelta(days=not_before_days_ago)
+            ).not_valid_after(
+                datetime.utcnow() + timedelta(days=not_after_days_ahead)
+            ).sign(private_key, hashes.SHA256(), backend=default_backend())
+
+        old_cert = _build(400, 5)   # about to expire
+        new_cert = _build(0, 365)   # freshly renewed, same key
+
+        old_path = os.path.join(temp_dir, "renewed-old.pem")
+        new_path = os.path.join(temp_dir, "renewed-new.pem")
+        TestCertificateGeneration.save_certificate_pem(old_cert, old_path)
+        TestCertificateGeneration.save_certificate_pem(new_cert, new_path)
+
+        old_info = analyzer.analyze_certificate(old_path, "test", 1)[0]
+        new_info = analyzer.analyze_certificate(new_path, "test", 1)[0]
+
+        assert old_info.serial_number != new_info.serial_number
+        assert old_info.spki_hash == new_info.spki_hash
+
+    def test_spki_hash_disabled_via_config_file(self, temp_dir):
+        """spki_hash_enabled=False when config file has spki_hash_enabled = false."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'spki_hash_enabled': 'false'}})
+        result = cfg(cp, 'certificates', 'spki_hash_enabled', 'SPKI_HASH_ENABLED', 'true')
+        assert result.lower() == 'false'
+
+    def test_spki_hash_enabled_via_config_file(self, temp_dir):
+        """spki_hash_enabled=True when config file has spki_hash_enabled = true."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'spki_hash_enabled': 'true'}})
+        result = cfg(cp, 'certificates', 'spki_hash_enabled', 'SPKI_HASH_ENABLED', 'true')
+        assert result.lower() == 'true'
+
+    def test_spki_hash_defaults_to_true_with_no_config_or_env(self, temp_dir):
+        """spki_hash_enabled resolves to true with neither a config entry nor an env var set."""
+        import configparser
+        from cert_analyzer import cfg
+        cp = configparser.ConfigParser()  # empty — no config file
+        result = cfg(cp, 'certificates', 'spki_hash_enabled', 'SPKI_HASH_ENABLED', 'true')
+        assert result.lower() == 'true'
+
+    def test_spki_hash_config_file_takes_precedence_over_env_var(self, monkeypatch, temp_dir):
+        """Config file value overrides env var — config file wins."""
+        import configparser
+        from cert_analyzer import cfg
+        monkeypatch.setenv('SPKI_HASH_ENABLED', 'true')  # env var says enabled
+        cp = configparser.ConfigParser()
+        cp.read_dict({'certificates': {'spki_hash_enabled': 'false'}})  # config says disabled
+        result = cfg(cp, 'certificates', 'spki_hash_enabled', 'SPKI_HASH_ENABLED', 'true')
+        assert result.lower() == 'false'  # config file wins
+
+    def test_spki_hash_error_does_not_prevent_cert_info_return(
+        self, analyzer, temp_dir, monkeypatch
+    ):
+        """
+        If SPKI hash computation fails (e.g. sha256 raises), extract_certificate_info
+        still returns a valid CertificateInfo with an empty spki_hash rather than None.
+        """
+        cert, _ = TestCertificateGeneration.generate_certificate("spki-err.example.com", 365)
+        path = os.path.join(temp_dir, "spki-err.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        import hashlib as _hashlib
+
+        def _raising_sha256(*args, **kwargs):
+            raise RuntimeError("simulated hash failure")
+
+        monkeypatch.setattr(_hashlib, 'sha256', _raising_sha256)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+
+        # Must still return cert info — SPKI hash failure is non-fatal
+        assert len(cert_infos) == 1
+        assert cert_infos[0].spki_hash == ""
 
 
 class TestFipsComplianceEnabled:
@@ -5851,7 +6035,7 @@ class TestKafkaPublisher:
                 'san_dns_names', 'not_before', 'not_after',
                 'days_until_expiry', 'is_expired', 'process', 'pid',
                 'namespace', 'pod_name', 'node_name', 'workload_kind', 'workload_name',
-                'app_label', 'container_name', 'container_image', 'checksum',
+                'app_label', 'container_name', 'container_image', 'checksum', 'spki_hash',
             ]
             for field in required_fields:
                 assert field in msg, f"Missing field: {field}"
@@ -7580,6 +7764,7 @@ class TestSelfSignedDetection:
             issuer=cert_infos[0].issuer[:100],
             serial=cert_infos[0].serial_number,
             checksum=cert_infos[0].checksum,
+            spki_hash=cert_infos[0].spki_hash,
         )._value.get()
         assert val == 1.0
 
@@ -7608,6 +7793,7 @@ class TestSelfSignedDetection:
             issuer=cert_infos[0].issuer[:100],
             serial=cert_infos[0].serial_number,
             checksum=cert_infos[0].checksum,
+            spki_hash=cert_infos[0].spki_hash,
         )._value.get()
         assert val == 0.0
 

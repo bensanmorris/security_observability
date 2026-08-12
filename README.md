@@ -207,6 +207,7 @@ sudo systemctl enable --now cert-analyzer
 | Setting | Default | Description |
 |---|---|---|
 | `checksum_enabled` | `false` | Compute SHA-256 fingerprints per certificate |
+| `spki_hash_enabled` | `true` | Compute a SHA-256 fingerprint of each certificate's public key (SubjectPublicKeyInfo) alone. Unlike `checksum` above, this value is identical across a renewal that reuses the same key pair — intended for downstream "key reuse detected" comparisons across successive discoveries of the same certificate |
 | `fips_compliance_enabled` | `true` | Check each certificate for FIPS 140-2/140-3 algorithm compliance (key type, minimum key size, approved curves, signature hash) |
 | `filter_self_events` | `true` | Ignore certificate accesses made by the analyzer itself |
 | `host_prefix` | _(empty)_ | Path prefix prepended to certificate paths from Tetragon events — leave empty for bare metal, set to `/host` for Kubernetes |

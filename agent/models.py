@@ -44,6 +44,14 @@ class CertificateInfo:
     # SHA-256 of the DER-encoded certificate bytes. Empty string when
     # CERT_CHECKSUM_ENABLED=false (the default).
     checksum: str = ""
+    # SHA-256 of the DER-encoded SubjectPublicKeyInfo (the public key alone,
+    # not the whole certificate) -- identical across a renewal that reuses
+    # the same key pair, unlike `checksum` above which changes on every
+    # renewal regardless of key reuse. Empty string when
+    # SPKI_HASH_ENABLED=false. Unlike checksum, defaults to enabled: it's a
+    # hash of public (non-sensitive) key material, and downstream consumers
+    # need it on every cert to detect key reuse across renewals themselves.
+    spki_hash: str = ""
     # FIPS 140-2/140-3 compliance fields — populated by extract_certificate_info()
     key_algorithm: str = ""    # RSA, EC, DSA, Ed25519, Ed448, unknown
     key_size: int = 0          # bits; 0 for EdDSA
