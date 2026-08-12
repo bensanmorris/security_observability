@@ -104,6 +104,10 @@ kafka:
 bindProbeEnabled: true
 connectProbeEnabled: true
 
+# Off by default upstream (agent/config.py) -- adds a sha256 checksum field/label to
+# cert-event output, used for downstream key-reuse detection (see PR #155).
+checksumEnabled: true
+
 # Ports the tcp-connect-tls TracingPolicy filters on at the kernel boundary (see
 # templates/policies/tcp-connect-tls.yaml). Also rendered as cert-analyzer's own
 # TLS_OUTBOUND_PORTS env var so the two can't drift out of sync the way the plain-manifest

@@ -58,6 +58,8 @@ spec:
           value: {{ .Values.bindProbeEnabled | quote }}
         - name: CONNECT_PROBE_ENABLED
           value: {{ .Values.connectProbeEnabled | quote }}
+        - name: CERT_CHECKSUM_ENABLED
+          value: {{ .Values.checksumEnabled | quote }}
         - name: TLS_OUTBOUND_PORTS
           value: {{ join "," .Values.tlsOutboundPorts | quote }}
         volumeMounts:
