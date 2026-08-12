@@ -169,6 +169,7 @@ def main():
     filter_self     = cfg(cp, 'certificates', 'filter_self_events',       'FILTER_SELF_EVENTS',              'true').lower() != 'false'
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
     checksum_enabled        = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',        'false').lower() == 'true'
+    spki_hash_enabled       = cfg(cp, 'certificates', 'spki_hash_enabled',       'SPKI_HASH_ENABLED',            'true').lower() != 'false'
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
     fips_compliance_enabled = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED',      'true').lower() != 'false'
     large_file_cert_threshold = cfg_int(cp, 'certificates', 'large_file_cert_threshold', 'LARGE_FILE_CERT_THRESHOLD', '20')
@@ -251,6 +252,7 @@ def main():
     logger.info(f"Tetragon build:    {TETRAGON_BUILD_VERSION}")
     logger.info(f"Cache max size:    {CACHE_MAX_SIZE}")
     logger.info(f"Cert checksums:    {'enabled' if checksum_enabled else 'disabled'}")
+    logger.info(f"SPKI hash:         {'enabled' if spki_hash_enabled else 'disabled'}")
     logger.info(f"FIPS checking:     {'enabled' if fips_compliance_enabled else 'disabled'}")
     logger.info(f"Large file threshold: >{large_file_cert_threshold} certs parsed in background")
     logger.info(f"Large file metrics cap: {large_file_metrics_cap} certs get full Prometheus tracking per bundle")
@@ -312,6 +314,7 @@ def main():
                                    host_prefix=host_prefix,
                                    kafka_publisher=kafka_publisher,
                                    checksum_enabled=checksum_enabled,
+                                   spki_hash_enabled=spki_hash_enabled,
                                    demo_mode=demo_mode,
                                    fips_compliance_enabled=fips_compliance_enabled,
                                    event_rate_metrics_enabled=event_rate_metrics_enabled,

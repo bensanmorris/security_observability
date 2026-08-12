@@ -195,7 +195,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum',
+             'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
              'key_usage', 'extended_key_usage']
         )
 
@@ -205,7 +205,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum',
+             'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
              'key_usage', 'extended_key_usage']
         )
 
@@ -215,7 +215,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum',
+             'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
              'key_usage', 'extended_key_usage']
         )
 
@@ -225,7 +225,7 @@ class PrometheusMetrics:
             ['cert_path', 'subject', 'issuer', 'serial', 'common_name',
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
-             'node_name', 'app_label', 'container_name', 'checksum',
+             'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
              'key_usage', 'extended_key_usage']
         )
 
@@ -241,7 +241,7 @@ class PrometheusMetrics:
             'tls_certificate_process_info',
             'Processes observed loading this certificate (1=observed)',
             ['cert_path', 'cert_index', 'serial', 'process', 'parent_process', 'node_name',
-             'pod_name', 'namespace', 'app_label', 'container_name', 'checksum'],
+             'pod_name', 'namespace', 'app_label', 'container_name', 'checksum', 'spki_hash'],
         )
 
         # TLS protocol version and cipher suite negotiated during a TLS port
@@ -296,7 +296,7 @@ class PrometheusMetrics:
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
              'key_algorithm', 'signature_hash', 'key_size', 'curve_name', 'issuer', 'serial',
-             'checksum']
+             'checksum', 'spki_hash']
         )
 
         self.cert_self_signed = Gauge(
@@ -304,7 +304,7 @@ class PrometheusMetrics:
             'Whether the certificate is self-signed (1=self-signed, 0=CA-signed)',
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
-             'is_ca', 'issuer', 'serial', 'checksum']
+             'is_ca', 'issuer', 'serial', 'checksum', 'spki_hash']
         )
 
         # System health
@@ -510,6 +510,7 @@ class PrometheusMetrics:
             'app_label':        info.app_label,
             'container_name':   info.container_name,
             'checksum':         info.checksum,
+            'spki_hash':        info.spki_hash,
             'key_usage':          ','.join(info.key_usage) if info.key_usage else '',
             'extended_key_usage': ','.join(info.extended_key_usage) if info.extended_key_usage else '',
         }
@@ -526,6 +527,7 @@ class PrometheusMetrics:
             app_label=info.app_label,
             container_name=info.container_name,
             checksum=info.checksum,
+            spki_hash=info.spki_hash,
         ).set(1)
         # The discovering process is always allowed (an empty seen-set can
         # never already be at the fan-out cap) — seed it here so a later
@@ -565,6 +567,7 @@ class PrometheusMetrics:
                 issuer=info.issuer[:100],
                 serial=info.serial_number,
                 checksum=info.checksum,
+                spki_hash=info.spki_hash,
             ).set(1 if info.fips_compliant else 0)
 
         self.cert_self_signed.labels(
@@ -581,6 +584,7 @@ class PrometheusMetrics:
             issuer=info.issuer[:100],
             serial=info.serial_number,
             checksum=info.checksum,
+            spki_hash=info.spki_hash,
         ).set(1 if info.is_self_signed else 0)
 
     @staticmethod
@@ -618,7 +622,7 @@ class PrometheusMetrics:
             info.common_name, ','.join(info.san_dns_names), ','.join(info.san_ip_addresses),
             str(info.cert_index), info.pod_name, info.namespace, info.workload_kind,
             info.workload_name, info.node_name, info.app_label, info.container_name,
-            info.checksum,
+            info.checksum, info.spki_hash,
             ','.join(info.key_usage) if info.key_usage else '',
             ','.join(info.extended_key_usage) if info.extended_key_usage else '',
         )
@@ -635,7 +639,7 @@ class PrometheusMetrics:
                 info.path, str(info.cert_index), info.serial_number,
                 process, parent_process, info.node_name,
                 pod_name, namespace, app_label, container_name,
-                info.checksum,
+                info.checksum, info.spki_hash,
             ))
 
         if info.key_algorithm:
@@ -645,6 +649,7 @@ class PrometheusMetrics:
                 info.app_label, info.container_name,
                 info.key_algorithm, info.signature_hash, str(info.key_size),
                 info.curve_name, info.issuer[:100], info.serial_number, info.checksum,
+                info.spki_hash,
             ))
 
         is_ca_label = 'true' if info.is_ca else ('false' if info.is_ca is False else 'unknown')
@@ -653,6 +658,7 @@ class PrometheusMetrics:
             info.workload_kind, info.workload_name, info.node_name,
             info.app_label, info.container_name,
             is_ca_label, info.issuer[:100], info.serial_number, info.checksum,
+            info.spki_hash,
         ))
 
     def update_last_accessed(self, info: CertificateInfo) -> None:
@@ -680,6 +686,7 @@ class PrometheusMetrics:
             app_label=info.app_label,
             container_name=info.container_name,
             checksum=info.checksum,
+            spki_hash=info.spki_hash,
             key_usage=','.join(info.key_usage) if info.key_usage else '',
             extended_key_usage=','.join(info.extended_key_usage) if info.extended_key_usage else '',
         # datetime.now(timezone.utc), not datetime.utcnow() -- .timestamp() on
@@ -723,6 +730,7 @@ class PrometheusMetrics:
             app_label=app_label,
             container_name=container_name,
             checksum=info.checksum,
+            spki_hash=info.spki_hash,
         ).set(1)
 
     def record_tls_negotiation(self, info: CertificateInfo, protocol: str, cipher: str) -> None:

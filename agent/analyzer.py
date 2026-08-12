@@ -133,6 +133,7 @@ class CertificateAnalyzer:
                  host_prefix: str = '',
                  kafka_publisher: Optional[KafkaPublisher] = None,
                  checksum_enabled: bool = False,
+                 spki_hash_enabled: bool = True,
                  demo_mode: bool = False,
                  fips_compliance_enabled: bool = True,
                  event_rate_metrics_enabled: bool = False,
@@ -157,6 +158,7 @@ class CertificateAnalyzer:
         self.host_prefix = host_prefix
         self.kafka_publisher = kafka_publisher
         self.checksum_enabled = checksum_enabled
+        self.spki_hash_enabled = spki_hash_enabled
         self.demo_mode = demo_mode
         self.fips_compliance_enabled = fips_compliance_enabled
         self._event_rate_metrics_enabled = event_rate_metrics_enabled
@@ -219,6 +221,7 @@ class CertificateAnalyzer:
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.metrics.config_info.labels(node_name=_NODE_NAME).info({
             'checksum_enabled':                  str(checksum_enabled).lower(),
+            'spki_hash_enabled':                 str(spki_hash_enabled).lower(),
             'demo_mode':                         str(demo_mode).lower(),
             'fips_compliance_enabled':            str(fips_compliance_enabled).lower(),
             'filter_self_events':                str(filter_self_events).lower(),
@@ -813,6 +816,21 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not compute checksum for cert {cert_index} in {cert_path}: {e}")
 
+        # Compute SHA-256 of the DER-encoded SubjectPublicKeyInfo (public key
+        # only) when enabled. Unlike `checksum` above, this value is identical
+        # across a renewal that reuses the same key pair -- that's what makes
+        # it useful for downstream "key reuse detected" analysis, which is
+        # done outside the analyzer by comparing this field across successive
+        # discoveries of the same logical certificate.
+        spki_hash = ""
+        if self.spki_hash_enabled:
+            try:
+                from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+                spki_der = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+                spki_hash = hashlib.sha256(spki_der).hexdigest()
+            except Exception as e:
+                logger.debug(f"Could not compute SPKI hash for cert {cert_index} in {cert_path}: {e}")
+
         fips_result = None
         if self.fips_compliance_enabled:
             try:
@@ -844,6 +862,7 @@ class CertificateAnalyzer:
             san_ip_addresses=san_ip_addresses,
             cert_index=cert_index,
             checksum=checksum,
+            spki_hash=spki_hash,
             key_algorithm=fips_result.key_algorithm if fips_result is not None else '',
             key_size=fips_result.key_size if fips_result is not None else 0,
             signature_hash=fips_result.signature_hash if fips_result is not None else '',
@@ -1498,6 +1517,8 @@ class CertificateAnalyzer:
         detail_log(f"   Serial: {info.serial_number}")
         if info.checksum:
             detail_log(f"   SHA-256: {info.checksum}")
+        if info.spki_hash:
+            detail_log(f"   SPKI SHA-256: {info.spki_hash}")
         detail_log(
             f"   Valid: {info.not_before.strftime('%Y-%m-%d')} -> "
             f"{info.not_after.strftime('%Y-%m-%d')}"

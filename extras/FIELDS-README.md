@@ -46,6 +46,7 @@ All share the same label set:
 | `app_label` | k8s pod labels | Value of `app`, `app.kubernetes.io/name`, or `k8s-app` label; empty if none |
 | `container_name` | Tetragon / k8s | Empty on bare metal |
 | `checksum` | X.509 | SHA-256 hex fingerprint of DER-encoded cert; empty string when `checksum_enabled=false` |
+| `spki_hash` | X.509 | SHA-256 hex fingerprint of the DER-encoded SubjectPublicKeyInfo (public key only) — identical across a renewal that reuses the same key pair, unlike `checksum` above; empty string when `spki_hash_enabled=false`. Enabled by default |
 | `key_usage` | X.509 | Comma-joined Key Usage bits (e.g. `digital_signature,key_encipherment`); empty string if the extension is absent |
 | `extended_key_usage` | X.509 | Comma-joined Extended Key Usage OIDs (e.g. `server_auth,client_auth`); empty string if the extension is absent |
 
@@ -58,8 +59,8 @@ observed loading them (see below).
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
-| `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `is_ca`, `issuer`, `serial`, `checksum` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
+| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum`, `spki_hash` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
+| `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `is_ca`, `issuer`, `serial`, `checksum`, `spki_hash` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
 
 There is no separate "expired" or "expiring soon" gauge — both are derivable from
 `tls_certificate_expiry_days` (see above) with a plain comparison, exactly how
@@ -74,7 +75,7 @@ for free.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `tls_certificate_process_info` | Gauge | `cert_path`, `cert_index`, `serial`, `process`, `parent_process`, `node_name`, `pod_name`, `namespace`, `app_label`, `container_name`, `checksum` | `1` per distinct process observed loading this certificate. One series per distinct `(process, parent_process, pod_name, namespace, app_label, container_name)` tuple, capped at `max_processes_per_cert` (default 20) per certificate |
+| `tls_certificate_process_info` | Gauge | `cert_path`, `cert_index`, `serial`, `process`, `parent_process`, `node_name`, `pod_name`, `namespace`, `app_label`, `container_name`, `checksum`, `spki_hash` | `1` per distinct process observed loading this certificate. One series per distinct `(process, parent_process, pod_name, namespace, app_label, container_name)` tuple, capped at `max_processes_per_cert` (default 20) per certificate |
 
 Unlike the certificate status flags above, `pod_name`/`namespace`/`app_label`/`container_name`
 here describe the *accessing* process's own pod at the time it was recorded — not necessarily
@@ -203,6 +204,7 @@ unique per certificate, and rotated when the cert at a path changes.
   "container_maybe_exec_probe": false,
 
   "checksum":        "e3b0c44298fc1c149afb...",
+  "spki_hash":       "d0f4c3b1a2e5...",
   "key_algorithm":   "RSA",
   "key_size":        2048,
   "signature_hash":  "sha256",
@@ -289,6 +291,7 @@ All fields are empty strings / null on bare-metal deployments.
 | Field | Type | Description | Config dependency |
 |---|---|---|---|
 | `checksum` | string | SHA-256 hex fingerprint of DER-encoded cert; empty string if disabled | `checksum_enabled=true` |
+| `spki_hash` | string | SHA-256 hex fingerprint of the DER-encoded SubjectPublicKeyInfo (public key only); empty string if disabled. Unlike `checksum`, stays the same across a renewal that reuses the same key pair — compare it across successive `certificate_discovered` events for the same `path`/identity to detect key reuse downstream | `spki_hash_enabled=true` (default) |
 | `key_algorithm` | string | `RSA`, `EC`, `DSA`, `Ed25519`, `Ed448`, or `unknown` | `fips_compliance_enabled=true` |
 | `key_size` | int | Key size in bits; `0` for EdDSA (fixed-size keys) | `fips_compliance_enabled=true` |
 | `signature_hash` | string | Hash algorithm name e.g. `sha256`, `sha384`, `sha1` | `fips_compliance_enabled=true` |
