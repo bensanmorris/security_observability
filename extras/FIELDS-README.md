@@ -49,6 +49,8 @@ All share the same label set:
 | `spki_hash` | X.509 | SHA-256 hex fingerprint of the DER-encoded SubjectPublicKeyInfo (public key only) — identical across a renewal that reuses the same key pair, unlike `checksum` above; empty string when `spki_hash_enabled=false`. Enabled by default |
 | `key_usage` | X.509 | Comma-joined Key Usage bits (e.g. `digital_signature,key_encipherment`); empty string if the extension is absent |
 | `extended_key_usage` | X.509 | Comma-joined Extended Key Usage OIDs (e.g. `server_auth,client_auth`); empty string if the extension is absent |
+| `spki_algorithm_oid` | X.509 | Dotted-string OID of the SubjectPublicKeyInfo algorithm, read directly from the DER encoding; resolves even for key types this install of `cryptography` can't instantiate (e.g. post-quantum/composite keys). Always populated — no configuration flag required |
+| `signature_algorithm_oid` | X.509 | Dotted-string OID of the certificate's signature algorithm, same rationale as `spki_algorithm_oid`. Always populated — no configuration flag required |
 
 Note: `process`/`parent_process` are per-*access*, not per-certificate, so they are
 deliberately not labels on these four gauges — they're tracked instead on the
@@ -59,7 +61,7 @@ observed loading them (see below).
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum`, `spki_hash` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true` |
+| `tls_certificate_fips_compliant` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `key_algorithm`, `signature_hash`, `key_size`, `curve_name`, `issuer`, `serial`, `checksum`, `spki_hash`, `spki_algorithm_oid`, `signature_algorithm_oid` | `1` if FIPS-compliant, `0` if not. Only emitted when `fips_compliance_enabled=true`. Unlike `key_algorithm`/`signature_hash`, the two OID labels are always populated regardless of whether the algorithm is one `key_algorithm` can name — see [Kafka schema: Certificate cryptography](#certificate-cryptography) below |
 | `tls_certificate_self_signed` | Gauge | `cert_path`, `cert_index`, `pod_name`, `namespace`, `workload_kind`, `workload_name`, `node_name`, `app_label`, `container_name`, `is_ca`, `issuer`, `serial`, `checksum`, `spki_hash` | `1` if the certificate is self-signed, `0` if issued by a separate CA. Always emitted. `is_ca` label: `true` / `false` / `unknown` (when Basic Constraints extension is absent) |
 
 There is no separate "expired" or "expiring soon" gauge — both are derivable from

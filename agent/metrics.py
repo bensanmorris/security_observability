@@ -196,7 +196,7 @@ class PrometheusMetrics:
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
-             'key_usage', 'extended_key_usage']
+             'key_usage', 'extended_key_usage', 'spki_algorithm_oid', 'signature_algorithm_oid']
         )
 
         self.cert_expiry_timestamp = Gauge(
@@ -206,7 +206,7 @@ class PrometheusMetrics:
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
-             'key_usage', 'extended_key_usage']
+             'key_usage', 'extended_key_usage', 'spki_algorithm_oid', 'signature_algorithm_oid']
         )
 
         self.cert_valid_from = Gauge(
@@ -216,7 +216,7 @@ class PrometheusMetrics:
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
-             'key_usage', 'extended_key_usage']
+             'key_usage', 'extended_key_usage', 'spki_algorithm_oid', 'signature_algorithm_oid']
         )
 
         self.cert_last_accessed = Gauge(
@@ -226,7 +226,7 @@ class PrometheusMetrics:
              'san_dns_names', 'san_ip_addresses',
              'cert_index', 'pod_name', 'namespace', 'workload_kind', 'workload_name',
              'node_name', 'app_label', 'container_name', 'checksum', 'spki_hash',
-             'key_usage', 'extended_key_usage']
+             'key_usage', 'extended_key_usage', 'spki_algorithm_oid', 'signature_algorithm_oid']
         )
 
         # pod_name/namespace/app_label/container_name reflect the *accessing*
@@ -296,7 +296,7 @@ class PrometheusMetrics:
             ['cert_path', 'cert_index', 'pod_name', 'namespace',
              'workload_kind', 'workload_name', 'node_name', 'app_label', 'container_name',
              'key_algorithm', 'signature_hash', 'key_size', 'curve_name', 'issuer', 'serial',
-             'checksum', 'spki_hash']
+             'checksum', 'spki_hash', 'spki_algorithm_oid', 'signature_algorithm_oid']
         )
 
         self.cert_self_signed = Gauge(
@@ -513,6 +513,8 @@ class PrometheusMetrics:
             'spki_hash':        info.spki_hash,
             'key_usage':          ','.join(info.key_usage) if info.key_usage else '',
             'extended_key_usage': ','.join(info.extended_key_usage) if info.extended_key_usage else '',
+            'spki_algorithm_oid':      info.spki_algorithm_oid,
+            'signature_algorithm_oid': info.signature_algorithm_oid,
         }
 
         self.cert_process_info.labels(
@@ -568,6 +570,8 @@ class PrometheusMetrics:
                 serial=info.serial_number,
                 checksum=info.checksum,
                 spki_hash=info.spki_hash,
+                spki_algorithm_oid=info.spki_algorithm_oid,
+                signature_algorithm_oid=info.signature_algorithm_oid,
             ).set(1 if info.fips_compliant else 0)
 
         self.cert_self_signed.labels(
@@ -625,6 +629,7 @@ class PrometheusMetrics:
             info.checksum, info.spki_hash,
             ','.join(info.key_usage) if info.key_usage else '',
             ','.join(info.extended_key_usage) if info.extended_key_usage else '',
+            info.spki_algorithm_oid, info.signature_algorithm_oid,
         )
         for gauge in (self.cert_expiry_days, self.cert_expiry_timestamp,
                       self.cert_valid_from, self.cert_last_accessed):
@@ -649,7 +654,7 @@ class PrometheusMetrics:
                 info.app_label, info.container_name,
                 info.key_algorithm, info.signature_hash, str(info.key_size),
                 info.curve_name, info.issuer[:100], info.serial_number, info.checksum,
-                info.spki_hash,
+                info.spki_hash, info.spki_algorithm_oid, info.signature_algorithm_oid,
             ))
 
         is_ca_label = 'true' if info.is_ca else ('false' if info.is_ca is False else 'unknown')
@@ -689,6 +694,8 @@ class PrometheusMetrics:
             spki_hash=info.spki_hash,
             key_usage=','.join(info.key_usage) if info.key_usage else '',
             extended_key_usage=','.join(info.extended_key_usage) if info.extended_key_usage else '',
+            spki_algorithm_oid=info.spki_algorithm_oid,
+            signature_algorithm_oid=info.signature_algorithm_oid,
         # datetime.now(timezone.utc), not datetime.utcnow() -- .timestamp() on
         # a naive datetime assumes the local timezone, silently shifting this
         # by the local UTC offset (see update_certificate_metrics above).

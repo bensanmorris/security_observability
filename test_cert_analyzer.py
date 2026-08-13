@@ -3234,6 +3234,7 @@ class TestCacheHitReDetection:
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
             checksum='', spki_hash='', key_usage='', extended_key_usage='',
+            spki_algorithm_oid='', signature_algorithm_oid='',
         )._value.get()
         assert before == 0.0
 
@@ -3245,6 +3246,7 @@ class TestCacheHitReDetection:
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
             checksum='', spki_hash='', key_usage='', extended_key_usage='',
+            spki_algorithm_oid='', signature_algorithm_oid='',
         )._value.get()
         assert after > 0.0
 

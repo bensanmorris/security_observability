@@ -1393,7 +1393,9 @@
                   "job": true,
                   "cert_index": false,
                   "checksum": false,
-                  "spki_hash": false
+                  "spki_hash": false,
+                  "spki_algorithm_oid": false,
+                  "signature_algorithm_oid": false
                 },
                 "indexByName": {
                   "common_name": 0,
@@ -1414,8 +1416,10 @@
                   "Value": 16,
                   "checksum": 17,
                   "spki_hash": 18,
-                  "key_usage": 19,
-                  "extended_key_usage": 20
+                  "spki_algorithm_oid": 19,
+                  "signature_algorithm_oid": 20,
+                  "key_usage": 21,
+                  "extended_key_usage": 22
                 },
                 "renameByName": {
                   "Value": "Days Until Expiry",
@@ -1436,6 +1440,8 @@
                   "subject": "Subject",
                   "checksum": "Checksum",
                   "spki_hash": "SPKI Hash",
+                  "spki_algorithm_oid": "SPKI OID",
+                  "signature_algorithm_oid": "Signature OID",
                   "key_usage": "Key Usage",
                   "extended_key_usage": "Extended Key Usage"
                 }
@@ -2317,7 +2323,9 @@
                   "container_name": "Container",
                   "node_name": "Node",
                   "key_size": "Key Size",
-                  "curve_name": "EC Curve"
+                  "curve_name": "EC Curve",
+                  "spki_algorithm_oid": "SPKI OID",
+                  "signature_algorithm_oid": "Signature OID"
                 }
               }
             }
@@ -2377,7 +2385,7 @@
         },
         {
           "id": 47,
-          "title": "Key Size & EC Curve Distribution",
+          "title": "Key Size, EC Curve & Algorithm OID Distribution",
           "type": "table",
           "gridPos": {
             "h": 8,
@@ -2395,7 +2403,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "count by (key_algorithm, key_size, curve_name) (count by (key_algorithm, key_size, curve_name, issuer, serial, checksum) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"}))",
+              "expr": "count by (key_algorithm, key_size, curve_name, spki_algorithm_oid, signature_algorithm_oid) (count by (key_algorithm, key_size, curve_name, spki_algorithm_oid, signature_algorithm_oid, issuer, serial, checksum) (tls_certificate_fips_compliant{namespace=~\"$namespace\",node_name=~\"$node\"}))",
               "instant": true,
               "format": "table",
               "refId": "A"
@@ -2415,6 +2423,8 @@
                   "key_algorithm": "Algorithm",
                   "key_size": "Key Size (bits)",
                   "curve_name": "EC Curve",
+                  "spki_algorithm_oid": "SPKI OID",
+                  "signature_algorithm_oid": "Signature OID",
                   "Value": "Certificate Count"
                 }
               }
