@@ -257,6 +257,16 @@ class TestDerHelpers:
         with pytest.raises(ValueError):
             _der_read_tlv(bytes([0x30, 0x80]), 0)
 
+    def test_read_tlv_truncated_long_form_length_rejected(self):
+        """A long-form length header claiming more length-bytes than actually
+        follow must raise rather than silently decoding from whatever fewer
+        bytes happen to be present -- slicing past the end of `data` doesn't
+        raise on its own, so this has to be checked explicitly."""
+        # 0x84 says "4 length-bytes follow", but only 2 are present.
+        data = bytes([0x30, 0x84, 0x00, 0x01])
+        with pytest.raises(ValueError):
+            _der_read_tlv(data, 0)
+
     def test_decode_oid_rsa_encryption(self):
         # rsaEncryption: 1.2.840.113549.1.1.1
         oid_bytes = bytes([0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01])

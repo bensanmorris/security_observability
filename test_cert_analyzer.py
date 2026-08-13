@@ -3008,6 +3008,55 @@ class TestMetricsCleanupOnEviction:
             "all 4 process series must be removed, not just the most recent one"
 
 
+class TestMetricsLabelParity:
+    """
+    Guards against a Gauge's declared labelnames drifting out of sync with
+    the .labels() call site(s) that populate it -- prometheus_client raises
+    ValueError on any mismatch between the two, uncaught by anything at this
+    layer. This file hand-duplicates the same label set across five Gauges
+    (cert_expiry_days, cert_expiry_timestamp, cert_valid_from,
+    cert_last_accessed, cert_fips_compliant) and multiple call sites
+    (update_certificate_metrics's shared dict, update_last_accessed's
+    separate direct call, and remove_certificate_metrics's positional
+    removal tuples), so this is exactly the kind of change most likely to
+    drift. It already has, twice, while adding spki_algorithm_oid/
+    signature_algorithm_oid -- update_last_accessed's call site was missed
+    on the first pass and only surfaced once the full suite ran, not from
+    any test that specifically targets that call site.
+    """
+
+    def test_full_metrics_lifecycle_does_not_raise(self, analyzer, temp_dir):
+        """update_certificate_metrics -> update_last_accessed ->
+        remove_certificate_metrics must all succeed for a fully-populated
+        CertificateInfo. A labelname/call-site mismatch on any of the five
+        Gauges they touch raises ValueError immediately here, rather than
+        only incidentally through unrelated tests."""
+        assert analyzer.fips_compliance_enabled is True  # also exercises cert_fips_compliant
+
+        cert, _ = TestCertificateGeneration.generate_certificate("label-parity.example.com", 365)
+        path = os.path.join(temp_dir, "label-parity.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test-proc", 222)
+        assert len(cert_infos) == 1
+        cert_info = cert_infos[0]
+
+        analyzer.metrics.update_certificate_metrics(cert_info)
+        analyzer.metrics.update_last_accessed(cert_info)
+        analyzer.metrics.remove_certificate_metrics(cert_info)
+
+    def test_shared_expiry_gauges_have_identical_labelnames(self, analyzer):
+        """cert_expiry_days/timestamp/valid_from/last_accessed are all set
+        from one shared `labels` dict in update_certificate_metrics -- their
+        labelname sets must stay identical, or that single .labels(**labels)
+        call raises for whichever gauge's declared list drifted from it."""
+        m = analyzer.metrics
+        gauges = (m.cert_expiry_days, m.cert_expiry_timestamp, m.cert_valid_from, m.cert_last_accessed)
+        labelname_sets = [set(g._labelnames) for g in gauges]
+        assert all(s == labelname_sets[0] for s in labelname_sets), \
+            {g._name: sorted(g._labelnames) for g in gauges}
+
+
 class TestCertProcessInfoFanoutCap:
     """
     Tests for CertificateAnalyzer._record_cert_process_access's cap on

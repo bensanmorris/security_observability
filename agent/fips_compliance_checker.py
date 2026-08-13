@@ -150,6 +150,11 @@ def _der_read_tlv(data: bytes, offset: int) -> Tuple[int, int, int]:
         if num_length_bytes == 0:
             raise ValueError("indefinite-length DER encoding is not supported")
         content_start = offset + 2 + num_length_bytes
+        if content_start > len(data):
+            # Slicing beyond the end of `data` doesn't raise on its own --
+            # without this check a truncated length header would silently
+            # decode from fewer bytes than intended instead of failing loudly.
+            raise ValueError("truncated DER length header")
         length = int.from_bytes(data[offset + 2:content_start], 'big')
     return tag, content_start, content_start + length
 
