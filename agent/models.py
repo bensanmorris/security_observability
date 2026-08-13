@@ -59,6 +59,13 @@ class CertificateInfo:
     curve_name: str = ""       # secp256r1 etc. (EC only)
     fips_compliant: bool = False
     fips_violations: list = field(default_factory=list)
+    # Raw dotted-string OIDs read directly off the DER encoding, independent
+    # of whether `cryptography` recognizes the algorithm -- unlike
+    # key_algorithm/signature_hash above, these still populate for algorithm
+    # types (e.g. post-quantum/composite keys) this install can't instantiate
+    # as a key object. Feeds downstream PQC-readiness scoring.
+    spki_algorithm_oid: str = ""
+    signature_algorithm_oid: str = ""
     # RFC 5280 extension fields — None means the extension is absent from the certificate
     key_usage: Optional[list] = None
     extended_key_usage: Optional[list] = None

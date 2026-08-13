@@ -3930,6 +3930,62 @@ class TestFipsComplianceEnabled:
         assert result.lower() == 'true'
 
 
+class TestAlgorithmOidExtraction:
+    """
+    Tests for spki_algorithm_oid / signature_algorithm_oid on CertificateInfo.
+
+    Unlike the FIPS fields above, these are extracted unconditionally
+    (independent of fips_compliance_enabled) since they feed downstream
+    PQC-readiness scoring and stay cheap regardless of that flag.
+    """
+
+    def test_oids_populated_for_rsa_cert(self, analyzer, temp_dir):
+        cert, _ = TestCertificateGeneration.generate_certificate("oid-rsa.example.com", 365)
+        path = os.path.join(temp_dir, "oid-rsa.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.spki_algorithm_oid == '1.2.840.113549.1.1.1'        # rsaEncryption
+        assert info.signature_algorithm_oid == '1.2.840.113549.1.1.11'  # sha256WithRSAEncryption
+
+    def test_oids_populated_even_when_fips_compliance_disabled(self, analyzer, temp_dir):
+        """These fields aren't gated behind fips_compliance_enabled."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("oid-nofips.example.com", 365)
+        path = os.path.join(temp_dir, "oid-nofips.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.fips_compliant is False  # FIPS check itself skipped
+        assert info.spki_algorithm_oid == '1.2.840.113549.1.1.1'
+        assert info.signature_algorithm_oid == '1.2.840.113549.1.1.11'
+
+    def test_oid_extraction_error_is_non_fatal(self, analyzer, temp_dir, monkeypatch):
+        """If get_algorithm_oids() raises, extract_certificate_info still returns CertificateInfo
+        with the OID fields left at their empty defaults."""
+        import agent.analyzer as _ca
+
+        def _raising(cert):
+            raise RuntimeError("simulated OID extraction error")
+
+        monkeypatch.setattr(_ca, '_get_algorithm_oids', _raising)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("oid-err.example.com", 365)
+        path = os.path.join(temp_dir, "oid-err.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.spki_algorithm_oid == ''
+        assert info.signature_algorithm_oid == ''
+
+
 class TestRFC5280Extensions:
     """Tests for Key Usage, Extended Key Usage, and Basic Constraints extraction."""
 
@@ -5881,6 +5937,8 @@ class TestKafkaPublisher:
             container_name='main',
             container_image='my-app:1.0',
             checksum='',
+            spki_algorithm_oid='1.2.840.113549.1.1.1',
+            signature_algorithm_oid='1.2.840.113549.1.1.11',
         )
 
     def _make_publisher(self, mock_producer_class, **kwargs):
@@ -6036,6 +6094,7 @@ class TestKafkaPublisher:
                 'days_until_expiry', 'is_expired', 'process', 'pid',
                 'namespace', 'pod_name', 'node_name', 'workload_kind', 'workload_name',
                 'app_label', 'container_name', 'container_image', 'checksum', 'spki_hash',
+                'spki_algorithm_oid', 'signature_algorithm_oid',
             ]
             for field in required_fields:
                 assert field in msg, f"Missing field: {field}"
@@ -6068,6 +6127,8 @@ class TestKafkaPublisher:
             assert msg['workload_name'] == 'my-app'
             assert msg['san_dns_names'] == ['test.example.com', 'www.test.example.com']
             assert msg['is_expired']    is True   # not_after is 2025-01-01, now > that
+            assert msg['spki_algorithm_oid']      == '1.2.840.113549.1.1.1'
+            assert msg['signature_algorithm_oid'] == '1.2.840.113549.1.1.11'
 
     def test_publish_uses_unique_key_as_partition_key(self, monkeypatch, sample_cert_info):
         """Message key is unique_key (path:cert_index:serial) for partition locality."""

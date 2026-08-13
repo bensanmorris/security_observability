@@ -133,6 +133,48 @@ def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsCompliance
     )
 
 
+def get_algorithm_oids(cert: x509.Certificate) -> Tuple[str, str]:
+    """
+    Return (spki_algorithm_oid, signature_algorithm_oid) as dotted-string OIDs
+    read directly from the certificate's DER encoding.
+
+    Unlike check_certificate()'s key_algorithm/signature_hash fields, these
+    are captured independent of whether `cryptography` recognizes the
+    algorithm. In particular, cert.public_key() raises UnsupportedAlgorithm
+    for key types this install of `cryptography` has no class for (e.g.
+    post-quantum or composite/hybrid keys) -- which is exactly the case
+    downstream PQC-readiness scoring needs to tell apart from a genuinely
+    malformed key. Each OID is independently '' on parse failure rather than
+    raising.
+    """
+    signature_algorithm_oid = ''
+    try:
+        signature_algorithm_oid = cert.signature_algorithm_oid.dotted_string
+    except Exception:
+        pass  # nosec B110 - left '', not a violation on its own; caller can flag if needed
+
+    spki_algorithm_oid = ''
+    try:
+        # cryptography >= 42 exposes this directly and it survives unsupported
+        # key types that cert.public_key() can't instantiate. This repo pins
+        # 41.0.7 (no such accessor), so fall back to decoding the raw
+        # TBSCertificate ourselves via pyasn1 -- a transitive dependency of
+        # the pinned pyjks already, made explicit in requirements.txt for
+        # this use.
+        oid = getattr(cert, 'public_key_algorithm_oid', None)
+        if oid is not None:
+            spki_algorithm_oid = oid.dotted_string
+        else:
+            from pyasn1.codec.der.decoder import decode as _der_decode
+            from pyasn1_modules import rfc5280
+            tbs_obj, _ = _der_decode(cert.tbs_certificate_bytes, asn1Spec=rfc5280.TBSCertificate())
+            spki_algorithm_oid = str(tbs_obj['subjectPublicKeyInfo']['algorithm']['algorithm'])
+    except Exception:
+        pass  # nosec B110 - left '', not a violation on its own; caller can flag if needed
+
+    return spki_algorithm_oid, signature_algorithm_oid
+
+
 def system_fips_enabled() -> bool:
     """
     Return True if the kernel reports FIPS mode enabled.

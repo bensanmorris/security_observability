@@ -15,7 +15,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
 
-from agent.fips_compliance_checker import check_certificate, system_fips_enabled, FipsComplianceResult
+from agent.fips_compliance_checker import (
+    check_certificate, system_fips_enabled, get_algorithm_oids, FipsComplianceResult,
+)
 
 
 def _build_cert(private_key, hash_algorithm=None) -> x509.Certificate:
@@ -157,6 +159,51 @@ class TestFipsComplianceResultFields:
         result = check_certificate(_build_cert(key))
         assert result.compliant
         assert result.violations == []
+
+
+class TestGetAlgorithmOids:
+    def test_rsa_spki_oid(self):
+        key = rsa.generate_private_key(65537, 2048, default_backend())
+        spki_oid, _ = get_algorithm_oids(_build_cert(key))
+        assert spki_oid == '1.2.840.113549.1.1.1'  # rsaEncryption
+
+    def test_rsa_sha256_signature_oid(self):
+        key = rsa.generate_private_key(65537, 2048, default_backend())
+        _, sig_oid = get_algorithm_oids(_build_cert(key, hashes.SHA256()))
+        assert sig_oid == '1.2.840.113549.1.1.11'  # sha256WithRSAEncryption
+
+    def test_ec_spki_oid(self):
+        key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        spki_oid, _ = get_algorithm_oids(_build_cert(key))
+        assert spki_oid == '1.2.840.10045.2.1'  # id-ecPublicKey
+
+    def test_ec_sha384_signature_oid(self):
+        key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        _, sig_oid = get_algorithm_oids(_build_cert(key, hashes.SHA384()))
+        assert sig_oid == '1.2.840.10045.4.3.3'  # ecdsa-with-SHA384
+
+    def test_spki_oid_still_resolves_when_public_key_unsupported(self):
+        """The whole point of decoding SPKI from raw DER instead of asking
+        cert.public_key(): an algorithm this install of `cryptography` can't
+        instantiate (post-quantum/composite keys today) still yields an OID
+        here, where check_certificate()'s isinstance-based dispatch would
+        collapse it to key_algorithm='unknown'.
+        """
+        key = rsa.generate_private_key(65537, 2048, default_backend())
+        cert = _build_cert(key)
+        with patch.object(type(cert), 'public_key', side_effect=Exception("unsupported key type")):
+            spki_oid, sig_oid = get_algorithm_oids(cert)
+        assert spki_oid == '1.2.840.113549.1.1.1'
+        assert sig_oid == '1.2.840.113549.1.1.11'
+
+    def test_signature_oid_empty_on_failure(self):
+        cert = MagicMock()
+        type(cert).signature_algorithm_oid = property(lambda self: (_ for _ in ()).throw(ValueError("boom")))
+        cert.public_key_algorithm_oid = None  # simulate cryptography < 42, which has no such attribute
+        cert.tbs_certificate_bytes = b'not valid der'
+        spki_oid, sig_oid = get_algorithm_oids(cert)
+        assert sig_oid == ''
+        assert spki_oid == ''
 
 
 class TestSystemFipsEnabled:
