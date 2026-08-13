@@ -133,6 +133,75 @@ def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsCompliance
     )
 
 
+def _der_read_tlv(data: bytes, offset: int) -> Tuple[int, int, int]:
+    """
+    Read one DER TLV at `offset`. Returns (tag_byte, content_start, next_offset)
+    where next_offset is the start of the following sibling element -- i.e.
+    content_start + length. Only handles definite-length encoding (the only
+    form DER permits); a 0x80 (indefinite-length, BER-only) length byte raises.
+    """
+    tag = data[offset]
+    length_byte = data[offset + 1]
+    if length_byte & 0x80 == 0:
+        length = length_byte
+        content_start = offset + 2
+    else:
+        num_length_bytes = length_byte & 0x7F
+        if num_length_bytes == 0:
+            raise ValueError("indefinite-length DER encoding is not supported")
+        content_start = offset + 2 + num_length_bytes
+        length = int.from_bytes(data[offset + 2:content_start], 'big')
+    return tag, content_start, content_start + length
+
+
+def _der_decode_oid(oid_bytes: bytes) -> str:
+    """Decode the content bytes of a DER OBJECT IDENTIFIER to dotted-string form."""
+    first = oid_bytes[0]
+    arcs = [first // 40, first % 40]
+    value = 0
+    for b in oid_bytes[1:]:
+        value = (value << 7) | (b & 0x7F)
+        if b & 0x80 == 0:
+            arcs.append(value)
+            value = 0
+    return '.'.join(str(a) for a in arcs)
+
+
+def _spki_algorithm_oid_from_tbs(tbs_certificate_bytes: bytes) -> str:
+    """
+    Return the dotted-string SubjectPublicKeyInfo algorithm OID by walking
+    just far enough into the DER-encoded TBSCertificate to reach it --
+    version, serialNumber, signature AlgorithmIdentifier, issuer Name,
+    validity, subject Name -- without decoding any of those fields' actual
+    content, and without touching the extensions that follow
+    subjectPublicKeyInfo. A full schema-based ASN.1 decode (e.g. pyasn1
+    against the whole TBSCertificate) parses all of that anyway just to
+    reach this one field; profiling showed that costing ~600us/cert, ~20x
+    what the rest of certificate extraction costs combined. This walk only
+    ever inspects TLV headers (tag + length) for the fields it skips.
+    """
+    _, tbs_start, _ = _der_read_tlv(tbs_certificate_bytes, 0)  # outer SEQUENCE
+    offset = tbs_start
+
+    # version [0] EXPLICIT is OPTIONAL (DEFAULT v1) -- present only when the
+    # next tag is context-specific constructed tag 0.
+    if tbs_certificate_bytes[offset] == 0xA0:
+        _, _, offset = _der_read_tlv(tbs_certificate_bytes, offset)
+
+    # serialNumber, signature AlgorithmIdentifier, issuer, validity, subject
+    for _ in range(5):
+        _, _, offset = _der_read_tlv(tbs_certificate_bytes, offset)
+
+    # subjectPublicKeyInfo ::= SEQUENCE { algorithm AlgorithmIdentifier, ... }
+    _, spki_start, _ = _der_read_tlv(tbs_certificate_bytes, offset)
+    # algorithm AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER, ... }
+    _, alg_start, _ = _der_read_tlv(tbs_certificate_bytes, spki_start)
+    tag, oid_start, oid_end = _der_read_tlv(tbs_certificate_bytes, alg_start)
+    if tag != 0x06:
+        raise ValueError(f"expected an OBJECT IDENTIFIER tag (0x06), got {tag:#x}")
+    return _der_decode_oid(tbs_certificate_bytes[oid_start:oid_end])
+
+
 def get_algorithm_oids(cert: x509.Certificate) -> Tuple[str, str]:
     """
     Return (spki_algorithm_oid, signature_algorithm_oid) as dotted-string OIDs
@@ -157,18 +226,13 @@ def get_algorithm_oids(cert: x509.Certificate) -> Tuple[str, str]:
     try:
         # cryptography >= 42 exposes this directly and it survives unsupported
         # key types that cert.public_key() can't instantiate. This repo pins
-        # 41.0.7 (no such accessor), so fall back to decoding the raw
-        # TBSCertificate ourselves via pyasn1 -- a transitive dependency of
-        # the pinned pyjks already, made explicit in requirements.txt for
-        # this use.
+        # 41.0.7 (no such accessor), so fall back to a minimal DER walk of
+        # the raw TBSCertificate (see _spki_algorithm_oid_from_tbs).
         oid = getattr(cert, 'public_key_algorithm_oid', None)
         if oid is not None:
             spki_algorithm_oid = oid.dotted_string
         else:
-            from pyasn1.codec.der.decoder import decode as _der_decode
-            from pyasn1_modules import rfc5280
-            tbs_obj, _ = _der_decode(cert.tbs_certificate_bytes, asn1Spec=rfc5280.TBSCertificate())
-            spki_algorithm_oid = str(tbs_obj['subjectPublicKeyInfo']['algorithm']['algorithm'])
+            spki_algorithm_oid = _spki_algorithm_oid_from_tbs(cert.tbs_certificate_bytes)
     except Exception:
         pass  # nosec B110 - left '', not a violation on its own; caller can flag if needed
 
