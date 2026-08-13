@@ -19,7 +19,11 @@ if TYPE_CHECKING:
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
-from .fips_compliance_checker import check_certificate as _fips_check, FipsComplianceResult
+from .fips_compliance_checker import (
+    check_certificate as _fips_check,
+    FipsComplianceResult,
+    get_algorithm_oids as _get_algorithm_oids,
+)
 
 # Import generated Tetragon protos
 try:
@@ -831,6 +835,16 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not compute SPKI hash for cert {cert_index} in {cert_path}: {e}")
 
+        # Raw SPKI / signature algorithm OIDs -- captured unconditionally
+        # (cheap, and unlike the FIPS fields below these still resolve for
+        # algorithm types this install of `cryptography` can't instantiate
+        # as a key object, e.g. post-quantum/composite keys).
+        try:
+            spki_algorithm_oid, signature_algorithm_oid = _get_algorithm_oids(cert)
+        except Exception as e:
+            logger.debug(f"Could not extract algorithm OIDs for cert {cert_index} in {cert_path}: {e}")
+            spki_algorithm_oid, signature_algorithm_oid = '', ''
+
         fips_result = None
         if self.fips_compliance_enabled:
             try:
@@ -869,6 +883,8 @@ class CertificateAnalyzer:
             curve_name=fips_result.curve_name if fips_result is not None else '',
             fips_compliant=fips_result.compliant if fips_result is not None else False,
             fips_violations=fips_result.violations if fips_result is not None else [],
+            spki_algorithm_oid=spki_algorithm_oid,
+            signature_algorithm_oid=signature_algorithm_oid,
             key_usage=key_usage,
             extended_key_usage=extended_key_usage,
             is_ca=is_ca,

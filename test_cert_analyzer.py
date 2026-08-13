@@ -3008,6 +3008,55 @@ class TestMetricsCleanupOnEviction:
             "all 4 process series must be removed, not just the most recent one"
 
 
+class TestMetricsLabelParity:
+    """
+    Guards against a Gauge's declared labelnames drifting out of sync with
+    the .labels() call site(s) that populate it -- prometheus_client raises
+    ValueError on any mismatch between the two, uncaught by anything at this
+    layer. This file hand-duplicates the same label set across five Gauges
+    (cert_expiry_days, cert_expiry_timestamp, cert_valid_from,
+    cert_last_accessed, cert_fips_compliant) and multiple call sites
+    (update_certificate_metrics's shared dict, update_last_accessed's
+    separate direct call, and remove_certificate_metrics's positional
+    removal tuples), so this is exactly the kind of change most likely to
+    drift. It already has, twice, while adding spki_algorithm_oid/
+    signature_algorithm_oid -- update_last_accessed's call site was missed
+    on the first pass and only surfaced once the full suite ran, not from
+    any test that specifically targets that call site.
+    """
+
+    def test_full_metrics_lifecycle_does_not_raise(self, analyzer, temp_dir):
+        """update_certificate_metrics -> update_last_accessed ->
+        remove_certificate_metrics must all succeed for a fully-populated
+        CertificateInfo. A labelname/call-site mismatch on any of the five
+        Gauges they touch raises ValueError immediately here, rather than
+        only incidentally through unrelated tests."""
+        assert analyzer.fips_compliance_enabled is True  # also exercises cert_fips_compliant
+
+        cert, _ = TestCertificateGeneration.generate_certificate("label-parity.example.com", 365)
+        path = os.path.join(temp_dir, "label-parity.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test-proc", 222)
+        assert len(cert_infos) == 1
+        cert_info = cert_infos[0]
+
+        analyzer.metrics.update_certificate_metrics(cert_info)
+        analyzer.metrics.update_last_accessed(cert_info)
+        analyzer.metrics.remove_certificate_metrics(cert_info)
+
+    def test_shared_expiry_gauges_have_identical_labelnames(self, analyzer):
+        """cert_expiry_days/timestamp/valid_from/last_accessed are all set
+        from one shared `labels` dict in update_certificate_metrics -- their
+        labelname sets must stay identical, or that single .labels(**labels)
+        call raises for whichever gauge's declared list drifted from it."""
+        m = analyzer.metrics
+        gauges = (m.cert_expiry_days, m.cert_expiry_timestamp, m.cert_valid_from, m.cert_last_accessed)
+        labelname_sets = [set(g._labelnames) for g in gauges]
+        assert all(s == labelname_sets[0] for s in labelname_sets), \
+            {g._name: sorted(g._labelnames) for g in gauges}
+
+
 class TestCertProcessInfoFanoutCap:
     """
     Tests for CertificateAnalyzer._record_cert_process_access's cap on
@@ -3234,6 +3283,7 @@ class TestCacheHitReDetection:
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
             checksum='', spki_hash='', key_usage='', extended_key_usage='',
+            spki_algorithm_oid='', signature_algorithm_oid='',
         )._value.get()
         assert before == 0.0
 
@@ -3245,6 +3295,7 @@ class TestCacheHitReDetection:
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
             checksum='', spki_hash='', key_usage='', extended_key_usage='',
+            spki_algorithm_oid='', signature_algorithm_oid='',
         )._value.get()
         assert after > 0.0
 
@@ -3928,6 +3979,62 @@ class TestFipsComplianceEnabled:
         cp = configparser.ConfigParser()
         result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
         assert result.lower() == 'true'
+
+
+class TestAlgorithmOidExtraction:
+    """
+    Tests for spki_algorithm_oid / signature_algorithm_oid on CertificateInfo.
+
+    Unlike the FIPS fields above, these are extracted unconditionally
+    (independent of fips_compliance_enabled) since they feed downstream
+    PQC-readiness scoring and stay cheap regardless of that flag.
+    """
+
+    def test_oids_populated_for_rsa_cert(self, analyzer, temp_dir):
+        cert, _ = TestCertificateGeneration.generate_certificate("oid-rsa.example.com", 365)
+        path = os.path.join(temp_dir, "oid-rsa.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.spki_algorithm_oid == '1.2.840.113549.1.1.1'        # rsaEncryption
+        assert info.signature_algorithm_oid == '1.2.840.113549.1.1.11'  # sha256WithRSAEncryption
+
+    def test_oids_populated_even_when_fips_compliance_disabled(self, analyzer, temp_dir):
+        """These fields aren't gated behind fips_compliance_enabled."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("oid-nofips.example.com", 365)
+        path = os.path.join(temp_dir, "oid-nofips.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.fips_compliant is False  # FIPS check itself skipped
+        assert info.spki_algorithm_oid == '1.2.840.113549.1.1.1'
+        assert info.signature_algorithm_oid == '1.2.840.113549.1.1.11'
+
+    def test_oid_extraction_error_is_non_fatal(self, analyzer, temp_dir, monkeypatch):
+        """If get_algorithm_oids() raises, extract_certificate_info still returns CertificateInfo
+        with the OID fields left at their empty defaults."""
+        import agent.analyzer as _ca
+
+        def _raising(cert):
+            raise RuntimeError("simulated OID extraction error")
+
+        monkeypatch.setattr(_ca, '_get_algorithm_oids', _raising)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("oid-err.example.com", 365)
+        path = os.path.join(temp_dir, "oid-err.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.spki_algorithm_oid == ''
+        assert info.signature_algorithm_oid == ''
 
 
 class TestRFC5280Extensions:
@@ -5881,6 +5988,8 @@ class TestKafkaPublisher:
             container_name='main',
             container_image='my-app:1.0',
             checksum='',
+            spki_algorithm_oid='1.2.840.113549.1.1.1',
+            signature_algorithm_oid='1.2.840.113549.1.1.11',
         )
 
     def _make_publisher(self, mock_producer_class, **kwargs):
@@ -6036,6 +6145,7 @@ class TestKafkaPublisher:
                 'days_until_expiry', 'is_expired', 'process', 'pid',
                 'namespace', 'pod_name', 'node_name', 'workload_kind', 'workload_name',
                 'app_label', 'container_name', 'container_image', 'checksum', 'spki_hash',
+                'spki_algorithm_oid', 'signature_algorithm_oid',
             ]
             for field in required_fields:
                 assert field in msg, f"Missing field: {field}"
@@ -6068,6 +6178,8 @@ class TestKafkaPublisher:
             assert msg['workload_name'] == 'my-app'
             assert msg['san_dns_names'] == ['test.example.com', 'www.test.example.com']
             assert msg['is_expired']    is True   # not_after is 2025-01-01, now > that
+            assert msg['spki_algorithm_oid']      == '1.2.840.113549.1.1.1'
+            assert msg['signature_algorithm_oid'] == '1.2.840.113549.1.1.11'
 
     def test_publish_uses_unique_key_as_partition_key(self, monkeypatch, sample_cert_info):
         """Message key is unique_key (path:cert_index:serial) for partition locality."""
