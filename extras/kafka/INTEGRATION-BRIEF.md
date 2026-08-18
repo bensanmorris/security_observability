@@ -100,6 +100,38 @@ built for one of these views (e.g. a compacted, `spki_hash`-keyed "current
 deployments of this key" topic) — never the raw event topics, per the
 compaction confirm-item below.
 
+## Should the raw topics be keyless?
+
+Worth raising as a deliberate decision alongside partition sizing, not
+changing silently.
+
+None of the three use cases above rely on the *producer's* key — each wants
+its own consumer-side view keyed on a different field. What the current key
+(`path:cert_index:serial_number`) actually buys is narrower: same-partition,
+in-order delivery between a `certificate_discovered` event and its
+`certificate_accessed` events — a feature that's opt-in and off by default
+today.
+
+Against that, keying by cert identity creates a real hot-partition risk on a
+shared, higher-throughput broker: a certificate deployed identically across
+many nodes always lands on one partition no matter how many partitions are
+provisioned — exactly the widely-deployed-cert case blast-radius
+investigations care about most. Going keyless also forecloses the
+compaction footgun in confirm-item 7 by construction, since Kafka can't
+meaningfully retain-by-key on null-keyed records.
+
+The cost: the discovery/access join in
+[CONSUMER-README.md](CONSUMER-README.md) already tolerates a missing
+local-state match as a documented edge case (late-joining consumer group,
+replay); dropping the key mostly makes that the common path rather than the
+exception — a UX regression for that one join, not a correctness break.
+
+**Leaning toward keyless for the raw topics** — but this changes a
+guarantee CONSUMER-README.md currently documents, so it needs to be decided
+and announced deliberately, and it's relevant to raise alongside
+partition-count sizing with the platform team, since a keyed topic won't
+spread load evenly across whatever partition count they provision.
+
 ---
 
 ## Open questions for the platform team
