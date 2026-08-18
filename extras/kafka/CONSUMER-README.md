@@ -2,7 +2,9 @@
 
 A guide for developers writing a service that consumes cert-analyzer's Kafka
 event streams — as opposed to [KAFKA-README.md](KAFKA-README.md), which
-covers standing up a broker to test *cert-analyzer's own* publishing path.
+covers standing up a broker to test *cert-analyzer's own* publishing path,
+or [INTEGRATION-BRIEF.md](INTEGRATION-BRIEF.md), which covers handing the
+producer side off to a team-owned shared broker.
 
 Examples here use Python and [`kafka-python`](https://kafka-python.readthedocs.io/),
 the same library cert-analyzer itself uses to publish (see `agent/kafka.py`).

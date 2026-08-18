@@ -12,6 +12,11 @@ Writing an actual consumer against these topics? See
 [CONSUMER-README.md](CONSUMER-README.md) for client code examples and links
 to the full event schemas.
 
+Migrating off this pilot broker onto a team-owned shared Kafka? See
+[INTEGRATION-BRIEF.md](INTEGRATION-BRIEF.md) for the handoff details —
+topic/key/durability config, open questions to confirm with the owning
+team, and key-design notes per consumer use case.
+
 ---
 
 ## Prerequisites
