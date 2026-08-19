@@ -5,7 +5,10 @@ The cert-analyzer surfaces certificate data through two independent channels:
 **Kafka event streams** — `certificate_discovered` (one message per
 newly-discovered certificate) and `certificate_accessed` (one message per
 distinct process/pod that subsequently re-accesses an already-known
-certificate).
+certificate). Each stream can also, independently and optionally, be
+additionally published wrapped in a [Kafka Connect JSON
+envelope](#kafka-connect-envelope-optional) to its own topic, for
+consumption by a stock Kafka Connect JDBC Sink connector.
 
 This document is a reference for engineers writing dashboards, alert rules,
 or consuming either Kafka topic.
@@ -160,6 +163,10 @@ Prometheus handles ongoing state; Kafka handles the stream of new discoveries.
 
 The partition key is `path:cert_index:serial_number` — stable across restarts,
 unique per certificate, and rotated when the cert at a path changes.
+
+This is the plain-JSON topic. There's also an optional [Kafka Connect
+envelope](#kafka-connect-envelope-optional) variant of this same event,
+carrying the same fields shown below.
 
 ```json
 {
@@ -361,6 +368,10 @@ consumers should join the two streams on `cert_unique_key` (equivalent to
 The partition key is the same `cert_unique_key`, so all accesses for a given
 certificate land on the same partition.
 
+This is the plain-JSON topic. There's also an optional [Kafka Connect
+envelope](#kafka-connect-envelope-optional) variant of this same event,
+carrying the same fields shown below.
+
 ```json
 {
   "schema_version":   1,
@@ -416,3 +427,90 @@ certificate land on the same partition.
 > can differ from the pod/container fields on the certificate's own
 > `certificate_discovered` event, which stay sticky to whichever pod first
 > discovered the certificate.
+
+---
+
+## Kafka Connect envelope (optional)
+
+Both event streams above have an optional second output: the same event,
+wrapped in a Kafka Connect JSON envelope
+(`{"schema": {...}, "payload": {...}}`, the shape
+`org.apache.kafka.connect.json.JsonConverter` with `schemas.enable=true`
+expects), published to its own dedicated topic. This exists so a stock
+Kafka Connect JDBC Sink connector (Confluent's, or Aiven's open-source fork)
+can consume it directly — no custom consumer code, `auto.create`/
+`auto.evolve` build the DB table from the schema, `insert.mode=upsert`
+handles the write.
+
+Off by default, purely additive — enabling either envelope changes nothing
+about the plain-JSON topics documented above.
+
+| Event | Plain topic | Envelope topic | Config keys |
+|---|---|---|---|
+| `certificate_discovered` | `cert-analyzer-events` | `cert-analyzer-events-connect` | `connect_enabled` / `connect_topic` |
+| `certificate_accessed` | `cert-analyzer-access-events` | `cert-analyzer-access-events-connect` | `access_connect_enabled` / `access_connect_topic` |
+
+Each envelope flag is independently gated from its plain-topic counterpart
+(`connect_enabled` from `plain_enabled`; `access_connect_enabled` from
+`access_enabled`) — any combination of plain-only, both, or envelope-only is
+valid config, not a single mode switch.
+
+### Payload
+
+`payload` carries the **same fields** documented in the field reference
+tables above, for the matching event type — nothing added or removed,
+except:
+
+- `pod_annotations` (`certificate_discovered` only) is **JSON-encoded as a
+  string**, not a nested object as shown in the plain-topic example above —
+  Kafka Connect's JSON schema has no map type a stock JDBC sink can flatten
+  into columns without a custom SMT. Decode it client-side.
+
+`schema` declares each payload field's Kafka Connect type, built once per
+`KafkaPublisher` and identical on every message (not re-derived per event —
+Connect's JSON converter expects a structurally identical schema on every
+message on a topic). Types map from the field reference tables above as:
+`int` → `int32`, `float` → `float64`, `bool` → `boolean`, `string`/ISO 8601
+timestamp → `string` (timestamps are plain text, not a native Connect
+timestamp logical type), and a `string[]` list → a Connect `array` of
+`string`.
+
+### Message key
+
+Unlike the plain topics (keyed on cert identity alone, so same-partition
+in-order delivery between a `certificate_discovered` event and its
+`certificate_accessed` events — see
+[INTEGRATION-BRIEF.md](kafka/INTEGRATION-BRIEF.md)), the envelope
+topics are keyed for **upsert correctness** on the JDBC sink side
+(`pk.mode=record_key`, no `pk.fields` needed — the whole key is one opaque
+string):
+
+| Envelope topic | Key |
+|---|---|
+| `cert-analyzer-events-connect` | `node_name:path:cert_index` |
+| `cert-analyzer-access-events-connect` | `node_name:path:cert_index:process:parent_process:pod_name:namespace:app_label:container_name` |
+
+The access-connect key includes the accessor fields, not just cert
+identity, because the whole point of `certificate_accessed` is capturing
+every distinct accessor of a cert — keying on cert identity alone would
+collapse every accessor down to whichever one published last. See
+[extras/kafka/INTEGRATION-BRIEF.md](kafka/INTEGRATION-BRIEF.md#kafka-connect--jdbc-sink-publishing)
+for the full key-design rationale (including why this deliberately
+diverges from `path:cert_index`, the key recommended for consumer-side
+*grouping* elsewhere in that document).
+
+### Schema evolution
+
+A Connect schema is rigid by construction — every message on a topic must
+match the declared `"schema"` exactly, unlike `schema_version` above, which
+tolerates new fields at the same version. A breaking change to either
+envelope (field renamed, removed, or retyped) ships as a **new topic name**
+(a new `connect_topic`/`access_connect_topic` config value), not an
+in-place schema change.
+
+### Further reading
+
+- [extras/kafka/CONSUMER-README.md](kafka/CONSUMER-README.md#consuming-via-kafka-connect-jdbc-sink) —
+  example JDBC sink connector config.
+- [extras/kafka/INTEGRATION-BRIEF.md](kafka/INTEGRATION-BRIEF.md#kafka-connect--jdbc-sink-publishing) —
+  design rationale, key choices, migration path off the plain topics.
