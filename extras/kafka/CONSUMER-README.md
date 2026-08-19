@@ -171,6 +171,107 @@ so:
 
 ---
 
+## Consuming via Kafka Connect (JDBC Sink)
+
+`cert-analyzer-events-connect` (`[kafka] connect_enabled` / `connect_topic`,
+off by default) is a **separate, opt-in topic** — enabling it changes
+nothing about the two topics documented above, and everything in this
+document up to here still applies to them unmodified.
+
+Each message is a Kafka Connect JSON envelope,
+`{"schema": {...}, "payload": {...}}` (the shape
+`org.apache.kafka.connect.json.JsonConverter` with `schemas.enable=true`
+expects), wrapping the same fields as a `certificate_discovered` event on
+the main topic. It exists so a stock Kafka Connect JDBC Sink connector
+(Confluent's or Aiven's open-source fork) can upsert rows into a DB with
+**no custom consumer code** — you're not expected to write a Python
+consumer against this topic the way the rest of this document covers.
+
+**Important — the `schema_version` forward-compatibility guarantee above
+does *not* extend to this topic.** A Kafka Connect JSON schema is rigid by
+construction: every message must match the declared `"schema"` exactly. Any
+breaking change to this envelope ships as a new topic name (e.g.
+`cert-analyzer-events-connect-v2`), not a silent in-place change — see
+[INTEGRATION-BRIEF.md](INTEGRATION-BRIEF.md#kafka-connect--jdbc-sink-publishing)
+for why.
+
+`pod_annotations` is JSON-encoded as a plain string field in this envelope
+(Connect's schema has no map type a stock JDBC sink can flatten into
+columns) — decode it client-side if you need it.
+
+Example JDBC sink connector config, POSTed to a Connect worker's REST API:
+
+```json
+{
+  "name": "cert-analyzer-expiry-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "cert-analyzer-events-connect",
+    "connection.url": "jdbc:postgresql://db-host:5432/certs",
+    "connection.user": "cert_sink",
+    "connection.password": "${env:DB_PASSWORD}",
+    "insert.mode": "upsert",
+    "pk.mode": "record_key",
+    "auto.create": "true",
+    "auto.evolve": "true",
+    "table.name.format": "cert_discoveries"
+  }
+}
+```
+
+`pk.mode=record_key` with no `pk.fields` works because the Kafka message key
+on this topic is a single opaque string, `node_name:path:cert_index` — see
+[INTEGRATION-BRIEF.md](INTEGRATION-BRIEF.md#kafka-connect--jdbc-sink-publishing)
+for why that key (not `cert_unique_key`, and not `path:cert_index` alone) is
+what makes the upsert correct across a fleet.
+
+One more thing to know before relying on `auto.create`: `not_before`,
+`not_after`, and `detected_at` are Connect `string` fields (ISO 8601 text),
+not a native Connect timestamp logical type — `auto.create` will give you
+`VARCHAR`/`TEXT` columns for these, not `TIMESTAMP`. If you want real
+timestamp columns, add your own `TimestampConverter` single message
+transform to the connector config; that's outside what cert-analyzer
+provides.
+
+### `certificate_accessed` has the same envelope
+
+`cert-analyzer-access-events-connect` (`[kafka] access_connect_enabled` /
+`access_connect_topic`, off by default) is the same idea applied to
+`certificate_accessed` — a Kafka Connect JSON envelope wrapping the same
+fields as an access event on `cert-analyzer-access-events`. Everything
+above applies equally: separate opt-in topic, no `schema_version`
+forward-compatibility, breaking changes get a new topic name. There's no
+`pod_annotations`-equivalent field to JSON-encode here (the access message
+has no nested/dict fields).
+
+**Independently gated from `access_enabled`, not tied to it** — you can run
+the Connect-envelope access stream without the plain one, or vice versa,
+same as `plain_enabled`/`connect_enabled` for the discovery topic.
+
+**Key is different, and matters more here than on the discovery topic:**
+`node_name:path:cert_index:<process>:<parent_process>:<pod_name>:<namespace>:<app_label>:<container_name>`
+— cert identity alone (`node_name:path:cert_index`, what the discovery-connect
+topic uses) is *not* enough, because the entire point of `certificate_accessed`
+is capturing every distinct accessor for a cert, not one row per cert. An
+upsert keyed only on cert identity would collapse every accessor down to
+whichever one published last. With the accessor folded into the key, an
+`insert.mode=upsert` JDBC sink naturally maintains a live "who has this
+cert loaded, and when did each last touch it" table — a new access from an
+already-seen accessor updates that accessor's row in place (fresh
+`accessed_at`) rather than growing the table unboundedly, while a genuinely
+new accessor gets its own row. Still `pk.mode=record_key` with no
+`pk.fields` needed, same as the discovery topic — just point `topics` at
+`cert-analyzer-access-events-connect` and `table.name.format` at a
+different table name in the example config above.
+
+Standing up the Connect worker itself, installing the JDBC connector plugin,
+and the DB/table this ends up in are all outside this repo's scope — this
+section only covers what the topic looks like and how to point a stock
+connector at it.
+
+---
+
 ## Connecting to a secured broker
 
 If `[kafka] security_protocol` is set to anything other than `PLAINTEXT` on

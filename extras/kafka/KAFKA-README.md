@@ -4,9 +4,13 @@ cert-analyzer can optionally publish a JSON event to Kafka each time a
 certificate is discovered for the first time (`KAFKA_ENABLED=true` /
 `[kafka] enabled = true`), and optionally a further event each time an
 already-known certificate is re-accessed by a new process/pod
-(`[kafka] access_enabled = true`). This document covers standing up a
-throwaway, single-node Kafka broker on RHEL 9 to test that path locally, and
-how to verify and view the data it produces.
+(`[kafka] access_enabled = true`). Either event can also, independently and
+optionally, be additionally published wrapped in a Kafka-Connect-compatible
+JSON envelope to its own dedicated topic (`[kafka] connect_enabled = true`
+for discovery, `access_connect_enabled = true` for access), for a stock
+Kafka Connect JDBC Sink connector to consume with no custom code. This
+document covers standing up a throwaway, single-node Kafka broker on RHEL 9
+to test that path locally, and how to verify and view the data it produces.
 
 Writing an actual consumer against these topics? See
 [CONSUMER-README.md](CONSUMER-README.md) for client code examples and links
@@ -42,10 +46,12 @@ ZooKeeper) as a native systemd service:
 - Formats KRaft storage under `/var/lib/kafka/data` (once, on first install)
 - Installs and starts `kafka.service`
 - Waits for the broker to actually accept Kafka-protocol connections (not just for the process to start — see [Troubleshooting](#troubleshooting))
-- Creates the `cert-analyzer-events` and `cert-analyzer-access-events` topics
-  (the latter created unconditionally, even though `[kafka] access_enabled`
-  defaults to `false` — cheap to have it exist and idle rather than fail
-  later if you turn access events on after already running this script)
+- Creates the `cert-analyzer-events`, `cert-analyzer-access-events`,
+  `cert-analyzer-events-connect`, and `cert-analyzer-access-events-connect`
+  topics (the latter three created unconditionally, even though
+  `[kafka] access_enabled`/`connect_enabled`/`access_connect_enabled` all
+  default to `false` — cheap to have them exist and idle rather than fail
+  later if you turn any of them on after already running this script)
 
 It's plaintext/unauthenticated by design — matches cert-analyzer's own
 `PLAINTEXT` default `security_protocol`, and is not meant for anything
@@ -58,7 +64,7 @@ broker and both topics.
 To use different topic names:
 
 ```bash
-CERT_ANALYZER_TOPIC=my-test-topic CERT_ANALYZER_ACCESS_TOPIC=my-test-access-topic ./extras/kafka/install-kafka.sh
+CERT_ANALYZER_TOPIC=my-test-topic CERT_ANALYZER_ACCESS_TOPIC=my-test-access-topic CERT_ANALYZER_CONNECT_TOPIC=my-test-connect-topic CERT_ANALYZER_ACCESS_CONNECT_TOPIC=my-test-access-connect-topic ./extras/kafka/install-kafka.sh
 ```
 
 ---
@@ -72,11 +78,23 @@ Add to `/etc/cert-analyzer/cert-analyzer.conf` (or set the equivalent env vars):
 enabled = true
 bootstrap_servers = localhost:9092
 topic = cert-analyzer-events
+# plain_enabled = true is the default -- set false to stop publishing this
+# topic once every consumer has migrated to connect_topic below.
 
 # Optional -- off by default. See CONSUMER-README.md for the
 # certificate_accessed schema.
 access_enabled = true
 access_topic = cert-analyzer-access-events
+
+# Optional -- off by default. See CONSUMER-README.md for consuming this via
+# a stock Kafka Connect JDBC Sink connector.
+connect_enabled = true
+connect_topic = cert-analyzer-events-connect
+
+# Optional -- off by default, and independent of access_enabled above.
+# Same Kafka Connect envelope, for certificate_accessed instead.
+access_connect_enabled = true
+access_connect_topic = cert-analyzer-access-events-connect
 ```
 
 Then restart cert-analyzer for the config to take effect.

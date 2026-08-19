@@ -2357,7 +2357,9 @@ class CertificateAnalyzer:
             # *accessing* pod/container for this specific event, independent of
             # each cert_info's own (sticky, discoverer-attributed) pod fields.
             app_label, container_name = self._derive_app_label_and_container_name(tetragon_pod)
-            publish_access = self.kafka_publisher is not None and self.kafka_publisher.access_enabled
+            publish_access = self.kafka_publisher is not None and (
+                self.kafka_publisher.access_enabled or self.kafka_publisher.access_connect_enabled
+            )
             if publish_access:
                 pod_uid = tetragon_pod.uid if tetragon_pod is not None else ""
                 container_id = tetragon_pod.container.id if tetragon_pod is not None else ""

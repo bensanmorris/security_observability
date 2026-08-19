@@ -19,6 +19,8 @@ below for reference).
 |---|---|---|
 | `cert-analyzer-events` | `[kafka] topic` / `KAFKA_TOPIC` | once per certificate, the first time it's seen — subject, issuer, SANs, key/crypto detail, FIPS status, K8s enrichment |
 | `cert-analyzer-access-events` | `[kafka] access_topic` / `KAFKA_ACCESS_TOPIC` | once per distinct process/pod that subsequently re-accesses an already-known certificate (opt-in, off by default) |
+| `cert-analyzer-events-connect` | `[kafka] connect_topic` / `KAFKA_CONNECT_TOPIC` | same trigger as `cert-analyzer-events`, wrapped in a Kafka-Connect JSON envelope (`{"schema": {...}, "payload": {...}}`) for a stock Kafka Connect JDBC Sink connector (opt-in, off by default — see below) |
+| `cert-analyzer-access-events-connect` | `[kafka] access_connect_topic` / `KAFKA_ACCESS_CONNECT_TOPIC` | same trigger as `cert-analyzer-access-events`, wrapped the same way (opt-in, off by default, independent of `access_enabled` — see below) |
 
 Topic names are set via config file / env var only today — the Helm chart
 doesn't expose them as values, so pointing at a differently-namespaced topic
@@ -27,7 +29,8 @@ just a config toggle.
 
 ## Key & ordering
 
-The partition key on both topics is `cert_unique_key`
+The partition key on the two raw topics (`cert-analyzer-events`,
+`cert-analyzer-access-events`) is `cert_unique_key`
 (`path:cert_index:serial_number`, spelled `cert_info.unique_key` in code) —
 it identifies the **certificate**, not its source. Node and pod ride along
 in the *payload* (the schema includes both) but aren't in the key: there's
@@ -40,6 +43,10 @@ append-only log, so a shared key never causes events to be lost or
 overwritten, only co-located in publish order — but it does mean
 partitioning won't give you per-node consumer sharding or even load spread
 by host.
+
+`cert-analyzer-events-connect` (see "Kafka Connect / JDBC Sink publishing"
+below) uses a different key for a different reason — it's built for a
+sink connector's *upsert*, not the raw log's grouping.
 
 ## Message format
 
@@ -134,6 +141,85 @@ spread load evenly across whatever partition count they provision.
 
 ---
 
+## Kafka Connect / JDBC Sink publishing
+
+`cert-analyzer-events-connect` (`[kafka] connect_enabled` / `connect_topic`,
+off by default) sidesteps the registry-vs-plain-JSON question above for one
+specific consumer shape: a stock Kafka Connect JDBC Sink connector upserting
+`certificate_discovered` events into a DB table for efficient expiry
+querying, with no custom consumer code. Each message is a Kafka Connect JSON
+envelope (`{"schema": {...}, "payload": {...}}`, the shape
+`org.apache.kafka.connect.json.JsonConverter` with `schemas.enable=true`
+expects) — a static schema, built once, covering the same fields as the
+plain topic's message.
+
+**Key: `node_name:path:cert_index`** — deliberately *not*
+`path:cert_index` (the Expiry row's recommended grouping key above). That
+recommendation was for a consumer-side *grouping* key, where cross-node
+correctness is handled at query time. This key drives a JDBC sink's
+*upsert* (`pk.mode=record_key`) — whichever record last writes a given key
+becomes the only surviving row. A cert deployed at the same path across
+hundreds of nodes (the common case this project exists to observe) would,
+under `path:cert_index` alone, collapse every node's row down to whichever
+one last upserted — hiding per-node expiry status, the opposite of what the
+table is for. Including `node_name` keeps one row per node+deployment-slot,
+still with zero extra connector config (`pk.mode=record_key`, no
+`pk.fields` needed since the whole key is one opaque string).
+
+`pod_annotations` (the one nested/dict field in the payload) is
+JSON-encoded as a plain string in this envelope — Connect's JSON schema has
+no map type a stock JDBC sink can flatten into columns without a custom
+SMT. Decode client-side.
+
+**Schema evolution:** a Connect schema is rigid by construction — every
+message on a topic must match it exactly, unlike the plain topics' `schema_
+version`-gated forward-compatibility (new fields tolerated at the same
+version). A breaking change to this envelope (field renamed, removed, or
+retyped) ships as a **new topic name** (e.g.
+`cert-analyzer-events-connect-v2`, a new `connect_topic` config value), not
+an in-place schema change — `auto.evolve` on the sink side only ever adds
+columns, never drops/renames, so an in-place breaking change would leave an
+orphaned old column behind a new one rather than a clean transition.
+
+See [CONSUMER-README.md](CONSUMER-README.md#consuming-via-kafka-connect-jdbc-sink)
+for an example JDBC sink connector config.
+
+**Migration path off the plain topic:** `[kafka] plain_enabled` (default
+`true`) independently gates the plain-JSON `topic` publish, separately from
+`connect_enabled`. This isn't a mode switch — plain-only (today),
+both-at-once (a migration window, to validate the new consumer before
+committing), and connect-only (`plain_enabled=false`, once every consumer
+has migrated) are just combinations of the two flags. There's no rush to
+flip `plain_enabled=false`: running both costs one extra `producer.send()`
+per discovery event (already a low-volume, discovery-only stream), plus
+proportionally more broker-side bytes on the connect topic than the plain
+one — Connect's inline `schemas.enable=true` format re-sends the full
+`"schema"` block on every message (no registry to dedupe it), so each
+enveloped message runs a few times larger than its plain-topic equivalent.
+Neither cost compounds with fleet size beyond the normal per-node discovery
+rate.
+
+**`certificate_accessed` gets the same envelope**, on
+`cert-analyzer-access-events-connect` (`access_connect_enabled` /
+`access_connect_topic`) — independently gated from `access_enabled`, same
+reasoning as `plain_enabled`/`connect_enabled` above (you can run the
+Connect-envelope access stream without the plain one, or vice versa).
+
+Its key is **not** just cert identity, unlike the discovery topic:
+`node_name:path:cert_index:<process>:<parent_process>:<pod_name>:<namespace>:<app_label>:<container_name>`.
+Cert identity alone would be wrong here — the entire point of
+`certificate_accessed` is capturing every distinct accessor of a cert, so an
+upsert keyed only on `node_name:path:cert_index` would collapse every
+accessor down to whichever one published last, the opposite of what the
+event exists to record. Folding the accessor fields into the key instead
+gives a JDBC sink a natural "who has this cert loaded, and when did each
+last touch it" table: a repeat access from an already-seen accessor updates
+that one row in place, a genuinely new accessor gets its own row, and the
+table doesn't grow unboundedly on repeat access from the same processes.
+Still `pk.mode=record_key`, zero extra connector config either way.
+
+---
+
 ## Open questions for the platform team
 
 1. **Bootstrap address:** our DaemonSet runs with `hostNetwork: true`, so it
@@ -148,9 +234,13 @@ spread load evenly across whatever partition count they provision.
    come from?
 4. **Partitions / RF / who creates the topics:** do you want to pre-create
    them with your own sizing, or should we rely on auto-create?
-5. **Schema expectations:** is plain JSON + an in-payload `schema_version`
-   workable, or does your org require registry-managed schemas
-   (Avro/Protobuf)?
+5. **Schema expectations:** plain JSON + an in-payload `schema_version`
+   remains the format on the two raw topics. If you need Connect/JDBC-sink
+   compatibility for a specific consumer, `cert-analyzer-events-connect` and
+   `cert-analyzer-access-events-connect` are now available as opt-in topics
+   carrying a Kafka Connect JSON envelope (see "Kafka Connect / JDBC Sink
+   publishing" above) — raise it if that covers your need, or if you still
+   require full registry-managed schemas (Avro/Protobuf) beyond that.
 6. **Partition affinity by node/pod:** the key is cert-identity only — node
    and pod are payload fields, not part of the key. If you need per-node
    routing or sharded consumers, that's a key-strategy change on our side,

@@ -6203,6 +6203,65 @@ class TestKafkaPublisher:
             assert str(sample_cert_info.cert_index) in expected_key
             assert sample_cert_info.serial_number in expected_key
 
+    # ── plain_enabled gating ───────────────────────────────────────────────────
+
+    def test_plain_enabled_defaults_true(self, monkeypatch, sample_cert_info):
+        """plain_enabled defaults to True -- unchanged behavior for existing installs."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher.plain_enabled is True
+
+            publisher.publish(sample_cert_info)
+            mock_producer.send.assert_called_once()
+            send_args, _ = mock_producer.send.call_args
+            assert send_args[0] == 't'
+
+    def test_publish_plain_disabled_skips_plain_topic_send(self, monkeypatch, sample_cert_info):
+        """plain_enabled=False stops the plain-topic send but connect_topic still fires -- independent gates."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t',
+                plain_enabled=False, connect_topic='t-connect',
+            )
+            publisher.publish(sample_cert_info)
+
+            mock_producer.send.assert_called_once()
+            send_args, _ = mock_producer.send.call_args
+            assert send_args[0] == 't-connect'
+
+    def test_publish_plain_and_connect_both_disabled_sends_nothing(self, monkeypatch, sample_cert_info):
+        """plain_enabled=False with no connect_topic configured is a silent no-op, never raises."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', plain_enabled=False,
+            )
+            publisher.publish(sample_cert_info)
+            mock_producer.send.assert_not_called()
+
     # ── publish_access (certificate_accessed) ─────────────────────────────────
 
     def test_publish_access_noop_when_access_topic_not_configured(self, monkeypatch, sample_cert_info):
@@ -6265,6 +6324,283 @@ class TestKafkaPublisher:
             # consumers join against the certificate_discovered topic on cert_unique_key.
             assert 'subject' not in msg
             assert 'fips_compliant' not in msg
+
+    # ── publish_access() Kafka Connect envelope (access_connect_topic) ────────
+
+    def test_publish_access_connect_noop_when_neither_flag_set(self, monkeypatch, sample_cert_info):
+        """publish_access() sends nothing when both access_enabled and access_connect_enabled are unset (defaults)."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher.access_connect_enabled is False
+
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+            )
+            mock_producer.send.assert_not_called()
+
+    def test_publish_access_connect_sends_independent_of_access_enabled(self, monkeypatch, sample_cert_info):
+        """access_connect_enabled alone (access_enabled left False) still sends an envelope to access_connect_topic."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', access_connect_topic='t-access-connect',
+            )
+            assert publisher.access_enabled is False
+            assert publisher.access_connect_enabled is True
+
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+                namespace='default', pod_name='my-pod', pod_uid='uid-1',
+                node_name='worker-node-1', app_label='my-app',
+                container_name='main', container_id='c1', container_image='my-app:1.0',
+            )
+
+            mock_producer.send.assert_called_once()
+            send_args, send_kwargs = mock_producer.send.call_args
+            assert send_args[0] == 't-access-connect'
+            envelope = send_kwargs['value']
+            assert set(envelope.keys()) == {'schema', 'payload'}
+            assert envelope['schema']['name'] == 'io.certanalyzer.CertificateAccessed'
+            assert envelope['payload']['event_type'] == 'certificate_accessed'
+            assert envelope['payload']['process']    == '/usr/bin/git'
+
+    def test_publish_access_connect_key_includes_accessor_identity(self, monkeypatch, sample_cert_info):
+        """access_connect_topic key includes the accessor, not just cert identity -- distinct accessors mustn't collide on upsert."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', access_connect_topic='t-access-connect',
+            )
+
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+                namespace='default', pod_name='pod-a', node_name='worker-node-1',
+                app_label='my-app', container_name='main',
+            )
+            key_a = mock_producer.send.call_args[1]['key']
+
+            mock_producer.reset_mock()
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/curl', pid=556,
+                parent_process='/usr/bin/bash', parent_pid=1,
+                namespace='default', pod_name='pod-a', node_name='worker-node-1',
+                app_label='my-app', container_name='main',
+            )
+            key_b = mock_producer.send.call_args[1]['key']
+
+            assert key_a != key_b
+            expected_a = (
+                f"worker-node-1:{sample_cert_info.path}:{sample_cert_info.cert_index}:"
+                f"/usr/bin/git:/usr/bin/bash:pod-a:default:my-app:main"
+            )
+            assert key_a == expected_a
+
+    def test_publish_access_connect_and_plain_both_enabled(self, monkeypatch, sample_cert_info):
+        """Both access_enabled and access_connect_enabled together send to both topics."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t',
+                access_topic='t-access', access_connect_topic='t-access-connect',
+            )
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+            )
+            assert mock_producer.send.call_count == 2
+            topics_sent = {c[0][0] for c in mock_producer.send.call_args_list}
+            assert topics_sent == {'t-access', 't-access-connect'}
+
+    # ── publish() Kafka Connect envelope (connect_topic) ──────────────────────
+
+    def test_publish_connect_noop_when_connect_topic_not_configured(self, monkeypatch, sample_cert_info):
+        """publish() sends only the plain-topic message when connect_topic isn't set — purely additive, off by default."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher.connect_enabled is False
+
+            publisher.publish(sample_cert_info)
+            mock_producer.send.assert_called_once()
+
+    def test_publish_connect_sends_envelope_when_connect_topic_configured(self, monkeypatch, sample_cert_info):
+        """publish() additionally sends a {schema, payload} envelope to connect_topic when configured."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', connect_topic='t-connect',
+            )
+            assert publisher.connect_enabled is True
+
+            publisher.publish(sample_cert_info)
+            assert mock_producer.send.call_count == 2
+
+            second_call_args, second_call_kwargs = mock_producer.send.call_args_list[1]
+            assert second_call_args[0] == 't-connect'
+            envelope = second_call_kwargs['value']
+            assert set(envelope.keys()) == {'schema', 'payload'}
+            assert envelope['schema']['type'] == 'struct'
+
+    def test_publish_connect_envelope_payload_matches_plain_message(self, monkeypatch, sample_cert_info):
+        """The connect envelope's payload carries the same field values as the plain-topic message."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', connect_topic='t-connect',
+            )
+            publisher.publish(sample_cert_info)
+
+            plain_msg = mock_producer.send.call_args_list[0][1]['value']
+            connect_payload = mock_producer.send.call_args_list[1][1]['value']['payload']
+
+            for key, value in plain_msg.items():
+                if key == 'pod_annotations':
+                    continue  # JSON-encoded in the envelope, checked separately below
+                assert connect_payload[key] == value, f"Mismatch on {key}"
+
+    def test_publish_connect_schema_is_stable_across_calls(self, monkeypatch, sample_cert_info):
+        """The Connect schema is built once and reused, not rebuilt per message."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', connect_topic='t-connect',
+            )
+            publisher.publish(sample_cert_info)
+            publisher.publish(sample_cert_info)
+
+            schema_1 = mock_producer.send.call_args_list[1][1]['value']['schema']
+            schema_2 = mock_producer.send.call_args_list[3][1]['value']['schema']
+            assert schema_1 is schema_2
+
+    def test_publish_connect_pod_annotations_json_encoded(self, monkeypatch, sample_cert_info):
+        """pod_annotations lands as a JSON-encoded string in the envelope, not a raw dict."""
+        import dataclasses
+        import json as _json
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        cert_info = dataclasses.replace(sample_cert_info, pod_annotations={'foo': 'bar'})
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', connect_topic='t-connect',
+            )
+            publisher.publish(cert_info)
+
+            connect_payload = mock_producer.send.call_args_list[1][1]['value']['payload']
+            assert isinstance(connect_payload['pod_annotations'], str)
+            assert _json.loads(connect_payload['pod_annotations']) == {'foo': 'bar'}
+
+    def test_publish_connect_key_is_node_path_cert_index(self, monkeypatch, sample_cert_info):
+        """connect_topic key is node_name:path:cert_index -- not unique_key, so an upsert stays correct per node+slot."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', connect_topic='t-connect',
+            )
+            publisher.publish(sample_cert_info)
+
+            second_call_kwargs = mock_producer.send.call_args_list[1][1]
+            expected_key = f"{sample_cert_info.node_name}:{sample_cert_info.path}:{sample_cert_info.cert_index}"
+            assert second_call_kwargs['key'] == expected_key
+            assert second_call_kwargs['key'] != sample_cert_info.unique_key
+
+    def test_publish_connect_schema_fields_optional_flags(self, monkeypatch, sample_cert_info):
+        """Spot-check known-nullable vs. always-present fields carry the correct 'optional' flag."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', connect_topic='t-connect',
+            )
+            publisher.publish(sample_cert_info)
+
+            schema_fields = {
+                f['field']: f for f in
+                mock_producer.send.call_args_list[1][1]['value']['schema']['fields']
+            }
+            assert schema_fields['container_pid']['optional'] is True
+            assert schema_fields['is_ca']['optional'] is True
+            assert schema_fields['path']['optional'] is False
+            assert schema_fields['event_type']['optional'] is False
 
     def test_publish_sends_to_configured_topic(self, monkeypatch, sample_cert_info):
         """Message is sent to the topic specified in configuration."""
@@ -6596,6 +6932,7 @@ class TestKafkaPublisher:
 
         mock_publisher = MagicMock()
         mock_publisher.access_enabled = True
+        mock_publisher.access_connect_enabled = False
         analyzer.kafka_publisher = mock_publisher
 
         cert, _ = TestCertificateGeneration.generate_certificate('access.example.com', 365)
@@ -6642,6 +6979,7 @@ class TestKafkaPublisher:
 
         mock_publisher = MagicMock()
         mock_publisher.access_enabled = False
+        mock_publisher.access_connect_enabled = False
         analyzer.kafka_publisher = mock_publisher
 
         cert, _ = TestCertificateGeneration.generate_certificate('access-disabled.example.com', 365)
@@ -6666,6 +7004,40 @@ class TestKafkaPublisher:
         analyzer.process_event(make_event(path, '/usr/bin/curl', 99))
         analyzer.process_event(make_event(path, '/usr/bin/git', 100))
         mock_publisher.publish_access.assert_not_called()
+
+    def test_analyzer_publishes_access_event_when_only_access_connect_enabled(
+        self, analyzer, temp_dir
+    ):
+        """A re-access still publishes certificate_accessed when only access_connect_enabled is set -- independent of access_enabled."""
+        from unittest.mock import MagicMock
+
+        mock_publisher = MagicMock()
+        mock_publisher.access_enabled = False
+        mock_publisher.access_connect_enabled = True
+        analyzer.kafka_publisher = mock_publisher
+
+        cert, _ = TestCertificateGeneration.generate_certificate('access-connect-only.example.com', 365)
+        path = os.path.join(temp_dir, 'access-connect-only.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        def make_event(p, binary, pid):
+            mock_event = MagicMock()
+            mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+            mock_kprobe = MagicMock()
+            mock_kprobe.process.binary = binary
+            mock_kprobe.process.pid.value = pid
+            mock_kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+            mock_kprobe.HasField.return_value = False
+            mock_arg = MagicMock()
+            mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+            mock_arg.file_arg.path = p
+            mock_kprobe.args = [mock_arg]
+            mock_event.process_kprobe = mock_kprobe
+            return mock_event
+
+        analyzer.process_event(make_event(path, '/usr/bin/curl', 99))
+        analyzer.process_event(make_event(path, '/usr/bin/git', 100))
+        mock_publisher.publish_access.assert_called_once()
 
     def test_analyzer_without_kafka_publisher_works_normally(
         self, analyzer, temp_dir

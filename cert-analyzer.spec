@@ -282,6 +282,88 @@ if [ -f "$_CONF" ] && grep -q '^large_file_cert_threshold[ \t]*=' "$_CONF" 2>/de
     && chmod 0640 "$_CONF" \
     || echo "WARNING: failed to insert large_file_metrics_cap into $_CONF" >&2
 fi
+# Hosts upgraded from a release predating [kafka] plain_enabled: insert it
+# right after topic (which every prior release with [kafka] has). Same
+# end-of-file-append hazard as the large_file_metrics_cap case above.
+if [ -f "$_CONF" ] && grep -q '^topic[ \t]*=' "$_CONF" 2>/dev/null \
+        && ! grep -q '^plain_enabled[ \t]*=' "$_CONF" 2>/dev/null; then
+    awk '
+    /^topic[ \t]*=/ {
+        print
+        print ""
+        print "# Set plain_enabled = false to stop publishing certificate_discovered events"
+        print "# to the plain-JSON topic above -- e.g. once every consumer has migrated to"
+        print "# connect_topic below. Defaults to true (unchanged behavior); independent of"
+        print "# access_enabled/connect_enabled."
+        print "plain_enabled = true"
+        next
+    }
+    { print }
+    ' "$_CONF" > "$_CONF.new" \
+    && mv "$_CONF.new" "$_CONF" \
+    && chown root:%{ana_group} "$_CONF" \
+    && chmod 0640 "$_CONF" \
+    || echo "WARNING: failed to insert plain_enabled into $_CONF" >&2
+fi
+# Hosts upgraded from a release predating [kafka] connect_enabled: insert it
+# right after access_topic (which every prior release with [kafka] has).
+# Plain end-of-file append would land it after whatever section happens to be
+# last in the operator's file instead of under [kafka] -- same reasoning as
+# the large_file_metrics_cap case above.
+if [ -f "$_CONF" ] && grep -q '^access_topic[ \t]*=' "$_CONF" 2>/dev/null \
+        && ! grep -q '^connect_enabled[ \t]*=' "$_CONF" 2>/dev/null; then
+    awk '
+    /^access_topic[ \t]*=/ {
+        print
+        print ""
+        print "# Set connect_enabled = true to additionally publish each certificate_discovered"
+        print "# event wrapped in a Kafka-Connect-compatible JSON envelope"
+        print "# ({\"schema\": {...}, \"payload\": {...}}) to connect_topic, suitable for a stock"
+        print "# Kafka Connect JDBC Sink connector to consume with no custom code."
+        print "# Independently gated from `enabled`/`access_enabled` above; off by default."
+        print "connect_enabled = false"
+        print ""
+        print "# Topic to publish the Kafka-Connect-enveloped certificate_discovered events to"
+        print "connect_topic = cert-analyzer-events-connect"
+        next
+    }
+    { print }
+    ' "$_CONF" > "$_CONF.new" \
+    && mv "$_CONF.new" "$_CONF" \
+    && chown root:%{ana_group} "$_CONF" \
+    && chmod 0640 "$_CONF" \
+    || echo "WARNING: failed to insert connect_enabled/connect_topic into $_CONF" >&2
+fi
+# Hosts upgraded from a release predating [kafka] access_connect_enabled:
+# insert it right after connect_topic (present on every host by this point --
+# either from a prior release, or just inserted by the block above on this
+# same upgrade). Same end-of-file-append hazard as the large_file_metrics_cap
+# case above.
+if [ -f "$_CONF" ] && grep -q '^connect_topic[ \t]*=' "$_CONF" 2>/dev/null \
+        && ! grep -q '^access_connect_enabled[ \t]*=' "$_CONF" 2>/dev/null; then
+    awk '
+    /^connect_topic[ \t]*=/ {
+        print
+        print ""
+        print "# Set access_connect_enabled = true to additionally publish each certificate_accessed"
+        print "# event wrapped in a Kafka-Connect-compatible JSON envelope"
+        print "# ({\"schema\": {...}, \"payload\": {...}}) to access_connect_topic, suitable for a"
+        print "# stock Kafka Connect JDBC Sink connector to consume with no custom code."
+        print "# Independently gated from `access_enabled` above (and from `enabled`/"
+        print "# `connect_enabled`); off by default."
+        print "access_connect_enabled = false"
+        print ""
+        print "# Topic to publish the Kafka-Connect-enveloped certificate_accessed events to"
+        print "access_connect_topic = cert-analyzer-access-events-connect"
+        next
+    }
+    { print }
+    ' "$_CONF" > "$_CONF.new" \
+    && mv "$_CONF.new" "$_CONF" \
+    && chown root:%{ana_group} "$_CONF" \
+    && chmod 0640 "$_CONF" \
+    || echo "WARNING: failed to insert access_connect_enabled/access_connect_topic into $_CONF" >&2
+fi
 unset _CONF
 
 # Reload systemd to pick up the Tetragon drop-in

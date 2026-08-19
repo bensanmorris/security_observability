@@ -244,8 +244,13 @@ sudo systemctl enable --now cert-analyzer
 | `enabled` | `false` | Publish certificate discovery events to Kafka |
 | `bootstrap_servers` | `localhost:9092` | Comma-separated broker addresses |
 | `topic` | `cert-analyzer-events` | Topic to publish `certificate_discovered` events to |
+| `plain_enabled` | `true` | Publish `certificate_discovered` events to the plain-JSON `topic` above. Set to `false` to stop — e.g. once every consumer has migrated to `connect_topic` below. Independent of `access_enabled`/`connect_enabled` |
 | `access_enabled` | `false` | Additionally publish `certificate_accessed` events — one per distinct process/pod that re-accesses an already-known certificate (capped by `max_processes_per_cert` above). Independent of `enabled`; off by default since this can be materially higher volume than discovery events on a busy node |
 | `access_topic` | `cert-analyzer-access-events` | Topic to publish `certificate_accessed` events to |
+| `connect_enabled` | `false` | Additionally publish each `certificate_discovered` event wrapped in a Kafka-Connect-compatible JSON envelope (`{"schema": {...}, "payload": {...}}`) to `connect_topic`, suitable for a stock Kafka Connect JDBC Sink connector with no custom consumer code. Independent of `enabled`/`access_enabled`; off by default |
+| `connect_topic` | `cert-analyzer-events-connect` | Topic to publish the Kafka-Connect-enveloped `certificate_discovered` events to |
+| `access_connect_enabled` | `false` | Additionally publish each `certificate_accessed` event wrapped in the same kind of Kafka-Connect JSON envelope to `access_connect_topic`. Independent of `access_enabled`/`enabled`/`connect_enabled`; off by default |
+| `access_connect_topic` | `cert-analyzer-access-events-connect` | Topic to publish the Kafka-Connect-enveloped `certificate_accessed` events to |
 | `security_protocol` | `PLAINTEXT` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` |
 | `sasl_mechanism` | _(unset)_ | SASL mechanism — required for `SASL_*` protocols |
 | `sasl_username` | _(unset)_ | SASL username |
