@@ -303,6 +303,16 @@
               "instant": true,
               "format": "table",
               "refId": "L"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "cert_analyzer_config_info{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "M"
             }
           ],
           "transformations": [
@@ -330,6 +340,7 @@
                   "Time 10": true,
                   "Time 11": true,
                   "Time 12": true,
+                  "Time 13": true,
                   "__name__": true,
                   "instance": true,
                   "job": true,
@@ -338,7 +349,31 @@
                   "state 2": true,
                   "Value #G": true,
                   "Value #H": true,
-                  "tetragon_build_version": true
+                  "Value #M": true,
+                  "tetragon_build_version": true,
+                  "checksum_enabled": true,
+                  "spki_hash_enabled": true,
+                  "demo_mode": true,
+                  "fips_compliance_enabled": true,
+                  "filter_self_events": true,
+                  "event_rate_metrics_enabled": true,
+                  "bind_probe_enabled": true,
+                  "connect_probe_enabled": true,
+                  "port_probe_timeout": true,
+                  "port_probe_connect_delay": true,
+                  "tls_outbound_ports": true,
+                  "large_file_cert_threshold": true,
+                  "large_file_metrics_cap": true,
+                  "large_file_byte_cap": true,
+                  "max_concurrent_background_threads": true,
+                  "max_processes_per_cert": true,
+                  "new_cert_events_per_second": true,
+                  "retry_queue_max_size": true,
+                  "alert_threshold_days": true,
+                  "scan_paths": true,
+                  "kafka_enabled": true,
+                  "kafka_bootstrap_servers": true,
+                  "prometheus_port": true
                 },
                 "indexByName": {
                   "node_name": 0,
@@ -353,7 +388,9 @@
                   "Value #E": 9,
                   "Value #F": 10,
                   "Value #J": 11,
-                  "Value #K": 12
+                  "Value #K": 12,
+                  "kafka_plain_enabled": 13,
+                  "kafka_connect_enabled": 14
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -366,6 +403,8 @@
                   "Value #F": "Kafka Err/s",
                   "version": "Analyzer Version",
                   "Value #I": "Scraping Interval",
+                  "kafka_plain_enabled": "Kafka Plain Enabled",
+                  "kafka_connect_enabled": "Kafka Connect Enabled",
                   "Value #J": "Kafka Connected",
                   "Value #K": "Kafka Last Published",
                   "Value #L": "Last Scraped"
