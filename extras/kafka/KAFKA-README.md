@@ -76,6 +76,8 @@ Add to `/etc/cert-analyzer/cert-analyzer.conf` (or set the equivalent env vars):
 enabled = true
 bootstrap_servers = localhost:9092
 topic = cert-analyzer-events
+# plain_enabled = true is the default -- set false to stop publishing this
+# topic once every consumer has migrated to connect_topic below.
 
 # Optional -- off by default. See CONSUMER-README.md for the
 # certificate_accessed schema.

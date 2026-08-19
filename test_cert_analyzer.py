@@ -6203,6 +6203,65 @@ class TestKafkaPublisher:
             assert str(sample_cert_info.cert_index) in expected_key
             assert sample_cert_info.serial_number in expected_key
 
+    # ── plain_enabled gating ───────────────────────────────────────────────────
+
+    def test_plain_enabled_defaults_true(self, monkeypatch, sample_cert_info):
+        """plain_enabled defaults to True -- unchanged behavior for existing installs."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher.plain_enabled is True
+
+            publisher.publish(sample_cert_info)
+            mock_producer.send.assert_called_once()
+            send_args, _ = mock_producer.send.call_args
+            assert send_args[0] == 't'
+
+    def test_publish_plain_disabled_skips_plain_topic_send(self, monkeypatch, sample_cert_info):
+        """plain_enabled=False stops the plain-topic send but connect_topic still fires -- independent gates."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t',
+                plain_enabled=False, connect_topic='t-connect',
+            )
+            publisher.publish(sample_cert_info)
+
+            mock_producer.send.assert_called_once()
+            send_args, _ = mock_producer.send.call_args
+            assert send_args[0] == 't-connect'
+
+    def test_publish_plain_and_connect_both_disabled_sends_nothing(self, monkeypatch, sample_cert_info):
+        """plain_enabled=False with no connect_topic configured is a silent no-op, never raises."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', plain_enabled=False,
+            )
+            publisher.publish(sample_cert_info)
+            mock_producer.send.assert_not_called()
+
     # ── publish_access (certificate_accessed) ─────────────────────────────────
 
     def test_publish_access_noop_when_access_topic_not_configured(self, monkeypatch, sample_cert_info):

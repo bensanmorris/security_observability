@@ -282,6 +282,29 @@ if [ -f "$_CONF" ] && grep -q '^large_file_cert_threshold[ \t]*=' "$_CONF" 2>/de
     && chmod 0640 "$_CONF" \
     || echo "WARNING: failed to insert large_file_metrics_cap into $_CONF" >&2
 fi
+# Hosts upgraded from a release predating [kafka] plain_enabled: insert it
+# right after topic (which every prior release with [kafka] has). Same
+# end-of-file-append hazard as the large_file_metrics_cap case above.
+if [ -f "$_CONF" ] && grep -q '^topic[ \t]*=' "$_CONF" 2>/dev/null \
+        && ! grep -q '^plain_enabled[ \t]*=' "$_CONF" 2>/dev/null; then
+    awk '
+    /^topic[ \t]*=/ {
+        print
+        print ""
+        print "# Set plain_enabled = false to stop publishing certificate_discovered events"
+        print "# to the plain-JSON topic above -- e.g. once every consumer has migrated to"
+        print "# connect_topic below. Defaults to true (unchanged behavior); independent of"
+        print "# access_enabled/connect_enabled."
+        print "plain_enabled = true"
+        next
+    }
+    { print }
+    ' "$_CONF" > "$_CONF.new" \
+    && mv "$_CONF.new" "$_CONF" \
+    && chown root:%{ana_group} "$_CONF" \
+    && chmod 0640 "$_CONF" \
+    || echo "WARNING: failed to insert plain_enabled into $_CONF" >&2
+fi
 # Hosts upgraded from a release predating [kafka] connect_enabled: insert it
 # right after access_topic (which every prior release with [kafka] has).
 # Plain end-of-file append would land it after whatever section happens to be

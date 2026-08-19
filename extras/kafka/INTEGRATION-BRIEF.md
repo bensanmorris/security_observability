@@ -183,6 +183,21 @@ orphaned old column behind a new one rather than a clean transition.
 See [CONSUMER-README.md](CONSUMER-README.md#consuming-via-kafka-connect-jdbc-sink)
 for an example JDBC sink connector config.
 
+**Migration path off the plain topic:** `[kafka] plain_enabled` (default
+`true`) independently gates the plain-JSON `topic` publish, separately from
+`connect_enabled`. This isn't a mode switch — plain-only (today),
+both-at-once (a migration window, to validate the new consumer before
+committing), and connect-only (`plain_enabled=false`, once every consumer
+has migrated) are just combinations of the two flags. There's no rush to
+flip `plain_enabled=false`: running both costs one extra `producer.send()`
+per discovery event (already a low-volume, discovery-only stream), plus
+proportionally more broker-side bytes on the connect topic than the plain
+one — Connect's inline `schemas.enable=true` format re-sends the full
+`"schema"` block on every message (no registry to dedupe it), so each
+enveloped message runs a few times larger than its plain-topic equivalent.
+Neither cost compounds with fleet size beyond the normal per-node discovery
+rate.
+
 ---
 
 ## Open questions for the platform team

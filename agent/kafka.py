@@ -240,6 +240,13 @@ class KafkaPublisher:
     and extras/kafka/CONSUMER-README.md for the envelope's field types and
     the Kafka-message-key convention (node_name:path:cert_index, chosen for
     upsert correctness -- see extras/kafka/INTEGRATION-BRIEF.md).
+
+    plain_enabled (default true) independently gates publishing the plain-JSON
+    message to `topic`. It exists so a fleet can eventually turn the raw topic
+    off (plain_enabled=false) once every consumer has migrated to
+    connect_topic, without ever running mutually-exclusive-only -- plain-only,
+    both (a migration window), and connect-only are all just combinations of
+    plain_enabled/connect_enabled, not a single mode switch.
     """
 
     def __init__(
@@ -248,6 +255,7 @@ class KafkaPublisher:
         topic: str,
         access_topic: str = '',
         connect_topic: str = '',
+        plain_enabled: bool = True,
         security_protocol: str = 'PLAINTEXT',
         sasl_mechanism: str = '',
         sasl_username: str = '',
@@ -255,6 +263,14 @@ class KafkaPublisher:
     ):
         self.bootstrap_servers = bootstrap_servers
         self._topic = topic
+        # Defaults true (unchanged behavior) -- set false to stop publishing
+        # certificate_discovered to the plain-JSON topic, e.g. once every
+        # consumer has migrated to connect_topic below. Unlike access_topic/
+        # connect_topic, `topic` has no natural "empty means disabled" signal
+        # (it's a required constructor arg with a real default in config), so
+        # this needs its own explicit flag rather than the empty-string
+        # convention used below.
+        self.plain_enabled = plain_enabled
         # Empty string means certificate_accessed publishing is disabled --
         # see access_enabled below. One producer serves both topics; there's
         # no need for a second KafkaProducer/TCP connection per topic.
@@ -361,11 +377,11 @@ class KafkaPublisher:
                 return False
 
             label = bootstrap_servers or str(self._producer_kwargs.get('bootstrap_servers', ''))
-            label_topic = topic or self._topic
+            label_topic = (topic or self._topic) if self.plain_enabled else ''
             if self._access_topic:
-                label_topic = f"{label_topic}, {self._access_topic}"
+                label_topic = f"{label_topic}, {self._access_topic}" if label_topic else self._access_topic
             if self._connect_topic:
-                label_topic = f"{label_topic}, {self._connect_topic}"
+                label_topic = f"{label_topic}, {self._connect_topic}" if label_topic else self._connect_topic
             logger.info(
                 f"Kafka producer connected — "
                 f"brokers: {label}, topics: {label_topic}"
@@ -441,7 +457,8 @@ class KafkaPublisher:
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
-        self._send(self._topic, cert_info.unique_key, message, cert_info.path)
+        if self.plain_enabled:
+            self._send(self._topic, cert_info.unique_key, message, cert_info.path)
 
         if self.connect_enabled:
             envelope = self._to_connect_envelope(message)
