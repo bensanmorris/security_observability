@@ -856,7 +856,9 @@
                   "scan_paths": 21,
                   "kafka_enabled": 22,
                   "kafka_bootstrap_servers": 23,
-                  "prometheus_port": 24
+                  "kafka_plain_enabled": 24,
+                  "kafka_connect_enabled": 25,
+                  "prometheus_port": 26
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -883,6 +885,8 @@
                   "retry_queue_max_size": "Retry Queue Max Size",
                   "kafka_enabled": "Kafka Enabled",
                   "kafka_bootstrap_servers": "Kafka Brokers",
+                  "kafka_plain_enabled": "Kafka Plain Enabled",
+                  "kafka_connect_enabled": "Kafka Connect Enabled",
                   "prometheus_port": "Prometheus Port"
                 }
               }

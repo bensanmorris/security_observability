@@ -4709,6 +4709,31 @@ class TestScanConfigMetrics:
         assert samples[0].value == 1800
         assert samples[0].labels['node_name'] == a.metrics._node_name
 
+    def test_kafka_plain_and_connect_enabled_default_false_without_publisher(self):
+        """kafka_plain_enabled/kafka_connect_enabled read 'false' in config_info when kafka_publisher is None."""
+        a = self._make_analyzer()
+        samples = list(a.metrics.config_info.collect())[0].samples
+        assert samples[0].labels['kafka_plain_enabled'] == 'false'
+        assert samples[0].labels['kafka_connect_enabled'] == 'false'
+
+    def test_kafka_plain_and_connect_enabled_reflect_publisher_flags(self):
+        """kafka_plain_enabled/kafka_connect_enabled in config_info mirror the KafkaPublisher's own flags."""
+        import agent.kafka as _ca
+        from unittest.mock import patch, MagicMock
+
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_cls.return_value = MagicMock()
+            with patch.object(_ca, 'KAFKA_AVAILABLE', True):
+                from cert_analyzer import KafkaPublisher
+                publisher = KafkaPublisher(
+                    bootstrap_servers='b:9092', topic='t',
+                    plain_enabled=False, connect_topic='t-connect',
+                )
+                a = self._make_analyzer(kafka_publisher=publisher)
+                samples = list(a.metrics.config_info.collect())[0].samples
+                assert samples[0].labels['kafka_plain_enabled'] == 'false'
+                assert samples[0].labels['kafka_connect_enabled'] == 'true'
+
 
 class TestScrapeThrottleMiddleware:
     """

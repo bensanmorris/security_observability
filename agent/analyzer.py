@@ -246,6 +246,8 @@ class CertificateAnalyzer:
             'scan_paths':                          ','.join(self._scan_paths),
             'kafka_enabled':                       str(kafka_publisher is not None).lower(),
             'kafka_bootstrap_servers':              kafka_publisher.bootstrap_servers if kafka_publisher is not None else '',
+            'kafka_plain_enabled':                  str(kafka_publisher.plain_enabled).lower() if kafka_publisher is not None else 'false',
+            'kafka_connect_enabled':                str(kafka_publisher.connect_enabled).lower() if kafka_publisher is not None else 'false',
             'prometheus_port':                     str(metrics_port),
         })
         self.metrics.scan_interval_seconds.labels(node_name=_NODE_NAME).set(scan_interval_seconds)
