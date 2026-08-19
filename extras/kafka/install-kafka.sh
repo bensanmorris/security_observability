@@ -18,6 +18,7 @@ DATA_DIR="/var/lib/kafka/data"
 SERVICE_FILE="/etc/systemd/system/kafka.service"
 CERT_ANALYZER_TOPIC="${CERT_ANALYZER_TOPIC:-cert-analyzer-events}"
 CERT_ANALYZER_ACCESS_TOPIC="${CERT_ANALYZER_ACCESS_TOPIC:-cert-analyzer-access-events}"
+CERT_ANALYZER_CONNECT_TOPIC="${CERT_ANALYZER_CONNECT_TOPIC:-cert-analyzer-events-connect}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -200,10 +201,20 @@ echo "Ensuring topic '${CERT_ANALYZER_ACCESS_TOPIC}' exists..."
     --partitions 1 --replication-factor 1 > /dev/null
 echo "    Topic ready."
 
+# Same rationale as the access topic above -- connect_enabled defaults to
+# false, but the topic is created unconditionally so flipping it on later
+# doesn't need a re-run of this script.
+echo "Ensuring topic '${CERT_ANALYZER_CONNECT_TOPIC}' exists..."
+"${INSTALL_DIR}/bin/kafka-topics.sh" --create --if-not-exists \
+    --topic "${CERT_ANALYZER_CONNECT_TOPIC}" \
+    --bootstrap-server "localhost:${KAFKA_PORT}" \
+    --partitions 1 --replication-factor 1 > /dev/null
+echo "    Topic ready."
+
 echo ""
 echo "============================================"
 echo " Kafka is running on localhost:${KAFKA_PORT}"
-echo " Topics: ${CERT_ANALYZER_TOPIC}, ${CERT_ANALYZER_ACCESS_TOPIC}"
+echo " Topics: ${CERT_ANALYZER_TOPIC}, ${CERT_ANALYZER_ACCESS_TOPIC}, ${CERT_ANALYZER_CONNECT_TOPIC}"
 echo ""
 echo " Point cert-analyzer at it:"
 echo "   [kafka]"
@@ -212,11 +223,13 @@ echo "   bootstrap_servers = localhost:${KAFKA_PORT}"
 echo "   topic = ${CERT_ANALYZER_TOPIC}"
 echo "   access_enabled = true   # optional -- off by default"
 echo "   access_topic = ${CERT_ANALYZER_ACCESS_TOPIC}"
+echo "   connect_enabled = true   # optional -- off by default"
+echo "   connect_topic = ${CERT_ANALYZER_CONNECT_TOPIC}"
 echo ""
 echo " Tail messages:"
 echo "   ${INSTALL_DIR}/bin/kafka-console-consumer.sh \\"
 echo "     --bootstrap-server localhost:${KAFKA_PORT} --topic ${CERT_ANALYZER_TOPIC} --from-beginning"
 echo ""
 echo " Override the topic names if needed:"
-echo "   CERT_ANALYZER_TOPIC=<name> CERT_ANALYZER_ACCESS_TOPIC=<name> bash $0"
+echo "   CERT_ANALYZER_TOPIC=<name> CERT_ANALYZER_ACCESS_TOPIC=<name> CERT_ANALYZER_CONNECT_TOPIC=<name> bash $0"
 echo "============================================"

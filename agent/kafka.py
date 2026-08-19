@@ -49,6 +49,111 @@ _kafka_last_published_timestamp = Gauge(
 # or not the payload shape changed; consumers should gate on this instead.
 KAFKA_SCHEMA_VERSION = 1
 
+# Static field -> (Kafka Connect JSON Schema type, optional) map for the
+# certificate_discovered message, used to build the Connect envelope
+# ({"schema": ..., "payload": ...}) published to [kafka] connect_topic when
+# connect_enabled=true. Deliberately hand-maintained and built once (not
+# inferred per-message from a live dict): several fields below are legitimately
+# None on some messages (container_pid, container_start_time, key_usage,
+# extended_key_usage, is_ca, basic_constraints_path_length), and a None value
+# carries no type information to infer from. Kafka Connect's JSON converter
+# also expects every record's "schema" to be structurally identical on a
+# topic, so a schema built fresh per message would be actively wrong, not
+# just wasteful. 'array_string' is a local sentinel expanded by
+# _build_connect_schema() into a Connect "array" of "string" -- not a real
+# Connect type name. Keep in sync with the message dict built in publish().
+#
+# A breaking change to this field set (rename/remove/retype) must ship as a
+# new [kafka] connect_topic value (e.g. cert-analyzer-events-connect-v2), not
+# an in-place change -- Kafka Connect sink connectors don't tolerate schema
+# drift on a topic the way KAFKA_SCHEMA_VERSION lets plain-JSON consumers
+# tolerate new fields. See extras/kafka/CONSUMER-README.md.
+_CONNECT_SCHEMA_FIELDS = [
+    ('schema_version',    'int32',  False),
+    ('event_type',        'string', False),
+    ('detected_at',       'string', False),
+    ('path',               'string', False),
+    ('cert_index',         'int32',  False),
+    ('subject',             'string', False),
+    ('issuer',              'string', False),
+    ('serial_number',       'string', False),
+    ('common_name',         'string', False),
+    ('san_dns_names',       'array_string', False),
+    ('san_ip_addresses',    'array_string', False),
+    ('not_before',          'string', False),
+    ('not_after',           'string', False),
+    ('days_until_expiry',   'float64', False),
+    ('is_expired',          'boolean', False),
+    ('process',             'string', False),
+    ('pid',                 'int32',  False),
+    ('parent_process',      'string', False),
+    ('parent_pid',          'int32',  False),
+    ('namespace',                  'string', False),
+    ('pod_name',                   'string', False),
+    ('pod_uid',                    'string', False),
+    ('node_name',                  'string', False),
+    # JSON-encoded string in the Connect envelope -- Connect's JSON schema has
+    # no map type a stock JDBC sink can flatten into columns without a custom
+    # SMT. Decode client-side. See extras/kafka/CONSUMER-README.md.
+    ('pod_annotations',            'string', False),
+    ('workload_kind',              'string', False),
+    ('workload_name',              'string', False),
+    ('app_label',                  'string', False),
+    ('container_id',               'string', False),
+    ('container_name',             'string', False),
+    ('container_image',            'string', False),
+    ('container_image_id',         'string', False),
+    ('container_privileged',       'boolean', False),
+    ('container_pid',              'int32',  True),
+    ('container_start_time',       'string', True),
+    ('container_maybe_exec_probe', 'boolean', False),
+    ('checksum',          'string', False),
+    ('spki_hash',         'string', False),
+    ('key_algorithm',     'string', False),
+    ('key_size',          'int32',  False),
+    ('signature_hash',    'string', False),
+    ('curve_name',        'string', False),
+    ('fips_compliant',    'boolean', False),
+    ('fips_violations',   'array_string', False),
+    ('spki_algorithm_oid',      'string', False),
+    ('signature_algorithm_oid', 'string', False),
+    ('key_usage',                     'array_string', True),
+    ('extended_key_usage',            'array_string', True),
+    ('is_ca',                         'boolean', True),
+    ('basic_constraints_path_length', 'int32',  True),
+    ('is_self_signed',                'boolean', False),
+]
+
+
+def _build_connect_schema() -> dict:
+    """
+    Build the Kafka Connect JSON Schema "schema" struct for the
+    certificate_discovered Connect envelope, from _CONNECT_SCHEMA_FIELDS.
+    Called once per KafkaPublisher instance (when connect_enabled) and
+    cached -- never rebuilt per message.
+    """
+    fields = []
+    for name, connect_type, optional in _CONNECT_SCHEMA_FIELDS:
+        if connect_type == 'array_string':
+            fields.append({
+                'field': name,
+                'type': 'array',
+                'items': {'type': 'string', 'optional': False},
+                'optional': optional,
+            })
+        else:
+            fields.append({
+                'field': name,
+                'type': connect_type,
+                'optional': optional,
+            })
+    return {
+        'type': 'struct',
+        'name': 'io.certanalyzer.CertificateDiscovered',
+        'optional': False,
+        'fields': fields,
+    }
+
 
 class KafkaPublisher:
     """
@@ -124,6 +229,17 @@ class KafkaPublisher:
         "basic_constraints_path_length": null,
         "is_self_signed":                false
     }
+
+    Optionally, when connect_enabled=true, every certificate_discovered event
+    above is additionally published to connect_topic wrapped in a Kafka
+    Connect JSON envelope ({"schema": {...}, "payload": {...}}, the shape
+    org.apache.kafka.connect.json.JsonConverter with schemas.enable=true
+    expects) so a stock Kafka Connect JDBC Sink connector can consume it with
+    no custom code. Off by default; purely additive -- the plain-JSON message
+    above and its topic are unaffected either way. See _CONNECT_SCHEMA_FIELDS
+    and extras/kafka/CONSUMER-README.md for the envelope's field types and
+    the Kafka-message-key convention (node_name:path:cert_index, chosen for
+    upsert correctness -- see extras/kafka/INTEGRATION-BRIEF.md).
     """
 
     def __init__(
@@ -131,6 +247,7 @@ class KafkaPublisher:
         bootstrap_servers: str,
         topic: str,
         access_topic: str = '',
+        connect_topic: str = '',
         security_protocol: str = 'PLAINTEXT',
         sasl_mechanism: str = '',
         sasl_username: str = '',
@@ -143,6 +260,12 @@ class KafkaPublisher:
         # no need for a second KafkaProducer/TCP connection per topic.
         self._access_topic = access_topic
         self.access_enabled = bool(access_topic)
+        # Same empty-string-means-disabled convention as access_topic above.
+        # Schema is built once here (not per message) since it's static --
+        # see _build_connect_schema().
+        self._connect_topic = connect_topic
+        self.connect_enabled = bool(connect_topic)
+        self._connect_schema = _build_connect_schema() if self.connect_enabled else None
         self._producer: Optional['KafkaProducer'] = None
         self._producer_kwargs: dict = {}
         self._last_connect_attempt: float = 0.0
@@ -241,6 +364,8 @@ class KafkaPublisher:
             label_topic = topic or self._topic
             if self._access_topic:
                 label_topic = f"{label_topic}, {self._access_topic}"
+            if self._connect_topic:
+                label_topic = f"{label_topic}, {self._connect_topic}"
             logger.info(
                 f"Kafka producer connected — "
                 f"brokers: {label}, topics: {label_topic}"
@@ -317,6 +442,22 @@ class KafkaPublisher:
 
         # Use unique_key (path:cert_index:serial) as the partition key.
         self._send(self._topic, cert_info.unique_key, message, cert_info.path)
+
+        if self.connect_enabled:
+            envelope = self._to_connect_envelope(message)
+            # node_name:path:cert_index, NOT unique_key -- this key drives an
+            # upsert on the consumer side (typically a JDBC sink's
+            # pk.mode=record_key), so it must uniquely identify "one row",
+            # not just group related events. unique_key includes serial_number,
+            # which would make every renewal a new row instead of updating the
+            # existing one -- the opposite of what an expiry table wants. And
+            # path:cert_index alone (the brief's own recommended *grouping*
+            # key for this use case) would collide across every node running
+            # an identical cert at the same path, silently collapsing a
+            # fleet's worth of rows down to whichever node's event landed
+            # last. See extras/kafka/INTEGRATION-BRIEF.md.
+            connect_key = f"{cert_info.node_name}:{cert_info.path}:{cert_info.cert_index}"
+            self._send(self._connect_topic, connect_key, envelope, cert_info.path)
 
     def publish_access(
         self,
@@ -398,6 +539,17 @@ class KafkaPublisher:
         }
 
         self._send(self._access_topic, cert_info.unique_key, message, cert_info.path)
+
+    def _to_connect_envelope(self, message: dict) -> dict:
+        """
+        Wrap a certificate_discovered message dict in the Kafka Connect JSON
+        envelope ({"schema": self._connect_schema, "payload": ...}). Returns
+        a new dict -- never mutates `message`, which the caller also sends
+        unwrapped to the plain-JSON topic.
+        """
+        payload = dict(message)
+        payload['pod_annotations'] = json.dumps(payload.get('pod_annotations') or {})
+        return {'schema': self._connect_schema, 'payload': payload}
 
     def _send(self, topic: str, key: str, message: dict, log_label: str) -> None:
         """
