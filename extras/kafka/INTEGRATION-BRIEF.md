@@ -20,6 +20,7 @@ below for reference).
 | `cert-analyzer-events` | `[kafka] topic` / `KAFKA_TOPIC` | once per certificate, the first time it's seen — subject, issuer, SANs, key/crypto detail, FIPS status, K8s enrichment |
 | `cert-analyzer-access-events` | `[kafka] access_topic` / `KAFKA_ACCESS_TOPIC` | once per distinct process/pod that subsequently re-accesses an already-known certificate (opt-in, off by default) |
 | `cert-analyzer-events-connect` | `[kafka] connect_topic` / `KAFKA_CONNECT_TOPIC` | same trigger as `cert-analyzer-events`, wrapped in a Kafka-Connect JSON envelope (`{"schema": {...}, "payload": {...}}`) for a stock Kafka Connect JDBC Sink connector (opt-in, off by default — see below) |
+| `cert-analyzer-access-events-connect` | `[kafka] access_connect_topic` / `KAFKA_ACCESS_CONNECT_TOPIC` | same trigger as `cert-analyzer-access-events`, wrapped the same way (opt-in, off by default, independent of `access_enabled` — see below) |
 
 Topic names are set via config file / env var only today — the Helm chart
 doesn't expose them as values, so pointing at a differently-namespaced topic
@@ -198,6 +199,25 @@ enveloped message runs a few times larger than its plain-topic equivalent.
 Neither cost compounds with fleet size beyond the normal per-node discovery
 rate.
 
+**`certificate_accessed` gets the same envelope**, on
+`cert-analyzer-access-events-connect` (`access_connect_enabled` /
+`access_connect_topic`) — independently gated from `access_enabled`, same
+reasoning as `plain_enabled`/`connect_enabled` above (you can run the
+Connect-envelope access stream without the plain one, or vice versa).
+
+Its key is **not** just cert identity, unlike the discovery topic:
+`node_name:path:cert_index:<process>:<parent_process>:<pod_name>:<namespace>:<app_label>:<container_name>`.
+Cert identity alone would be wrong here — the entire point of
+`certificate_accessed` is capturing every distinct accessor of a cert, so an
+upsert keyed only on `node_name:path:cert_index` would collapse every
+accessor down to whichever one published last, the opposite of what the
+event exists to record. Folding the accessor fields into the key instead
+gives a JDBC sink a natural "who has this cert loaded, and when did each
+last touch it" table: a repeat access from an already-seen accessor updates
+that one row in place, a genuinely new accessor gets its own row, and the
+table doesn't grow unboundedly on repeat access from the same processes.
+Still `pk.mode=record_key`, zero extra connector config either way.
+
 ---
 
 ## Open questions for the platform team
@@ -216,11 +236,11 @@ rate.
    them with your own sizing, or should we rely on auto-create?
 5. **Schema expectations:** plain JSON + an in-payload `schema_version`
    remains the format on the two raw topics. If you need Connect/JDBC-sink
-   compatibility for a specific consumer, `cert-analyzer-events-connect` is
-   now available as an opt-in third topic carrying a Kafka Connect JSON
-   envelope (see "Kafka Connect / JDBC Sink publishing" above) — raise it if
-   that covers your need, or if you still require full registry-managed
-   schemas (Avro/Protobuf) beyond that.
+   compatibility for a specific consumer, `cert-analyzer-events-connect` and
+   `cert-analyzer-access-events-connect` are now available as opt-in topics
+   carrying a Kafka Connect JSON envelope (see "Kafka Connect / JDBC Sink
+   publishing" above) — raise it if that covers your need, or if you still
+   require full registry-managed schemas (Avro/Protobuf) beyond that.
 6. **Partition affinity by node/pod:** the key is cert-identity only — node
    and pod are payload fields, not part of the key. If you need per-node
    routing or sharded consumers, that's a key-strategy change on our side,

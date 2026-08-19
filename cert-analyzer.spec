@@ -334,6 +334,36 @@ if [ -f "$_CONF" ] && grep -q '^access_topic[ \t]*=' "$_CONF" 2>/dev/null \
     && chmod 0640 "$_CONF" \
     || echo "WARNING: failed to insert connect_enabled/connect_topic into $_CONF" >&2
 fi
+# Hosts upgraded from a release predating [kafka] access_connect_enabled:
+# insert it right after connect_topic (present on every host by this point --
+# either from a prior release, or just inserted by the block above on this
+# same upgrade). Same end-of-file-append hazard as the large_file_metrics_cap
+# case above.
+if [ -f "$_CONF" ] && grep -q '^connect_topic[ \t]*=' "$_CONF" 2>/dev/null \
+        && ! grep -q '^access_connect_enabled[ \t]*=' "$_CONF" 2>/dev/null; then
+    awk '
+    /^connect_topic[ \t]*=/ {
+        print
+        print ""
+        print "# Set access_connect_enabled = true to additionally publish each certificate_accessed"
+        print "# event wrapped in a Kafka-Connect-compatible JSON envelope"
+        print "# ({\"schema\": {...}, \"payload\": {...}}) to access_connect_topic, suitable for a"
+        print "# stock Kafka Connect JDBC Sink connector to consume with no custom code."
+        print "# Independently gated from `access_enabled` above (and from `enabled`/"
+        print "# `connect_enabled`); off by default."
+        print "access_connect_enabled = false"
+        print ""
+        print "# Topic to publish the Kafka-Connect-enveloped certificate_accessed events to"
+        print "access_connect_topic = cert-analyzer-access-events-connect"
+        next
+    }
+    { print }
+    ' "$_CONF" > "$_CONF.new" \
+    && mv "$_CONF.new" "$_CONF" \
+    && chown root:%{ana_group} "$_CONF" \
+    && chmod 0640 "$_CONF" \
+    || echo "WARNING: failed to insert access_connect_enabled/access_connect_topic into $_CONF" >&2
+fi
 unset _CONF
 
 # Reload systemd to pick up the Tetragon drop-in

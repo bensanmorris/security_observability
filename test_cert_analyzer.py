@@ -6325,6 +6325,124 @@ class TestKafkaPublisher:
             assert 'subject' not in msg
             assert 'fips_compliant' not in msg
 
+    # ── publish_access() Kafka Connect envelope (access_connect_topic) ────────
+
+    def test_publish_access_connect_noop_when_neither_flag_set(self, monkeypatch, sample_cert_info):
+        """publish_access() sends nothing when both access_enabled and access_connect_enabled are unset (defaults)."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+            assert publisher.access_connect_enabled is False
+
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+            )
+            mock_producer.send.assert_not_called()
+
+    def test_publish_access_connect_sends_independent_of_access_enabled(self, monkeypatch, sample_cert_info):
+        """access_connect_enabled alone (access_enabled left False) still sends an envelope to access_connect_topic."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', access_connect_topic='t-access-connect',
+            )
+            assert publisher.access_enabled is False
+            assert publisher.access_connect_enabled is True
+
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+                namespace='default', pod_name='my-pod', pod_uid='uid-1',
+                node_name='worker-node-1', app_label='my-app',
+                container_name='main', container_id='c1', container_image='my-app:1.0',
+            )
+
+            mock_producer.send.assert_called_once()
+            send_args, send_kwargs = mock_producer.send.call_args
+            assert send_args[0] == 't-access-connect'
+            envelope = send_kwargs['value']
+            assert set(envelope.keys()) == {'schema', 'payload'}
+            assert envelope['schema']['name'] == 'io.certanalyzer.CertificateAccessed'
+            assert envelope['payload']['event_type'] == 'certificate_accessed'
+            assert envelope['payload']['process']    == '/usr/bin/git'
+
+    def test_publish_access_connect_key_includes_accessor_identity(self, monkeypatch, sample_cert_info):
+        """access_connect_topic key includes the accessor, not just cert identity -- distinct accessors mustn't collide on upsert."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t', access_connect_topic='t-access-connect',
+            )
+
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+                namespace='default', pod_name='pod-a', node_name='worker-node-1',
+                app_label='my-app', container_name='main',
+            )
+            key_a = mock_producer.send.call_args[1]['key']
+
+            mock_producer.reset_mock()
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/curl', pid=556,
+                parent_process='/usr/bin/bash', parent_pid=1,
+                namespace='default', pod_name='pod-a', node_name='worker-node-1',
+                app_label='my-app', container_name='main',
+            )
+            key_b = mock_producer.send.call_args[1]['key']
+
+            assert key_a != key_b
+            expected_a = (
+                f"worker-node-1:{sample_cert_info.path}:{sample_cert_info.cert_index}:"
+                f"/usr/bin/git:/usr/bin/bash:pod-a:default:my-app:main"
+            )
+            assert key_a == expected_a
+
+    def test_publish_access_connect_and_plain_both_enabled(self, monkeypatch, sample_cert_info):
+        """Both access_enabled and access_connect_enabled together send to both topics."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(
+                bootstrap_servers='b:9092', topic='t',
+                access_topic='t-access', access_connect_topic='t-access-connect',
+            )
+            publisher.publish_access(
+                sample_cert_info, process='/usr/bin/git', pid=555,
+                parent_process='/usr/bin/bash', parent_pid=1,
+            )
+            assert mock_producer.send.call_count == 2
+            topics_sent = {c[0][0] for c in mock_producer.send.call_args_list}
+            assert topics_sent == {'t-access', 't-access-connect'}
+
     # ── publish() Kafka Connect envelope (connect_topic) ──────────────────────
 
     def test_publish_connect_noop_when_connect_topic_not_configured(self, monkeypatch, sample_cert_info):
@@ -6814,6 +6932,7 @@ class TestKafkaPublisher:
 
         mock_publisher = MagicMock()
         mock_publisher.access_enabled = True
+        mock_publisher.access_connect_enabled = False
         analyzer.kafka_publisher = mock_publisher
 
         cert, _ = TestCertificateGeneration.generate_certificate('access.example.com', 365)
@@ -6860,6 +6979,7 @@ class TestKafkaPublisher:
 
         mock_publisher = MagicMock()
         mock_publisher.access_enabled = False
+        mock_publisher.access_connect_enabled = False
         analyzer.kafka_publisher = mock_publisher
 
         cert, _ = TestCertificateGeneration.generate_certificate('access-disabled.example.com', 365)
@@ -6884,6 +7004,40 @@ class TestKafkaPublisher:
         analyzer.process_event(make_event(path, '/usr/bin/curl', 99))
         analyzer.process_event(make_event(path, '/usr/bin/git', 100))
         mock_publisher.publish_access.assert_not_called()
+
+    def test_analyzer_publishes_access_event_when_only_access_connect_enabled(
+        self, analyzer, temp_dir
+    ):
+        """A re-access still publishes certificate_accessed when only access_connect_enabled is set -- independent of access_enabled."""
+        from unittest.mock import MagicMock
+
+        mock_publisher = MagicMock()
+        mock_publisher.access_enabled = False
+        mock_publisher.access_connect_enabled = True
+        analyzer.kafka_publisher = mock_publisher
+
+        cert, _ = TestCertificateGeneration.generate_certificate('access-connect-only.example.com', 365)
+        path = os.path.join(temp_dir, 'access-connect-only.pem')
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        def make_event(p, binary, pid):
+            mock_event = MagicMock()
+            mock_event.HasField.side_effect = lambda f: f == 'process_kprobe'
+            mock_kprobe = MagicMock()
+            mock_kprobe.process.binary = binary
+            mock_kprobe.process.pid.value = pid
+            mock_kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+            mock_kprobe.HasField.return_value = False
+            mock_arg = MagicMock()
+            mock_arg.HasField.side_effect = lambda f: f == 'file_arg'
+            mock_arg.file_arg.path = p
+            mock_kprobe.args = [mock_arg]
+            mock_event.process_kprobe = mock_kprobe
+            return mock_event
+
+        analyzer.process_event(make_event(path, '/usr/bin/curl', 99))
+        analyzer.process_event(make_event(path, '/usr/bin/git', 100))
+        mock_publisher.publish_access.assert_called_once()
 
     def test_analyzer_without_kafka_publisher_works_normally(
         self, analyzer, temp_dir

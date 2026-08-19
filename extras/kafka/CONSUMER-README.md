@@ -234,6 +234,37 @@ timestamp columns, add your own `TimestampConverter` single message
 transform to the connector config; that's outside what cert-analyzer
 provides.
 
+### `certificate_accessed` has the same envelope
+
+`cert-analyzer-access-events-connect` (`[kafka] access_connect_enabled` /
+`access_connect_topic`, off by default) is the same idea applied to
+`certificate_accessed` — a Kafka Connect JSON envelope wrapping the same
+fields as an access event on `cert-analyzer-access-events`. Everything
+above applies equally: separate opt-in topic, no `schema_version`
+forward-compatibility, breaking changes get a new topic name. There's no
+`pod_annotations`-equivalent field to JSON-encode here (the access message
+has no nested/dict fields).
+
+**Independently gated from `access_enabled`, not tied to it** — you can run
+the Connect-envelope access stream without the plain one, or vice versa,
+same as `plain_enabled`/`connect_enabled` for the discovery topic.
+
+**Key is different, and matters more here than on the discovery topic:**
+`node_name:path:cert_index:<process>:<parent_process>:<pod_name>:<namespace>:<app_label>:<container_name>`
+— cert identity alone (`node_name:path:cert_index`, what the discovery-connect
+topic uses) is *not* enough, because the entire point of `certificate_accessed`
+is capturing every distinct accessor for a cert, not one row per cert. An
+upsert keyed only on cert identity would collapse every accessor down to
+whichever one published last. With the accessor folded into the key, an
+`insert.mode=upsert` JDBC sink naturally maintains a live "who has this
+cert loaded, and when did each last touch it" table — a new access from an
+already-seen accessor updates that accessor's row in place (fresh
+`accessed_at`) rather than growing the table unboundedly, while a genuinely
+new accessor gets its own row. Still `pk.mode=record_key` with no
+`pk.fields` needed, same as the discovery topic — just point `topics` at
+`cert-analyzer-access-events-connect` and `table.name.format` at a
+different table name in the example config above.
+
 Standing up the Connect worker itself, installing the JDBC connector plugin,
 and the DB/table this ends up in are all outside this repo's scope — this
 section only covers what the topic looks like and how to point a stock

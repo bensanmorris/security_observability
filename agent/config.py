@@ -241,6 +241,8 @@ def main():
     kafka_access_topic     = cfg(cp, 'kafka', 'access_topic',      'KAFKA_ACCESS_TOPIC',      'cert-analyzer-access-events')
     kafka_connect_enabled  = cfg(cp, 'kafka', 'connect_enabled',   'KAFKA_CONNECT_ENABLED',   'false').lower() == 'true'
     kafka_connect_topic    = cfg(cp, 'kafka', 'connect_topic',     'KAFKA_CONNECT_TOPIC',     'cert-analyzer-events-connect')
+    kafka_access_connect_enabled = cfg(cp, 'kafka', 'access_connect_enabled', 'KAFKA_ACCESS_CONNECT_ENABLED', 'false').lower() == 'true'
+    kafka_access_connect_topic   = cfg(cp, 'kafka', 'access_connect_topic',   'KAFKA_ACCESS_CONNECT_TOPIC',   'cert-analyzer-access-events-connect')
     kafka_security         = cfg(cp, 'kafka', 'security_protocol', 'KAFKA_SECURITY_PROTOCOL', 'PLAINTEXT')
     kafka_sasl_mechanism   = cfg(cp, 'kafka', 'sasl_mechanism',    'KAFKA_SASL_MECHANISM',    '')
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
@@ -278,6 +280,7 @@ def main():
         logger.info(f"Kafka topic:       {kafka_topic} ({'enabled' if kafka_plain_enabled else 'disabled'})")
         logger.info(f"Kafka access events: {'enabled — topic: ' + kafka_access_topic if kafka_access_enabled else 'disabled'}")
         logger.info(f"Kafka Connect envelope: {'enabled — topic: ' + kafka_connect_topic if kafka_connect_enabled else 'disabled'}")
+        logger.info(f"Kafka access Connect envelope: {'enabled — topic: ' + kafka_access_connect_topic if kafka_access_connect_enabled else 'disabled'}")
         logger.info(f"Kafka security:    {kafka_security}")
     logger.info(f"Event rate metrics: {'enabled' if event_rate_metrics_enabled else 'disabled'}")
     logger.info(f"Bind probe:        {'enabled' if bind_probe_enabled else 'disabled'}")
@@ -309,6 +312,7 @@ def main():
             plain_enabled=kafka_plain_enabled,
             access_topic=kafka_access_topic if kafka_access_enabled else '',
             connect_topic=kafka_connect_topic if kafka_connect_enabled else '',
+            access_connect_topic=kafka_access_connect_topic if kafka_access_connect_enabled else '',
             security_protocol=kafka_security,
             sasl_mechanism=kafka_sasl_mechanism,
             sasl_username=kafka_sasl_username,

@@ -249,6 +249,8 @@ sudo systemctl enable --now cert-analyzer
 | `access_topic` | `cert-analyzer-access-events` | Topic to publish `certificate_accessed` events to |
 | `connect_enabled` | `false` | Additionally publish each `certificate_discovered` event wrapped in a Kafka-Connect-compatible JSON envelope (`{"schema": {...}, "payload": {...}}`) to `connect_topic`, suitable for a stock Kafka Connect JDBC Sink connector with no custom consumer code. Independent of `enabled`/`access_enabled`; off by default |
 | `connect_topic` | `cert-analyzer-events-connect` | Topic to publish the Kafka-Connect-enveloped `certificate_discovered` events to |
+| `access_connect_enabled` | `false` | Additionally publish each `certificate_accessed` event wrapped in the same kind of Kafka-Connect JSON envelope to `access_connect_topic`. Independent of `access_enabled`/`enabled`/`connect_enabled`; off by default |
+| `access_connect_topic` | `cert-analyzer-access-events-connect` | Topic to publish the Kafka-Connect-enveloped `certificate_accessed` events to |
 | `security_protocol` | `PLAINTEXT` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` |
 | `sasl_mechanism` | _(unset)_ | SASL mechanism — required for `SASL_*` protocols |
 | `sasl_username` | _(unset)_ | SASL username |

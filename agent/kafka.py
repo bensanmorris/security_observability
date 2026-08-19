@@ -125,34 +125,75 @@ _CONNECT_SCHEMA_FIELDS = [
 ]
 
 
-def _build_connect_schema() -> dict:
+# Static field -> (Kafka Connect JSON Schema type, optional) map for the
+# certificate_accessed message, used to build the Connect envelope published
+# to [kafka] access_connect_topic when access_connect_enabled=true. Same
+# hand-maintained, built-once rationale as _CONNECT_SCHEMA_FIELDS above --
+# keep in sync with the message dict built in publish_access(). No nested/
+# dict fields here, unlike the discovery message (no pod_annotations
+# equivalent), so no per-field transform is needed when wrapping.
+_ACCESS_CONNECT_SCHEMA_FIELDS = [
+    ('schema_version',   'int32',  False),
+    ('event_type',       'string', False),
+    ('accessed_at',      'string', False),
+    ('cert_unique_key',  'string', False),
+    ('path',              'string', False),
+    ('cert_index',        'int32',  False),
+    ('serial_number',     'string', False),
+    ('process',           'string', False),
+    ('pid',                'int32',  False),
+    ('parent_process',     'string', False),
+    ('parent_pid',         'int32',  False),
+    ('namespace',          'string', False),
+    ('pod_name',           'string', False),
+    ('pod_uid',            'string', False),
+    ('node_name',          'string', False),
+    ('app_label',          'string', False),
+    ('container_name',     'string', False),
+    ('container_id',       'string', False),
+    ('container_image',    'string', False),
+]
+
+
+def _build_struct_schema(name: str, schema_fields: list) -> dict:
     """
-    Build the Kafka Connect JSON Schema "schema" struct for the
-    certificate_discovered Connect envelope, from _CONNECT_SCHEMA_FIELDS.
-    Called once per KafkaPublisher instance (when connect_enabled) and
-    cached -- never rebuilt per message.
+    Build a Kafka Connect JSON Schema "schema" struct from a
+    (field_name, connect_type, optional) list -- shared by
+    _build_connect_schema() and _build_access_connect_schema(). Called once
+    per KafkaPublisher instance (per envelope, when its *_connect_enabled
+    flag is set) and cached -- never rebuilt per message.
     """
     fields = []
-    for name, connect_type, optional in _CONNECT_SCHEMA_FIELDS:
+    for field_name, connect_type, optional in schema_fields:
         if connect_type == 'array_string':
             fields.append({
-                'field': name,
+                'field': field_name,
                 'type': 'array',
                 'items': {'type': 'string', 'optional': False},
                 'optional': optional,
             })
         else:
             fields.append({
-                'field': name,
+                'field': field_name,
                 'type': connect_type,
                 'optional': optional,
             })
     return {
         'type': 'struct',
-        'name': 'io.certanalyzer.CertificateDiscovered',
+        'name': name,
         'optional': False,
         'fields': fields,
     }
+
+
+def _build_connect_schema() -> dict:
+    """Connect envelope schema for certificate_discovered (connect_topic)."""
+    return _build_struct_schema('io.certanalyzer.CertificateDiscovered', _CONNECT_SCHEMA_FIELDS)
+
+
+def _build_access_connect_schema() -> dict:
+    """Connect envelope schema for certificate_accessed (access_connect_topic)."""
+    return _build_struct_schema('io.certanalyzer.CertificateAccessed', _ACCESS_CONNECT_SCHEMA_FIELDS)
 
 
 class KafkaPublisher:
@@ -247,6 +288,17 @@ class KafkaPublisher:
     connect_topic, without ever running mutually-exclusive-only -- plain-only,
     both (a migration window), and connect-only are all just combinations of
     plain_enabled/connect_enabled, not a single mode switch.
+
+    certificate_accessed has the same optional Connect envelope, independently
+    gated by access_connect_enabled/access_connect_topic -- NOT tied to
+    access_enabled, same reasoning as plain_enabled/connect_enabled above (you
+    can run the Connect-envelope access stream without the plain one, or vice
+    versa). Keyed on node_name:path:cert_index:<accessor identity>, not just
+    cert identity -- the whole point of certificate_accessed is capturing
+    multiple distinct accessors per cert, so the upsert key must include the
+    accessor or every accessor but the last-published would silently collapse
+    into one row. See _ACCESS_CONNECT_SCHEMA_FIELDS and
+    extras/kafka/INTEGRATION-BRIEF.md.
     """
 
     def __init__(
@@ -255,6 +307,7 @@ class KafkaPublisher:
         topic: str,
         access_topic: str = '',
         connect_topic: str = '',
+        access_connect_topic: str = '',
         plain_enabled: bool = True,
         security_protocol: str = 'PLAINTEXT',
         sasl_mechanism: str = '',
@@ -276,6 +329,11 @@ class KafkaPublisher:
         # no need for a second KafkaProducer/TCP connection per topic.
         self._access_topic = access_topic
         self.access_enabled = bool(access_topic)
+        # Same empty-string-means-disabled convention, and deliberately
+        # independent of access_enabled above -- see class docstring.
+        self._access_connect_topic = access_connect_topic
+        self.access_connect_enabled = bool(access_connect_topic)
+        self._access_connect_schema = _build_access_connect_schema() if self.access_connect_enabled else None
         # Same empty-string-means-disabled convention as access_topic above.
         # Schema is built once here (not per message) since it's static --
         # see _build_connect_schema().
@@ -382,6 +440,8 @@ class KafkaPublisher:
                 label_topic = f"{label_topic}, {self._access_topic}" if label_topic else self._access_topic
             if self._connect_topic:
                 label_topic = f"{label_topic}, {self._connect_topic}" if label_topic else self._connect_topic
+            if self._access_connect_topic:
+                label_topic = f"{label_topic}, {self._access_connect_topic}" if label_topic else self._access_connect_topic
             logger.info(
                 f"Kafka producer connected — "
                 f"brokers: {label}, topics: {label_topic}"
@@ -496,8 +556,10 @@ class KafkaPublisher:
         Publish a certificate_accessed event for a distinct process/pod
         re-accessing an already-known certificate.
 
-        No-op unless access_topic was configured (access_enabled is False by
-        default — see [kafka] access_enabled in cert-analyzer.conf). Callers
+        No-op unless access_enabled and/or access_connect_enabled is set (both
+        default False — see [kafka] access_enabled/access_connect_enabled in
+        cert-analyzer.conf); each independently gates its own topic, same as
+        plain_enabled/connect_enabled do for certificate_discovered. Callers
         are expected to have already deduplicated per (process, parent_process,
         pod_name, namespace, app_label, container_name) — see
         CertificateAnalyzer._record_cert_process_access — so this fires once
@@ -530,7 +592,7 @@ class KafkaPublisher:
             "container_image": "my-app:1.0"
         }
         """
-        if not KAFKA_AVAILABLE or not self.access_enabled:
+        if not KAFKA_AVAILABLE or not (self.access_enabled or self.access_connect_enabled):
             return
 
         message = {
@@ -555,18 +617,43 @@ class KafkaPublisher:
             'container_image':  container_image,
         }
 
-        self._send(self._access_topic, cert_info.unique_key, message, cert_info.path)
+        if self.access_enabled:
+            self._send(self._access_topic, cert_info.unique_key, message, cert_info.path)
+
+        if self.access_connect_enabled:
+            envelope = self._wrap_connect_envelope(self._access_connect_schema, message)
+            # node_name:path:cert_index:<accessor identity> -- unlike the
+            # discovery-connect key, cert identity alone isn't enough here:
+            # the whole point of certificate_accessed is capturing multiple
+            # distinct accessors per cert, so the accessor fields must be
+            # part of the key or every accessor but the last-published would
+            # silently collapse into one row on upsert. See class docstring
+            # and extras/kafka/INTEGRATION-BRIEF.md.
+            connect_key = (
+                f"{node_name}:{cert_info.path}:{cert_info.cert_index}:"
+                f"{process}:{parent_process}:{pod_name}:{namespace}:{app_label}:{container_name}"
+            )
+            self._send(self._access_connect_topic, connect_key, envelope, cert_info.path)
+
+    def _wrap_connect_envelope(self, schema: dict, message: dict) -> dict:
+        """
+        Generic {"schema": ..., "payload": dict(message)} wrap, shared by the
+        certificate_discovered and certificate_accessed Connect envelopes.
+        Returns a new dict -- never mutates `message`, which the caller also
+        sends unwrapped to its plain-JSON topic.
+        """
+        return {'schema': schema, 'payload': dict(message)}
 
     def _to_connect_envelope(self, message: dict) -> dict:
         """
         Wrap a certificate_discovered message dict in the Kafka Connect JSON
-        envelope ({"schema": self._connect_schema, "payload": ...}). Returns
-        a new dict -- never mutates `message`, which the caller also sends
-        unwrapped to the plain-JSON topic.
+        envelope ({"schema": self._connect_schema, "payload": ...}).
+        certificate_accessed has no equivalent per-field transform needed
+        (no nested/dict fields), so it calls _wrap_connect_envelope directly.
         """
-        payload = dict(message)
-        payload['pod_annotations'] = json.dumps(payload.get('pod_annotations') or {})
-        return {'schema': self._connect_schema, 'payload': payload}
+        envelope = self._wrap_connect_envelope(self._connect_schema, message)
+        envelope['payload']['pod_annotations'] = json.dumps(envelope['payload'].get('pod_annotations') or {})
+        return envelope
 
     def _send(self, topic: str, key: str, message: dict, log_label: str) -> None:
         """
