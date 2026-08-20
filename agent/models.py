@@ -52,11 +52,20 @@ class CertificateInfo:
     # hash of public (non-sensitive) key material, and downstream consumers
     # need it on every cert to detect key reuse across renewals themselves.
     spki_hash: str = ""
-    # FIPS 140-2/140-3 compliance fields — populated by extract_certificate_info()
+    # Key metadata — populated by extract_certificate_info() unconditionally
+    # (independent of fips_compliance_enabled; see extract_key_info() in
+    # agent/fips_compliance_checker.py).
     key_algorithm: str = ""    # RSA, EC, DSA, Ed25519, Ed448, unknown
     key_size: int = 0          # bits; 0 for EdDSA
     signature_hash: str = ""   # sha256, sha1, md5, etc.
     curve_name: str = ""       # secp256r1 etc. (EC only)
+    # FIPS 140-2/140-3 compliance judgement of the key metadata above —
+    # only populated when fips_compliance_enabled is True. fips_checked
+    # records whether that judgement actually ran, since fips_compliant=False
+    # alone is ambiguous: it's also the untouched default when the check was
+    # skipped, not just a genuine non-compliance result. Metrics emission
+    # gates on this rather than key_algorithm (which now always populates).
+    fips_checked: bool = False
     fips_compliant: bool = False
     fips_violations: list = field(default_factory=list)
     # Raw dotted-string OIDs read directly off the DER encoding, independent

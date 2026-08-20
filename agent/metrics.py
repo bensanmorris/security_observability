@@ -551,7 +551,7 @@ class PrometheusMetrics:
         self.cert_valid_from.labels(**labels).set(info.not_before.replace(tzinfo=timezone.utc).timestamp())
         self.cert_last_accessed.labels(**labels).set(now.timestamp())
 
-        if info.key_algorithm:
+        if info.fips_checked:
             self.cert_fips_compliant.labels(
                 cert_path=info.path,
                 cert_index=str(info.cert_index),
@@ -647,7 +647,7 @@ class PrometheusMetrics:
                 info.checksum, info.spki_hash,
             ))
 
-        if info.key_algorithm:
+        if info.fips_checked:
             self._safe_remove(self.cert_fips_compliant, (
                 info.path, str(info.cert_index), info.pod_name, info.namespace,
                 info.workload_kind, info.workload_name, info.node_name,

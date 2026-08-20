@@ -3695,10 +3695,14 @@ class TestFipsComplianceEnabled:
     Tests for the fips_compliance_enabled config option.
 
     When True (the default): FIPS compliance is checked per-certificate and the
-    results are stored in CertificateInfo fields and emitted as Prometheus metrics.
+    results (fips_compliant/fips_violations) are stored in CertificateInfo fields
+    and emitted as Prometheus metrics.
 
-    When False: the check is skipped entirely — FIPS fields stay at empty defaults,
-    the cert_fips_compliant metric is not emitted, and no FIPS log lines appear.
+    When False: the compliance judgement is skipped — fips_compliant/fips_violations
+    stay at empty defaults, the cert_fips_compliant metric is not emitted, and no
+    FIPS log lines appear. Key metadata (key_algorithm/key_size/signature_hash/
+    curve_name) is unaffected -- it's extracted unconditionally regardless of this
+    flag; see TestKeyInfoExtraction below.
     """
 
     # ── Default / instance behaviour ──────────────────────────────────────────
@@ -3725,8 +3729,10 @@ class TestFipsComplianceEnabled:
         assert info.fips_compliant is True
         assert info.fips_violations == []
 
-    def test_fips_fields_empty_when_disabled(self, analyzer, temp_dir):
-        """FIPS fields are at empty defaults when fips_compliance_enabled=False."""
+    def test_fips_judgement_empty_when_disabled(self, analyzer, temp_dir):
+        """fips_compliant/fips_violations are at empty defaults when fips_compliance_enabled=False,
+        but key metadata (key_algorithm/key_size/signature_hash/curve_name) still populates --
+        see TestKeyInfoExtraction for that guarantee in detail."""
         analyzer.fips_compliance_enabled = False
 
         cert, _ = TestCertificateGeneration.generate_certificate("fips-off.example.com", 365)
@@ -3736,15 +3742,15 @@ class TestFipsComplianceEnabled:
         cert_infos = analyzer.analyze_certificate(path, "test", 1)
         assert len(cert_infos) == 1
         info = cert_infos[0]
-        assert info.key_algorithm == ''
-        assert info.key_size == 0
-        assert info.signature_hash == ''
-        assert info.curve_name == ''
+        assert info.key_algorithm == 'RSA'
+        assert info.key_size == 2048
+        assert info.signature_hash == 'sha256'
         assert info.fips_compliant is False
         assert info.fips_violations == []
 
     def test_multi_cert_bundle_all_skipped_when_disabled(self, analyzer, temp_dir):
-        """All certs in a multi-cert bundle have empty FIPS fields when disabled."""
+        """All certs in a multi-cert bundle have empty fips_compliant/fips_violations when
+        disabled, while key metadata is still populated for each."""
         analyzer.fips_compliance_enabled = False
 
         certs_and_keys = [
@@ -3759,7 +3765,7 @@ class TestFipsComplianceEnabled:
         cert_infos = analyzer.analyze_certificate(path, "test", 1)
         assert len(cert_infos) == 3
         for info in cert_infos:
-            assert info.key_algorithm == ''
+            assert info.key_algorithm == 'RSA'
             assert info.fips_compliant is False
             assert info.fips_violations == []
 
@@ -3979,6 +3985,71 @@ class TestFipsComplianceEnabled:
         cp = configparser.ConfigParser()
         result = cfg(cp, 'certificates', 'fips_compliance_enabled', 'FIPS_COMPLIANCE_ENABLED', 'true')
         assert result.lower() == 'true'
+
+
+class TestKeyInfoExtraction:
+    """
+    Tests for key_algorithm/key_size/signature_hash/curve_name on CertificateInfo.
+
+    Unlike fips_compliant/fips_violations, these are extracted unconditionally
+    (independent of fips_compliance_enabled) -- they're generic key metadata,
+    not a FIPS judgement, and dashboards/inventory need them regardless of
+    whether FIPS compliance checking itself is turned on.
+    """
+
+    def test_key_info_populated_when_fips_enabled(self, analyzer, temp_dir):
+        assert analyzer.fips_compliance_enabled is True
+
+        cert, _ = TestCertificateGeneration.generate_certificate("keyinfo-on.example.com", 365)
+        path = os.path.join(temp_dir, "keyinfo-on.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.key_algorithm == 'RSA'
+        assert info.key_size == 2048
+        assert info.signature_hash == 'sha256'
+
+    def test_key_info_populated_when_fips_disabled(self, analyzer, temp_dir):
+        """The whole point: these fields aren't gated behind fips_compliance_enabled."""
+        analyzer.fips_compliance_enabled = False
+
+        cert, _ = TestCertificateGeneration.generate_certificate("keyinfo-off.example.com", 365)
+        path = os.path.join(temp_dir, "keyinfo-off.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert len(cert_infos) == 1
+        info = cert_infos[0]
+        assert info.key_algorithm == 'RSA'
+        assert info.key_size == 2048
+        assert info.signature_hash == 'sha256'
+        assert info.fips_compliant is False  # FIPS judgement itself still skipped
+
+    def test_fips_check_not_called_but_key_info_still_populated(self, analyzer, temp_dir, monkeypatch):
+        """_fips_check() is skipped when disabled, but key info comes from a separate,
+        always-called extraction path -- confirm both halves of that split hold together."""
+        analyzer.fips_compliance_enabled = False
+
+        calls = []
+        import agent.analyzer as _ca
+        from agent.fips_compliance_checker import check_certificate as _real
+
+        def _spy(cert, **kwargs):
+            calls.append(cert)
+            return _real(cert, **kwargs)
+
+        monkeypatch.setattr(_ca, '_fips_check', _spy)
+
+        cert, _ = TestCertificateGeneration.generate_certificate("keyinfo-nocall.example.com", 365)
+        path = os.path.join(temp_dir, "keyinfo-nocall.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        assert calls == [], "_fips_check must not be called when fips_compliance_enabled=False"
+        assert cert_infos[0].key_algorithm == 'RSA'
+        assert cert_infos[0].key_size == 2048
 
 
 class TestAlgorithmOidExtraction:
