@@ -21,6 +21,7 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from .fips_compliance_checker import (
     check_certificate as _fips_check,
+    extract_key_info as _extract_key_info,
     FipsComplianceResult,
     get_algorithm_oids as _get_algorithm_oids,
 )
@@ -822,6 +823,16 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not compute checksum for cert {cert_index} in {cert_path}: {e}")
 
+        # Public key object -- extracted once and reused below for the SPKI
+        # hash, key-info extraction, and (when enabled) the FIPS check,
+        # rather than re-parsing it per consumer. cert.public_key() does
+        # real ASN.1/crypto work, so this avoids doing it twice per cert.
+        try:
+            pub_key = cert.public_key()
+        except Exception as e:
+            logger.debug(f"Could not extract public key for cert {cert_index} in {cert_path}: {e}")
+            pub_key = None
+
         # Compute SHA-256 of the DER-encoded SubjectPublicKeyInfo (public key
         # only) when enabled. Unlike `checksum` above, this value is identical
         # across a renewal that reuses the same key pair -- that's what makes
@@ -829,10 +840,10 @@ class CertificateAnalyzer:
         # done outside the analyzer by comparing this field across successive
         # discoveries of the same logical certificate.
         spki_hash = ""
-        if self.spki_hash_enabled:
+        if self.spki_hash_enabled and pub_key is not None:
             try:
                 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-                spki_der = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+                spki_der = pub_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
                 spki_hash = hashlib.sha256(spki_der).hexdigest()
             except Exception as e:
                 logger.debug(f"Could not compute SPKI hash for cert {cert_index} in {cert_path}: {e}")
@@ -847,19 +858,25 @@ class CertificateAnalyzer:
             logger.debug(f"Could not extract algorithm OIDs for cert {cert_index} in {cert_path}: {e}")
             spki_algorithm_oid, signature_algorithm_oid = '', ''
 
+        # Key algorithm/size/curve/signature-hash -- extracted unconditionally
+        # (cheap, like the algorithm OIDs above) so dashboards/inventory get
+        # real key metadata regardless of whether FIPS compliance *checking*
+        # is enabled. FIPS compliance itself (fips_compliant/fips_violations
+        # below) evaluates this same key info against FIPS 140-2/140-3
+        # requirements and stays gated behind fips_compliance_enabled -- that
+        # judgement is the genuinely optional part, not the key metadata.
+        key_info = _extract_key_info(cert, pub_key=pub_key)
+
         fips_result = None
         if self.fips_compliance_enabled:
             try:
-                pub_key = cert.public_key()
-            except Exception:
-                pub_key = None
-            try:
-                fips_result = _fips_check(cert, pub_key=pub_key)
+                fips_result = _fips_check(cert, pub_key=pub_key, key_info=key_info)
             except Exception as e:
                 logger.debug(f"FIPS check failed for cert {cert_index} in {cert_path}: {e}")
                 fips_result = FipsComplianceResult(
-                    compliant=False, key_algorithm='unknown', key_size=0,
-                    curve_name='', signature_hash='unknown',
+                    compliant=False, key_algorithm=key_info.key_algorithm,
+                    key_size=key_info.key_size, curve_name=key_info.curve_name,
+                    signature_hash=key_info.signature_hash,
                     violations=['FIPS check error'],
                 )
 
@@ -879,10 +896,11 @@ class CertificateAnalyzer:
             cert_index=cert_index,
             checksum=checksum,
             spki_hash=spki_hash,
-            key_algorithm=fips_result.key_algorithm if fips_result is not None else '',
-            key_size=fips_result.key_size if fips_result is not None else 0,
-            signature_hash=fips_result.signature_hash if fips_result is not None else '',
-            curve_name=fips_result.curve_name if fips_result is not None else '',
+            key_algorithm=key_info.key_algorithm,
+            key_size=key_info.key_size,
+            signature_hash=key_info.signature_hash,
+            curve_name=key_info.curve_name,
+            fips_checked=fips_result is not None,
             fips_compliant=fips_result.compliant if fips_result is not None else False,
             fips_violations=fips_result.violations if fips_result is not None else [],
             spki_algorithm_oid=spki_algorithm_oid,

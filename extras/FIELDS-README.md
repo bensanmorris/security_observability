@@ -218,6 +218,7 @@ carrying the same fields shown below.
   "key_size":        2048,
   "signature_hash":  "sha256",
   "curve_name":      "",
+  "fips_checked":    true,
   "fips_compliant":  true,
   "fips_violations": [],
   "spki_algorithm_oid":      "1.2.840.113549.1.1.1",
@@ -303,19 +304,23 @@ All fields are empty strings / null on bare-metal deployments.
 |---|---|---|---|
 | `checksum` | string | SHA-256 hex fingerprint of DER-encoded cert; empty string if disabled | `checksum_enabled=true` |
 | `spki_hash` | string | SHA-256 hex fingerprint of the DER-encoded SubjectPublicKeyInfo (public key only); empty string if disabled. Unlike `checksum`, stays the same across a renewal that reuses the same key pair — compare it across successive `certificate_discovered` events for the same `path`/identity to detect key reuse downstream | `spki_hash_enabled=true` (default) |
-| `key_algorithm` | string | `RSA`, `EC`, `DSA`, `Ed25519`, `Ed448`, or `unknown` | `fips_compliance_enabled=true` |
-| `key_size` | int | Key size in bits; `0` for EdDSA (fixed-size keys) | `fips_compliance_enabled=true` |
-| `signature_hash` | string | Hash algorithm name e.g. `sha256`, `sha384`, `sha1` | `fips_compliance_enabled=true` |
-| `curve_name` | string | EC curve name e.g. `secp256r1`; empty for non-EC keys | `fips_compliance_enabled=true` |
+| `key_algorithm` | string | `RSA`, `EC`, `DSA`, `Ed25519`, `Ed448`, or `unknown` | Always populated — no configuration flag required |
+| `key_size` | int | Key size in bits; `0` for EdDSA (fixed-size keys) | Always populated — no configuration flag required |
+| `signature_hash` | string | Hash algorithm name e.g. `sha256`, `sha384`, `sha1` | Always populated — no configuration flag required |
+| `curve_name` | string | EC curve name e.g. `secp256r1`; empty for non-EC keys | Always populated — no configuration flag required |
+| `fips_checked` | bool | Whether the FIPS compliance judgement below actually ran. Distinguishes "not checked" from a genuine `fips_compliant=false` non-compliance result — see note below | `fips_compliance_enabled=true` |
 | `fips_compliant` | bool | `true` only when no violations found | `fips_compliance_enabled=true` |
 | `fips_violations` | string[] | Human-readable violation descriptions; empty list when compliant | `fips_compliance_enabled=true` |
 | `spki_algorithm_oid` | string | Dotted-string OID of the SubjectPublicKeyInfo algorithm, read directly from the certificate's DER encoding (e.g. `1.2.840.113549.1.1.1` = rsaEncryption, `1.2.840.10045.2.1` = id-ecPublicKey). Unlike `key_algorithm` above, this is not derived from a `cryptography`-library key object, so it still resolves for key types this install can't instantiate (e.g. post-quantum or composite/hybrid keys) — those show up here as a distinct OID instead of collapsing into `key_algorithm="unknown"`. Empty string only on a genuine DER parse failure | Always populated — no configuration flag required |
 | `signature_algorithm_oid` | string | Dotted-string OID of the certificate's signature algorithm (e.g. `1.2.840.113549.1.1.11` = sha256WithRSAEncryption). Same rationale as `spki_algorithm_oid`: resolves even for signature schemes `signature_hash` can't name. Empty string only on a genuine DER parse failure | Always populated — no configuration flag required |
 
-> When `fips_compliance_enabled=false`, the cryptography fields (`key_algorithm`,
-> `key_size`, `signature_hash`, `curve_name`) are empty / zero and `fips_compliant`
-> is `false`. Consumers should check `fips_compliance_enabled` configuration rather
-> than treating `fips_compliant=false` as a violation signal in that case.
+> `key_algorithm`/`key_size`/`signature_hash`/`curve_name` are generic key metadata,
+> extracted unconditionally regardless of `fips_compliance_enabled`. Only the FIPS
+> *judgement* of that metadata (`fips_checked`/`fips_compliant`/`fips_violations`) is
+> gated behind the flag. When `fips_compliance_enabled=false`, `fips_checked` is
+> `false` and `fips_compliant`/`fips_violations` sit at their untouched defaults
+> (`false`/`[]`) — check `fips_checked` rather than treating `fips_compliant=false`
+> alone as a violation signal, since that combination is ambiguous on its own.
 > `spki_algorithm_oid` and `signature_algorithm_oid` are unaffected by this flag —
 > they're extracted independently of the FIPS check.
 

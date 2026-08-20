@@ -58,7 +58,60 @@ def _get_key_info(pub_key) -> Tuple[str, int, str]:
     return 'unknown', 0, ''
 
 
-def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsComplianceResult:
+@dataclass
+class KeyInfo:
+    """Key algorithm/size/curve and signature hash for a certificate.
+
+    Deliberately separate from FipsComplianceResult: this is generic
+    certificate metadata (useful for dashboards/inventory regardless of FIPS
+    auditing), not a FIPS judgement -- see extract_key_info().
+    """
+    key_algorithm: str
+    key_size: int
+    curve_name: str
+    signature_hash: str
+    key_read_error: bool = False   # True if cert.public_key() raised
+
+
+def extract_key_info(cert: x509.Certificate, *, pub_key=None) -> KeyInfo:
+    """
+    Extract key algorithm/size/curve and signature hash from a certificate.
+
+    Unlike check_certificate(), this does not evaluate FIPS compliance -- it's
+    cheap, unconditional metadata extraction that callers should run
+    regardless of whether FIPS compliance *checking* is enabled, since it
+    feeds dashboards/inventory independent of any FIPS judgement.
+
+    pub_key may be supplied by the caller to avoid a second cert.public_key()
+    extraction when the key object was already obtained elsewhere.
+    """
+    hash_name = 'unknown'
+    try:
+        hash_alg = cert.signature_hash_algorithm
+        if hash_alg is not None:
+            hash_name = hash_alg.name.lower()
+    except Exception:
+        pass  # nosec B110 - hash_name stays 'unknown'; not treated as an error here
+
+    algorithm = 'unknown'
+    key_size = 0
+    curve_name = ''
+    key_read_error = False
+    try:
+        pub = pub_key if pub_key is not None else cert.public_key()
+        algorithm, key_size, curve_name = _get_key_info(pub)
+    except Exception:
+        key_read_error = True
+
+    return KeyInfo(
+        key_algorithm=algorithm, key_size=key_size, curve_name=curve_name,
+        signature_hash=hash_name, key_read_error=key_read_error,
+    )
+
+
+def check_certificate(
+    cert: x509.Certificate, *, pub_key=None, key_info: KeyInfo = None,
+) -> FipsComplianceResult:
     """
     Check an X.509 certificate against FIPS 140-2/140-3 algorithm requirements.
 
@@ -67,21 +120,21 @@ def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsCompliance
     - Public key algorithm, minimum key size, and approved EC curve
 
     pub_key may be supplied by the caller to avoid a second cert.public_key() extraction
-    when the key object was already obtained during certificate info extraction.
+    when the key object was already obtained during certificate info extraction. key_info
+    may be supplied to reuse an already-extracted extract_key_info() result instead of
+    recomputing it here.
 
     Returns a FipsComplianceResult with compliant=True only when no violations are found.
     """
     violations: List[str] = []
 
-    # -- Signature hash -------------------------------------------------------
-    hash_name = 'unknown'
-    try:
-        hash_alg = cert.signature_hash_algorithm
-        if hash_alg is not None:
-            hash_name = hash_alg.name.lower()
-    except Exception:
-        pass  # nosec B110 - hash_name stays 'unknown', flagged as a violation below, not swallowed
+    info = key_info if key_info is not None else extract_key_info(cert, pub_key=pub_key)
+    hash_name = info.signature_hash
+    algorithm = info.key_algorithm
+    key_size = info.key_size
+    curve_name = info.curve_name
 
+    # -- Signature hash -------------------------------------------------------
     if hash_name == 'unknown':
         violations.append("Could not determine signature hash algorithm")
     elif hash_name not in _APPROVED_HASH_NAMES:
@@ -90,13 +143,7 @@ def check_certificate(cert: x509.Certificate, *, pub_key=None) -> FipsCompliance
         )
 
     # -- Public key -----------------------------------------------------------
-    algorithm = 'unknown'
-    key_size = 0
-    curve_name = ''
-    try:
-        pub = pub_key if pub_key is not None else cert.public_key()
-        algorithm, key_size, curve_name = _get_key_info(pub)
-    except Exception:
+    if info.key_read_error:
         violations.append("Could not read public key")
 
     if algorithm == 'RSA':
