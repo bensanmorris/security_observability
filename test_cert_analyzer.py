@@ -3726,13 +3726,16 @@ class TestFipsComplianceEnabled:
         assert info.key_algorithm == 'RSA'
         assert info.key_size == 2048
         assert info.signature_hash == 'sha256'
+        assert info.fips_checked is True
         assert info.fips_compliant is True
         assert info.fips_violations == []
 
     def test_fips_judgement_empty_when_disabled(self, analyzer, temp_dir):
-        """fips_compliant/fips_violations are at empty defaults when fips_compliance_enabled=False,
-        but key metadata (key_algorithm/key_size/signature_hash/curve_name) still populates --
-        see TestKeyInfoExtraction for that guarantee in detail."""
+        """fips_checked/fips_compliant/fips_violations are at empty defaults when
+        fips_compliance_enabled=False, but key metadata (key_algorithm/key_size/
+        signature_hash/curve_name) still populates -- see TestKeyInfoExtraction for
+        that guarantee in detail. fips_checked=False is what lets a consumer tell
+        'not checked' apart from a genuine fips_compliant=False non-compliance result."""
         analyzer.fips_compliance_enabled = False
 
         cert, _ = TestCertificateGeneration.generate_certificate("fips-off.example.com", 365)
@@ -3745,6 +3748,7 @@ class TestFipsComplianceEnabled:
         assert info.key_algorithm == 'RSA'
         assert info.key_size == 2048
         assert info.signature_hash == 'sha256'
+        assert info.fips_checked is False
         assert info.fips_compliant is False
         assert info.fips_violations == []
 
@@ -3831,6 +3835,7 @@ class TestFipsComplianceEnabled:
         cert_infos = analyzer.analyze_certificate(path, "test", 1)
         assert len(cert_infos) == 1
         info = cert_infos[0]
+        assert info.fips_checked is True  # the check was attempted, just failed
         assert info.fips_compliant is False
         assert 'FIPS check error' in info.fips_violations
 
@@ -4025,7 +4030,8 @@ class TestKeyInfoExtraction:
         assert info.key_algorithm == 'RSA'
         assert info.key_size == 2048
         assert info.signature_hash == 'sha256'
-        assert info.fips_compliant is False  # FIPS judgement itself still skipped
+        assert info.fips_checked is False    # FIPS judgement itself still skipped
+        assert info.fips_compliant is False
 
     def test_fips_check_not_called_but_key_info_still_populated(self, analyzer, temp_dir, monkeypatch):
         """_fips_check() is skipped when disabled, but key info comes from a separate,
@@ -6242,9 +6248,40 @@ class TestKafkaPublisher:
                 'namespace', 'pod_name', 'node_name', 'workload_kind', 'workload_name',
                 'app_label', 'container_name', 'container_image', 'checksum', 'spki_hash',
                 'spki_algorithm_oid', 'signature_algorithm_oid',
+                'key_algorithm', 'key_size', 'signature_hash', 'curve_name',
+                'fips_checked', 'fips_compliant', 'fips_violations',
             ]
             for field in required_fields:
                 assert field in msg, f"Missing field: {field}"
+
+    def test_publish_message_fips_checked_reflects_cert_info(self, monkeypatch, sample_cert_info):
+        """fips_checked is published so consumers can tell 'not checked' apart from a
+        genuine fips_compliant=False non-compliance result -- see agent/models.py's
+        fips_checked field comment for the rationale."""
+        import agent.kafka as _ca
+        monkeypatch.setattr(_ca, 'KAFKA_AVAILABLE', True)
+
+        from unittest.mock import patch, MagicMock
+        with patch('agent.kafka.KafkaProducer') as mock_cls:
+            mock_producer = MagicMock()
+            mock_cls.return_value = mock_producer
+
+            from cert_analyzer import KafkaPublisher
+            publisher = KafkaPublisher(bootstrap_servers='b:9092', topic='t')
+
+            sample_cert_info.fips_checked = False
+            sample_cert_info.fips_compliant = False
+            publisher.publish(sample_cert_info)
+            _, send_kwargs = mock_producer.send.call_args
+            assert send_kwargs['value']['fips_checked'] is False
+            assert send_kwargs['value']['fips_compliant'] is False
+
+            sample_cert_info.fips_checked = True
+            sample_cert_info.fips_compliant = True
+            publisher.publish(sample_cert_info)
+            _, send_kwargs = mock_producer.send.call_args
+            assert send_kwargs['value']['fips_checked'] is True
+            assert send_kwargs['value']['fips_compliant'] is True
 
     def test_publish_message_values_match_cert_info(self, monkeypatch, sample_cert_info):
         """Published message values correctly reflect the CertificateInfo."""

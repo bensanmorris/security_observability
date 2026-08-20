@@ -823,6 +823,16 @@ class CertificateAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not compute checksum for cert {cert_index} in {cert_path}: {e}")
 
+        # Public key object -- extracted once and reused below for the SPKI
+        # hash, key-info extraction, and (when enabled) the FIPS check,
+        # rather than re-parsing it per consumer. cert.public_key() does
+        # real ASN.1/crypto work, so this avoids doing it twice per cert.
+        try:
+            pub_key = cert.public_key()
+        except Exception as e:
+            logger.debug(f"Could not extract public key for cert {cert_index} in {cert_path}: {e}")
+            pub_key = None
+
         # Compute SHA-256 of the DER-encoded SubjectPublicKeyInfo (public key
         # only) when enabled. Unlike `checksum` above, this value is identical
         # across a renewal that reuses the same key pair -- that's what makes
@@ -830,10 +840,10 @@ class CertificateAnalyzer:
         # done outside the analyzer by comparing this field across successive
         # discoveries of the same logical certificate.
         spki_hash = ""
-        if self.spki_hash_enabled:
+        if self.spki_hash_enabled and pub_key is not None:
             try:
                 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-                spki_der = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+                spki_der = pub_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
                 spki_hash = hashlib.sha256(spki_der).hexdigest()
             except Exception as e:
                 logger.debug(f"Could not compute SPKI hash for cert {cert_index} in {cert_path}: {e}")
@@ -855,10 +865,6 @@ class CertificateAnalyzer:
         # below) evaluates this same key info against FIPS 140-2/140-3
         # requirements and stays gated behind fips_compliance_enabled -- that
         # judgement is the genuinely optional part, not the key metadata.
-        try:
-            pub_key = cert.public_key()
-        except Exception:
-            pub_key = None
         key_info = _extract_key_info(cert, pub_key=pub_key)
 
         fips_result = None
