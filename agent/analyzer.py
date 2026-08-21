@@ -795,6 +795,27 @@ class CertificateAnalyzer:
         except Exception as e:
             logger.debug(f"Error extracting Basic Constraints: {e}")
 
+        ocsp_responder_urls = None
+        ca_issuers_urls = None
+        try:
+            aia_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.AUTHORITY_INFORMATION_ACCESS
+            )
+            ocsp_responder_urls = []
+            ca_issuers_urls = []
+            for desc in aia_ext.value:
+                if not isinstance(desc.access_location, x509.UniformResourceIdentifier):
+                    continue  # access_location is a GeneralName; only the URI form is meaningful here
+                url = desc.access_location.value
+                if desc.access_method == x509.oid.AuthorityInformationAccessOID.OCSP:
+                    ocsp_responder_urls.append(url)
+                elif desc.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS:
+                    ca_issuers_urls.append(url)
+        except x509.ExtensionNotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"Error extracting Authority Information Access: {e}")
+
         # A certificate is self-signed when its subject name matches its issuer
         # and the signature verifies against its own public key.
         # verify_directly_issued_by() (cryptography ≥40) performs both checks atomically;
@@ -907,6 +928,8 @@ class CertificateAnalyzer:
             signature_algorithm_oid=signature_algorithm_oid,
             key_usage=key_usage,
             extended_key_usage=extended_key_usage,
+            ocsp_responder_urls=ocsp_responder_urls,
+            ca_issuers_urls=ca_issuers_urls,
             is_ca=is_ca,
             basic_constraints_path_length=basic_constraints_path_length,
             is_self_signed=is_self_signed,

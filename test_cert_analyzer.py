@@ -3283,6 +3283,7 @@ class TestCacheHitReDetection:
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
             checksum='', spki_hash='', key_usage='', extended_key_usage='',
+            ocsp_responder_url='', ca_issuers_url='',
             spki_algorithm_oid='', signature_algorithm_oid='',
         )._value.get()
         assert before == 0.0
@@ -3295,6 +3296,7 @@ class TestCacheHitReDetection:
             cert_index='0', pod_name='', namespace='', workload_kind='',
             workload_name='', node_name='', app_label='', container_name='',
             checksum='', spki_hash='', key_usage='', extended_key_usage='',
+            ocsp_responder_url='', ca_issuers_url='',
             spki_algorithm_oid='', signature_algorithm_oid='',
         )._value.get()
         assert after > 0.0
@@ -4118,7 +4120,7 @@ class TestRFC5280Extensions:
     """Tests for Key Usage, Extended Key Usage, and Basic Constraints extraction."""
 
     @staticmethod
-    def _build_cert(key_usage_ext=None, eku_ext=None, bc_ext=None):
+    def _build_cert(key_usage_ext=None, eku_ext=None, bc_ext=None, aia_ext=None):
         """Return a signed x509.Certificate with the given optional extensions."""
         private_key = rsa.generate_private_key(
             public_exponent=65537, key_size=2048, backend=default_backend()
@@ -4139,6 +4141,8 @@ class TestRFC5280Extensions:
             builder = builder.add_extension(eku_ext, critical=False)
         if bc_ext is not None:
             builder = builder.add_extension(bc_ext, critical=True)
+        if aia_ext is not None:
+            builder = builder.add_extension(aia_ext, critical=False)
         return builder.sign(private_key, hashes.SHA256(), backend=default_backend())
 
     def _analyze(self, analyzer, temp_dir, cert):
@@ -4253,6 +4257,90 @@ class TestRFC5280Extensions:
         info = self._analyze(analyzer, temp_dir, cert)
         assert info.is_ca is True
         assert info.basic_constraints_path_length == 0
+
+    # ── Authority Information Access ────────────────────────────────────────
+
+    def test_aia_absent_returns_none(self, analyzer, temp_dir):
+        cert = self._build_cert()
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.ocsp_responder_urls is None
+        assert info.ca_issuers_urls is None
+
+    def test_aia_ocsp_only(self, analyzer, temp_dir):
+        from cryptography.x509.oid import AuthorityInformationAccessOID
+        aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                x509.UniformResourceIdentifier("http://ocsp.example-ca.com"),
+            ),
+        ])
+        cert = self._build_cert(aia_ext=aia)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.ocsp_responder_urls == ["http://ocsp.example-ca.com"]
+        assert info.ca_issuers_urls == []
+
+    def test_aia_ca_issuers_only(self, analyzer, temp_dir):
+        from cryptography.x509.oid import AuthorityInformationAccessOID
+        aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.CA_ISSUERS,
+                x509.UniformResourceIdentifier("http://certs.example-ca.com/intermediate.crt"),
+            ),
+        ])
+        cert = self._build_cert(aia_ext=aia)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.ocsp_responder_urls == []
+        assert info.ca_issuers_urls == ["http://certs.example-ca.com/intermediate.crt"]
+
+    def test_aia_ocsp_and_ca_issuers_together(self, analyzer, temp_dir):
+        from cryptography.x509.oid import AuthorityInformationAccessOID
+        aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                x509.UniformResourceIdentifier("http://ocsp.example-ca.com"),
+            ),
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.CA_ISSUERS,
+                x509.UniformResourceIdentifier("http://certs.example-ca.com/intermediate.crt"),
+            ),
+        ])
+        cert = self._build_cert(aia_ext=aia)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.ocsp_responder_urls == ["http://ocsp.example-ca.com"]
+        assert info.ca_issuers_urls == ["http://certs.example-ca.com/intermediate.crt"]
+
+    def test_aia_multiple_ocsp_entries_all_captured_in_order(self, analyzer, temp_dir):
+        from cryptography.x509.oid import AuthorityInformationAccessOID
+        aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                x509.UniformResourceIdentifier("http://ocsp1.example-ca.com"),
+            ),
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                x509.UniformResourceIdentifier("http://ocsp2.example-ca.com"),
+            ),
+        ])
+        cert = self._build_cert(aia_ext=aia)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.ocsp_responder_urls == [
+            "http://ocsp1.example-ca.com", "http://ocsp2.example-ca.com",
+        ]
+
+    def test_aia_non_uri_access_location_skipped(self, analyzer, temp_dir):
+        from cryptography.x509.oid import AuthorityInformationAccessOID
+        aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                x509.DirectoryName(x509.Name([
+                    x509.NameAttribute(NameOID.COMMON_NAME, "not-a-uri-ocsp-responder"),
+                ])),
+            ),
+        ])
+        cert = self._build_cert(aia_ext=aia)
+        info = self._analyze(analyzer, temp_dir, cert)
+        assert info.ocsp_responder_urls == []
+        assert info.ca_issuers_urls == []
 
     # ── All three extensions present together ────────────────────────────────
 

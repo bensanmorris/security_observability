@@ -78,6 +78,8 @@ class CertificateInfo:
     # RFC 5280 extension fields — None means the extension is absent from the certificate
     key_usage: Optional[list] = None
     extended_key_usage: Optional[list] = None
+    ocsp_responder_urls: Optional[list] = None
+    ca_issuers_urls: Optional[list] = None
     is_ca: Optional[bool] = None
     basic_constraints_path_length: Optional[int] = None
     # True when the certificate is self-signed (subject == issuer and signature
