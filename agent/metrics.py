@@ -191,9 +191,10 @@ class PrometheusMetrics:
         # this doesn't add meaningful cardinality risk.
         #
         # ocsp_responder_url/ca_issuers_url are similarly comma-joined (AIA
-        # can carry multiple URIs per access method). Cardinality is bounded
-        # by the number of distinct issuing CAs in the environment -- the
-        # same justification `issuer` itself already relies on as a label.
+        # can carry multiple URIs per access method) and, like subject/issuer
+        # below, truncated to 100 chars -- these URIs come straight from
+        # certificate content the analyzer doesn't control, so an adversarial
+        # AIA extension shouldn't be able to push an unbounded label value.
         self.cert_expiry_days = Gauge(
             'tls_certificate_expiry_days',
             'Days until TLS certificate expiry',
@@ -522,8 +523,8 @@ class PrometheusMetrics:
             'spki_hash':        info.spki_hash,
             'key_usage':          ','.join(info.key_usage) if info.key_usage else '',
             'extended_key_usage': ','.join(info.extended_key_usage) if info.extended_key_usage else '',
-            'ocsp_responder_url': ','.join(info.ocsp_responder_urls) if info.ocsp_responder_urls else '',
-            'ca_issuers_url':     ','.join(info.ca_issuers_urls) if info.ca_issuers_urls else '',
+            'ocsp_responder_url': ','.join(info.ocsp_responder_urls)[:100] if info.ocsp_responder_urls else '',
+            'ca_issuers_url':     ','.join(info.ca_issuers_urls)[:100] if info.ca_issuers_urls else '',
             'spki_algorithm_oid':      info.spki_algorithm_oid,
             'signature_algorithm_oid': info.signature_algorithm_oid,
         }
@@ -640,8 +641,8 @@ class PrometheusMetrics:
             info.checksum, info.spki_hash,
             ','.join(info.key_usage) if info.key_usage else '',
             ','.join(info.extended_key_usage) if info.extended_key_usage else '',
-            ','.join(info.ocsp_responder_urls) if info.ocsp_responder_urls else '',
-            ','.join(info.ca_issuers_urls) if info.ca_issuers_urls else '',
+            ','.join(info.ocsp_responder_urls)[:100] if info.ocsp_responder_urls else '',
+            ','.join(info.ca_issuers_urls)[:100] if info.ca_issuers_urls else '',
             info.spki_algorithm_oid, info.signature_algorithm_oid,
         )
         for gauge in (self.cert_expiry_days, self.cert_expiry_timestamp,
@@ -707,8 +708,8 @@ class PrometheusMetrics:
             spki_hash=info.spki_hash,
             key_usage=','.join(info.key_usage) if info.key_usage else '',
             extended_key_usage=','.join(info.extended_key_usage) if info.extended_key_usage else '',
-            ocsp_responder_url=','.join(info.ocsp_responder_urls) if info.ocsp_responder_urls else '',
-            ca_issuers_url=','.join(info.ca_issuers_urls) if info.ca_issuers_urls else '',
+            ocsp_responder_url=','.join(info.ocsp_responder_urls)[:100] if info.ocsp_responder_urls else '',
+            ca_issuers_url=','.join(info.ca_issuers_urls)[:100] if info.ca_issuers_urls else '',
             spki_algorithm_oid=info.spki_algorithm_oid,
             signature_algorithm_oid=info.signature_algorithm_oid,
         # datetime.now(timezone.utc), not datetime.utcnow() -- .timestamp() on

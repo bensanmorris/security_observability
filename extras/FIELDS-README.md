@@ -52,8 +52,8 @@ All share the same label set:
 | `spki_hash` | X.509 | SHA-256 hex fingerprint of the DER-encoded SubjectPublicKeyInfo (public key only) — identical across a renewal that reuses the same key pair, unlike `checksum` above; empty string when `spki_hash_enabled=false`. Enabled by default |
 | `key_usage` | X.509 | Comma-joined Key Usage bits (e.g. `digital_signature,key_encipherment`); empty string if the extension is absent |
 | `extended_key_usage` | X.509 | Comma-joined Extended Key Usage OIDs (e.g. `server_auth,client_auth`); empty string if the extension is absent |
-| `ocsp_responder_url` | X.509 | Comma-joined OCSP responder URI(s) from the Authority Information Access extension; empty string if the extension is absent or carries no OCSP entry. Cardinality is bounded by distinct issuing CAs, same as `issuer` |
-| `ca_issuers_url` | X.509 | Comma-joined CA Issuers URI(s) from the Authority Information Access extension; empty string if the extension is absent or carries no CA Issuers entry |
+| `ocsp_responder_url` | X.509 | Comma-joined OCSP responder URI(s) from the Authority Information Access extension, truncated to 100 chars (same as `subject`/`issuer`); empty string if the extension is absent or carries no OCSP entry |
+| `ca_issuers_url` | X.509 | Comma-joined CA Issuers URI(s) from the Authority Information Access extension, truncated to 100 chars (same as `subject`/`issuer`); empty string if the extension is absent or carries no CA Issuers entry |
 | `spki_algorithm_oid` | X.509 | Dotted-string OID of the SubjectPublicKeyInfo algorithm, read directly from the DER encoding; resolves even for key types this install of `cryptography` can't instantiate (e.g. post-quantum/composite keys). Always populated — no configuration flag required |
 | `signature_algorithm_oid` | X.509 | Dotted-string OID of the certificate's signature algorithm, same rationale as `spki_algorithm_oid`. Always populated — no configuration flag required |
 

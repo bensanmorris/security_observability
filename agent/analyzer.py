@@ -1595,6 +1595,10 @@ class CertificateAnalyzer:
             if info.is_ca and info.basic_constraints_path_length is not None:
                 bc += f" (path length {info.basic_constraints_path_length})"
             detail_log(f"   Basic Constraints: {bc}")
+        if info.ocsp_responder_urls or info.ca_issuers_urls:
+            ocsp = ', '.join(info.ocsp_responder_urls) if info.ocsp_responder_urls else '—'
+            ca_issuers = ', '.join(info.ca_issuers_urls) if info.ca_issuers_urls else '—'
+            detail_log(f"   OCSP: {ocsp} | CA Issuers: {ca_issuers}")
         if info.fips_compliant:
             alg = info.key_algorithm
             if info.key_size:

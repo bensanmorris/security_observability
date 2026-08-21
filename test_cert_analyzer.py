@@ -4342,6 +4342,37 @@ class TestRFC5280Extensions:
         assert info.ocsp_responder_urls == []
         assert info.ca_issuers_urls == []
 
+    def test_aia_ocsp_url_label_truncated_but_kafka_field_stays_full(self, analyzer, temp_dir):
+        """
+        Prometheus label values are capped at 100 chars (same as subject/issuer)
+        since AIA URIs come from certificate content the analyzer doesn't
+        control -- an oversized/adversarial URI must not blow up the label
+        value. CertificateInfo.ocsp_responder_urls (what feeds Kafka) keeps
+        the full, untruncated value.
+        """
+        from cryptography.x509.oid import AuthorityInformationAccessOID
+        long_url = "http://ocsp.example-ca.com/" + "a" * 200
+        aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                x509.UniformResourceIdentifier(long_url),
+            ),
+        ])
+        cert = self._build_cert(aia_ext=aia)
+        path = os.path.join(temp_dir, "aia-long-url.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        infos = analyzer.analyze_certificate(path, "test", 0)
+        assert infos[0].ocsp_responder_urls == [long_url]
+
+        analyzer._finish_new_certificate_file(infos, None, "", 0, "")
+        samples = [
+            s for metric in analyzer.metrics.cert_expiry_days.collect()
+            for s in metric.samples
+            if s.labels.get('cert_path') == path
+        ]
+        assert samples
+        assert samples[0].labels.get('ocsp_responder_url') == long_url[:100]
+
     # ── All three extensions present together ────────────────────────────────
 
     def test_all_three_extensions_extracted_together(self, analyzer, temp_dir):
