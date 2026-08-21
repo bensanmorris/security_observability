@@ -1462,7 +1462,9 @@
                   "spki_algorithm_oid": 19,
                   "signature_algorithm_oid": 20,
                   "key_usage": 21,
-                  "extended_key_usage": 22
+                  "extended_key_usage": 22,
+                  "ocsp_responder_url": 23,
+                  "ca_issuers_url": 24
                 },
                 "renameByName": {
                   "Value": "Days Until Expiry",
@@ -1486,7 +1488,9 @@
                   "spki_algorithm_oid": "SPKI OID",
                   "signature_algorithm_oid": "Signature OID",
                   "key_usage": "Key Usage",
-                  "extended_key_usage": "Extended Key Usage"
+                  "extended_key_usage": "Extended Key Usage",
+                  "ocsp_responder_url": "OCSP Responder URL",
+                  "ca_issuers_url": "CA Issuers URL"
                 }
               }
             },

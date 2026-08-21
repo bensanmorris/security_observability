@@ -52,6 +52,8 @@ All share the same label set:
 | `spki_hash` | X.509 | SHA-256 hex fingerprint of the DER-encoded SubjectPublicKeyInfo (public key only) — identical across a renewal that reuses the same key pair, unlike `checksum` above; empty string when `spki_hash_enabled=false`. Enabled by default |
 | `key_usage` | X.509 | Comma-joined Key Usage bits (e.g. `digital_signature,key_encipherment`); empty string if the extension is absent |
 | `extended_key_usage` | X.509 | Comma-joined Extended Key Usage OIDs (e.g. `server_auth,client_auth`); empty string if the extension is absent |
+| `ocsp_responder_url` | X.509 | Comma-joined OCSP responder URI(s) from the Authority Information Access extension, truncated to 100 chars (same as `subject`/`issuer`); empty string if the extension is absent or carries no OCSP entry |
+| `ca_issuers_url` | X.509 | Comma-joined CA Issuers URI(s) from the Authority Information Access extension, truncated to 100 chars (same as `subject`/`issuer`); empty string if the extension is absent or carries no CA Issuers entry |
 | `spki_algorithm_oid` | X.509 | Dotted-string OID of the SubjectPublicKeyInfo algorithm, read directly from the DER encoding; resolves even for key types this install of `cryptography` can't instantiate (e.g. post-quantum/composite keys). Always populated — no configuration flag required |
 | `signature_algorithm_oid` | X.509 | Dotted-string OID of the certificate's signature algorithm, same rationale as `spki_algorithm_oid`. Always populated — no configuration flag required |
 
@@ -226,6 +228,8 @@ carrying the same fields shown below.
 
   "key_usage":                     ["digital_signature", "key_encipherment"],
   "extended_key_usage":            ["server_auth"],
+  "ocsp_responder_urls":           ["http://ocsp.example-ca.com"],
+  "ca_issuers_urls":               ["http://certs.example-ca.com/intermediate.crt"],
   "is_ca":                         false,
   "basic_constraints_path_length": null,
   "is_self_signed":                false
@@ -334,6 +338,8 @@ the extension is present but no values are set.
 |---|---|---|
 | `key_usage` | string[]\|null | Key Usage bits set on the certificate. `null` if the extension is absent. Possible values: `digital_signature`, `content_commitment`, `key_encipherment`, `data_encipherment`, `key_agreement`, `key_cert_sign`, `crl_sign`, `encipher_only`, `decipher_only` |
 | `extended_key_usage` | string[]\|null | Extended Key Usage OIDs. `null` if the extension is absent. Common values: `server_auth`, `client_auth`, `code_signing`, `email_protection`, `time_stamping`, `ocsp_signing`. Unknown OIDs appear as dotted strings e.g. `1.3.6.1.4.1.311.10.3.4` |
+| `ocsp_responder_urls` | string[]\|null | OCSP responder URI(s) from the Authority Information Access extension. `null` if the extension is absent; `[]` if present but no OCSP entry exists |
+| `ca_issuers_urls` | string[]\|null | CA Issuers URI(s) from the Authority Information Access extension. `null` if the extension is absent; `[]` if present but no CA Issuers entry exists |
 | `is_ca` | bool\|null | `true` if the Basic Constraints extension is present and `CA` is set; `false` if the extension is present but `CA` is not set; `null` if the extension is absent |
 | `basic_constraints_path_length` | int\|null | Maximum CA chain depth from the Basic Constraints extension. `null` if the extension is absent or no path length constraint is specified |
 
