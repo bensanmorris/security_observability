@@ -196,10 +196,13 @@ what to remove. Only one demo stack can be tracked at a time this way -- run
   produces no Kafka event**: `user-data.sh` works around a known
   policy-load-timing issue (the `java-non-fips-cert.yaml` uprobe only
   attaches if `libcert_agent_stub.so` is already mapped into some process
-  when the policy loads, which can't be true on a cold box) by spinning up
-  a throwaway JVM and reloading policies once it's attached. If that
-  warm-up step itself failed (check the install log for "WARNING:
-  cert-agent-deployer never attached"), the fix is the same one that
-  resolves it after the fact: `sudo systemctl restart tetragon` on the
-  instance, which reloads the persisted policies against whatever's
-  running by then.
+  when the policy loads, which can't be true on a cold box) by jattaching a
+  throwaway JVM and restarting Tetragon while it's still attached. If that
+  warm-up step itself failed (check the install log for "WARNING: jattach
+  into the warm-up JVM ... failed"), the fix is the same one it performs
+  automatically: `sudo systemctl restart tetragon` on the instance, run
+  while *some* process on the box has `libcert_agent_stub.so` mapped
+  (e.g. click the JCA use case once first, then restart Tetragon within
+  its ~15s lifetime) -- restarting Tetragon on a box with no such process
+  running yet doesn't help, since nothing is mapped for the policy reload
+  to bind against.

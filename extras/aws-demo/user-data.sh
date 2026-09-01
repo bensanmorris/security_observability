@@ -219,25 +219,43 @@ echo "=== Java JCA warm-up (fixes policy-load-timing issue on the java-non-fips-
 # something reloads the policy after a JVM has actually loaded the library --
 # without this, the first "load a certificate into a Java KeyStore (JCA)" test
 # console click (and every one after it) silently produces no Kafka event.
-curl -fsSL -o probe-tests.tar.gz "${RELEASE_BASE}/probe-tests-${CERTSIGHT_VERSION}.tar.gz"
-mkdir -p probe-tests && tar -xzf probe-tests.tar.gz -C probe-tests
+#
+# This step previously polled `journalctl -u cert-agent-deployer` for an
+# "Attached cert-agent to PID ..." line to decide whether the warm-up JVM was
+# ready -- that line is only ever emitted by java-agent/java_agent_deployer.py,
+# which nothing here ever invokes, and cert-agent-deployer is an RPM (installs
+# the jattach binary), not a systemd unit. That check could never succeed, so
+# this warm-up silently never actually attached anything and always fell
+# through to the WARNING below, on every deploy -- confirmed by reproducing
+# and fixing the exact symptom on a live demo instance (see git history).
+# Below, jattach the same way the test console's own JCA use case does
+# (extras/test-server/use_cases.py's _run_java_keystore_cert), against the
+# already-installed test-server's own CertAgentTest.class, and use a real
+# Tetragon restart -- not apply-policies.sh -- which is the one remedy
+# confirmed to actually fix this on a running instance (see
+# extras/aws-demo/README.md's troubleshooting section).
+CERT_AGENT_JAR=/opt/cert-agent/cert-agent.jar
+CERT_AGENT_NATIVE_LIB=/opt/cert-agent/libcert_agent_stub.so
+JATTACH_BIN=/opt/cert-agent-deployer/jattach
+
 openssl req -x509 -newkey rsa:2048 -keyout /tmp/jca-warmup-key.pem \
     -out /tmp/jca-warmup-cert.pem -days 1 -nodes -subj "/CN=certsight-jca-warmup" 2>/dev/null
 
-java -cp "${WORKDIR}/probe-tests/java" CertAgentTest /tmp/jca-warmup-cert.pem &
+java -cp /opt/certsight-test-server CertAgentTest /tmp/jca-warmup-cert.pem &
 WARMUP_JAVA_PID=$!
+sleep 2  # let the JVM finish starting before jattach-ing into it
 
 ATTACHED=false
-for i in $(seq 1 40); do
-    journalctl -u cert-agent-deployer --no-pager 2>/dev/null | grep -q "Attached cert-agent to PID ${WARMUP_JAVA_PID}" && { ATTACHED=true; break; }
-    sleep 2
-done
+if "${JATTACH_BIN}" "${WARMUP_JAVA_PID}" load instrument false "${CERT_AGENT_JAR}=${CERT_AGENT_NATIVE_LIB}"; then
+    ATTACHED=true
+fi
 
 if [[ "${ATTACHED}" == true ]]; then
-    echo "    Warm-up JVM (PID ${WARMUP_JAVA_PID}) attached -- reloading policies so the uprobe binds"
-    ./tetragon-policies/apply-policies.sh || true
+    echo "    Warm-up JVM (PID ${WARMUP_JAVA_PID}) attached -- restarting Tetragon so the uprobe binds against it"
+    systemctl restart tetragon
+    sleep 3
 else
-    echo "    WARNING: cert-agent-deployer never attached to the warm-up JVM within 80s -- the JCA use case may need a manual 'sudo systemctl restart tetragon' (see extras/aws-demo/README.md)"
+    echo "    WARNING: jattach into the warm-up JVM (PID ${WARMUP_JAVA_PID}) failed -- the JCA use case may need a manual 'sudo systemctl restart tetragon' (see extras/aws-demo/README.md)"
 fi
 
 kill "${WARMUP_JAVA_PID}" 2>/dev/null || true
