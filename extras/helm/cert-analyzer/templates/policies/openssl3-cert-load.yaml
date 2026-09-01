@@ -37,4 +37,30 @@ spec:
     - index: 2
       type: "char_buf"
       sizeArgIndex: 2
+{{- if .Values.policies.opensslCertLoad.captureConnectSni }}
+  # SSL_ctrl(SSL *s, int cmd, long larg, void *parg) -- SSL_set_tlsext_host_name()
+  # compiles down to this (no exported symbol of its own). cmd==55 is
+  # SSL_CTRL_SET_TLSEXT_HOSTNAME; parg is the real hostname the client is
+  # about to send as SNI, as a single plain string pointer -- same pattern as
+  # SSL_CTX_use_certificate_file above, so no d2i_X509 double-pointer problem.
+  # matchArgs filters to cmd==55 at the eBPF layer since SSL_ctrl multiplexes
+  # dozens of unrelated control operations. Feeds connect-probe's real-SNI fix
+  # in agent/analyzer.py (_handle_ssl_ctrl_sni_capture) -- see
+  # extras/PRESENTATION-QA.md's "Scale & Performance" section. String args
+  # require bpf_copy_from_user_str (kernel 6.3+) -- RHEL9-class nodes only.
+  - path: "/procRoot/1/root/usr/lib64/libssl.so.3"
+    symbols:
+    - "SSL_ctrl"
+    args:
+    - index: 1
+      type: "int32"
+    - index: 3
+      type: "string"
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: "Equal"
+        values:
+        - "55"
+{{- end }}
 {{- end }}

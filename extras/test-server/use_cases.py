@@ -673,6 +673,133 @@ def _dial_outbound_tls_port(params: dict) -> UseCaseResult:
     )
 
 
+_CONNECT_SNI_HELPER_SCRIPT = Path(__file__).resolve().parent / "tcp_connect_sni_probe_helper.py"
+
+
+def _dial_outbound_tls_port_with_captured_sni(params: dict) -> UseCaseResult:
+    global _active_connect_probe_count
+    with _active_connect_probe_lock:
+        if _active_connect_probe_count >= _MAX_CONCURRENT_CONNECT_PROBES:
+            return UseCaseResult(
+                ok=False,
+                detail=f"{_MAX_CONCURRENT_CONNECT_PROBES} outbound connect probe(s) are "
+                "already running -- shared with the 'dial out to a TLS port' use case above, "
+                "since both bind the same candidate ports -- wait a few seconds for one to "
+                "finish and try again",
+            )
+        _active_connect_probe_count += 1
+
+    def _release():
+        global _active_connect_probe_count
+        with _active_connect_probe_lock:
+            _active_connect_probe_count -= 1
+
+    token = _resolve_token(params)
+    real_hostname = f"certsight-test-sni-real-{token}.local"
+    real_cn = real_hostname
+    fallback_cn = f"certsight-test-sni-fallback-{token}.local"
+
+    real_cert_pem, real_key_pem = _generate_self_signed_cert(real_cn, key_size=2048)
+    fallback_cert_pem, fallback_key_pem = _generate_self_signed_cert(fallback_cn, key_size=2048)
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+
+    real_cert_path = _GENERATED_CERT_DIR / f"connect-sni-real-{token}.crt"
+    real_key_path = _GENERATED_CERT_DIR / f"connect-sni-real-{token}.key"
+    fallback_cert_path = _GENERATED_CERT_DIR / f"connect-sni-fallback-{token}.crt"
+    fallback_key_path = _GENERATED_CERT_DIR / f"connect-sni-fallback-{token}.key"
+
+    for cert_path, cert_pem in ((real_cert_path, real_cert_pem), (fallback_cert_path, fallback_cert_pem)):
+        cert_path.write_bytes(cert_pem)
+        cert_path.chmod(0o644)
+    for key_path, key_pem in ((real_key_path, real_key_pem), (fallback_key_path, fallback_key_pem)):
+        # Never leaves this host, only read by the sibling helper process
+        # spawned below (same user) -- see the matching comment on the
+        # bind-probe use case above.
+        key_path.write_bytes(key_pem)
+        key_path.chmod(0o600)
+
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable, str(_CONNECT_SNI_HELPER_SCRIPT),
+                str(real_cert_path), str(real_key_path),
+                str(fallback_cert_path), str(fallback_key_path),
+                real_hostname, str(_CONNECT_PROBE_LIFETIME_SECONDS),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as e:
+        _release()
+        return UseCaseResult(ok=False, detail=f"failed to spawn tcp_connect SNI probe helper: {e}")
+
+    # Same background reader + queue pattern as the plain connect-probe use
+    # case above: the helper's readiness line only arrives after its own
+    # outbound connect() (and, here, its own TLS handshake) has already
+    # happened, so a helper that hangs before that point can't block this
+    # HTTP request forever.
+    ready_q: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: ready_q.put(proc.stdout.readline()), daemon=True).start()
+
+    try:
+        first_line = ready_q.get(timeout=_CONNECT_PROBE_READY_TIMEOUT_SECONDS).strip()
+    except queue.Empty:
+        proc.kill()
+        _release()
+        return UseCaseResult(
+            ok=False, detail="tcp_connect SNI probe helper didn't report its outbound connect in time",
+        )
+
+    if not first_line.startswith("PORT "):
+        proc.kill()
+        _release()
+        return UseCaseResult(ok=False, detail=f"tcp_connect SNI probe helper failed to start: {first_line or '(no output)'}")
+
+    port = first_line.split(" ", 2)[1]
+
+    def _reap():
+        proc.wait()
+        _release()
+
+    threading.Thread(target=_reap, daemon=True).start()
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"PID {proc.pid} made a real outbound TLS connect() to 127.0.0.1:{port}, presenting "
+            f"'{real_hostname}' as SNI -- simulating an SNI-multiplexed CDN edge that serves "
+            f"CN={real_cn} for that exact hostname and CN={fallback_cn} for anything else (a "
+            "bare IP, no SNI, ...), the same way a real CDN edge falls back to its generic "
+            "default vhost. If cert-analyzer has [port_probe] connect_probe_enabled = true and "
+            "the tcp-connect-tls.yaml TracingPolicy loaded, it should probe that endpoint "
+            f"immediately -- check the Kafka pane for a tls-connect-probe://127.0.0.1:{port} "
+            "event and compare its certificate's CN against the two above: "
+            f"CN={fallback_cn} means cert-analyzer dialed with the raw destination IP as SNI, "
+            "same as before this fix (expected with [port_probe] sni_capture_enabled left at "
+            f"its default false); CN={real_cn} means it used the real captured hostname instead "
+            "-- confirming the SSL_ctrl SNI capture worked. To see the fix flip that outcome, "
+            "enable [port_probe] sni_capture_enabled = true (Helm: "
+            "policies.opensslCertLoad.captureConnectSni plus the corresponding cert-analyzer.conf "
+            "setting -- see extras/PRESENTATION-QA.md's 'SNI-multiplexed CDN edge' entry), "
+            "restart cert-analyzer to clear its connect-mechanism probe dedup cache (each "
+            "destination host:port is only ever probed once, with no expiry), then click this "
+            "use case again with a fresh port. The openssl3-cert-load.yaml TracingPolicy must "
+            "also be loaded -- it's the same policy the 'load a certificate straight into "
+            "memory' use case above requires, since the SSL_ctrl uprobe lives in that same "
+            "policy file, and it only exists on RHEL9-class kernels (6.3+ for string uprobe "
+            "args), not the RHEL8 variant. Note: that connect-mechanism dedup cache is shared "
+            "with the plain 'dial out to a TLS port' use case above against the identical "
+            "port -- if it already probed this exact port since cert-analyzer's last restart, "
+            "this click's connect() still fires the kprobe but the probe itself is silently "
+            "skipped."
+        ),
+        token=token,
+    )
+
+
 # Hardcoded to the literal path openssl3-cert-load.yaml / openssl3-cert-
 # load-rhel8.yaml hook (both RHEL8 and RHEL9 use this same soname). Tetragon
 # uprobes attach to a specific file, not to "whatever the dynamic linker
@@ -1182,6 +1309,112 @@ USE_CASES: List[UseCase] = [
             "Server-Sent Events stream, where it lands in the right-hand "
             "pane -- compare its 'pid' field against the PID shown in the "
             "status line above.",
+        ],
+    ),
+    UseCase(
+        id="tcp-connect-sni-capture",
+        label="dial out with a real SNI hostname behind a CDN-style edge",
+        description=(
+            "Verifies the SSL_ctrl uprobe fix for connect-probe's CDN "
+            "fallback-cert gap. Spawns a separate process that binds a real "
+            "TLS listener simulating an SNI-multiplexed edge -- it serves a "
+            "'real' cert for the exact hostname this use case's own client "
+            "role presents as SNI, and a distinct 'fallback' cert for "
+            "anything else -- then makes a real outbound TLS connect() back "
+            "to itself with that real hostname as SNI. Compare the CN in "
+            "the resulting Kafka event to see whether cert-analyzer's probe "
+            "used the real hostname (requires [port_probe] "
+            "sni_capture_enabled = true) or fell back to the raw "
+            "destination IP (the default). Requires the same "
+            "connect_probe_enabled / tcp-connect-tls.yaml prerequisites as "
+            "the use case above, plus the openssl3-cert-load.yaml "
+            "TracingPolicy (RHEL9-class kernels only) -- see "
+            "TEST-SERVER-README.md."
+        ),
+        run=_dial_outbound_tls_port_with_captured_sni,
+        pipeline=[
+            "This server generates two fresh self-signed X.509 certs + "
+            f"private keys in memory and writes both pairs to {_GENERATED_CERT_DIR}/ -- "
+            "a 'real' cert (CN=certsight-test-sni-real-<token>.local) and a "
+            "'fallback' cert (CN=certsight-test-sni-fallback-<token>.local) "
+            "standing in for a CDN edge's generic default vhost cert.",
+
+            "This server spawns tcp_connect_sni_probe_helper.py as a "
+            "separate OS process (not a thread), for the same PID-"
+            "attribution reason as the bind-probe/connect-probe use cases "
+            "above.",
+
+            "That helper process binds a real TLS listener on one of "
+            "tcp-connect-tls.yaml's DPort-filtered ports (the same "
+            "non-privileged subset the plain connect-probe use case above "
+            "uses), with an SNI callback that serves the real cert only "
+            "for connections presenting the exact real hostname as SNI, "
+            "and the fallback cert for everything else -- a bare IP, no "
+            "SNI, or any other value:\n"
+            "```python\n"
+            "def _sni_callback(sslsock, servername, sslctx):\n"
+            "    if servername == real_hostname:\n"
+            "        sslsock.context = real_ctx\n"
+            "    # else: stays on fallback_ctx\n"
+            "```\n"
+            "It then makes a real outbound TLS connect() back to itself, "
+            "presenting that same real hostname as SNI -- exactly what any "
+            "ordinary HTTPS client does:\n"
+            "```python\n"
+            "with socket.create_connection((\"127.0.0.1\", port)) as raw:\n"
+            "    with client_ctx.wrap_socket(raw, server_hostname=real_hostname):\n"
+            "        pass\n"
+            "```\n"
+            "full source: [tcp_connect_sni_probe_helper.py](/source/tcp_connect_sni_probe_helper.py)",
+
+            "The connect() call fires Tetragon's kprobe on tcp_connect "
+            "(tcp-connect-tls.yaml), tagged with the helper's PID, exactly "
+            "like the plain connect-probe use case above. A moment later, "
+            "still in the same process, CPython's ssl module calls "
+            "SSL_set_tlsext_host_name to attach the real hostname as SNI -- "
+            "this compiles down to SSL_ctrl(cmd==SSL_CTRL_SET_TLSEXT_HOSTNAME), "
+            "which Tetragon has a uprobe on via the openssl3-cert-load.yaml "
+            "TracingPolicy, filtered to that exact cmd value at the eBPF "
+            "layer. That uprobe fires too, tagged with the same PID.",
+
+            "CertSight's Tetragon gRPC client receives both events. The "
+            "SSL_ctrl one is handled by _handle_ssl_ctrl_sni_capture "
+            "(agent/analyzer.py), which records pid -> (hostname, "
+            "timestamp) in an in-memory cache -- it never publishes "
+            "anything to Kafka itself, since it carries a hostname, not "
+            "cert bytes. The tcp_connect one is handled the same way as "
+            "the plain connect-probe use case: if [port_probe] "
+            "connect_probe_enabled = true, CertSight immediately connects "
+            "to 127.0.0.1:<port> itself to pull the certificate.",
+
+            "That's the fork in the road this use case exists to show: by "
+            "default ([port_probe] sni_capture_enabled = false), "
+            "CertSight's probe sends the raw destination IP as SNI -- same "
+            "as before this fix -- which the helper's SNI callback doesn't "
+            "recognize, so it gets served the fallback cert. With "
+            "sni_capture_enabled = true, CertSight instead checks its "
+            "SSL_ctrl-populated cache for this PID; if a capture exists and "
+            "is younger than sni_capture_window_seconds (default 2s, "
+            "comfortably true here since both events fire microseconds "
+            "apart in the same process), it sends the real captured "
+            "hostname as SNI instead -- which the callback does recognize, "
+            "so it gets served the real cert.",
+
+            "CertSight parses whichever cert it received exactly like any "
+            "other connect-probe discovery (subject, issuer, SAN, key "
+            "algorithm/size, FIPS compliance, etc.) and builds the same "
+            "synthetic 'tls-connect-probe://127.0.0.1:<port>' path the "
+            "plain connect-probe use case does -- the CN inside the "
+            "resulting event is the only thing that tells the two "
+            "outcomes apart. Since [kafka] enabled = true, CertSight "
+            "publishes a 'certificate_discovered' event to the "
+            "cert-analyzer-events Kafka topic either way.",
+
+            "This test server's own background Kafka consumer thread "
+            "pushes that event to every connected browser over the "
+            "Server-Sent Events stream, where it lands in the right-hand "
+            "pane -- check its subject CN against the two CNs reported in "
+            "the status line above.",
         ],
     ),
     UseCase(
