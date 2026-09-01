@@ -15,6 +15,7 @@ from .analyzer import CertificateAnalyzer
 from .health import HealthServer
 from .kafka import KafkaPublisher
 from .metrics import start_metrics_server
+from .system_test import SystemTestRunner
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,14 @@ def main():
     staleness       = cfg_int(cp, 'health',    'readiness_staleness_seconds',    'READINESS_STALENESS_SECONDS',    '300')
     filter_self     = cfg(cp, 'certificates', 'filter_self_events',       'FILTER_SELF_EVENTS',              'true').lower() != 'false'
     host_prefix     = cfg(cp, 'certificates', 'host_prefix',              'HOST_PREFIX',                     '')
+    # Real filesystem path prefixes treated as synthetic (demo/system-test)
+    # traffic, in addition to the analyzer's own always-synthetic bind-probe/
+    # connect-probe/uprobe schemes -- see CertificateAnalyzer._is_synthetic_path.
+    # Defaults to extras/test-server's own default generated-cert directory
+    # (TEST_SERVER_CERT_DIR there) so a stock test-server deployment is
+    # recognized with no extra config on either side.
+    synthetic_path_prefixes_str = cfg(cp, 'certificates', 'synthetic_path_prefixes', 'SYNTHETIC_PATH_PREFIXES', '/dev/shm/certsight-test-server')
+    synthetic_path_prefixes = [p.strip() for p in synthetic_path_prefixes_str.split(',') if p.strip()]
     checksum_enabled        = cfg(cp, 'certificates', 'checksum_enabled',        'CERT_CHECKSUM_ENABLED',        'false').lower() == 'true'
     spki_hash_enabled       = cfg(cp, 'certificates', 'spki_hash_enabled',       'SPKI_HASH_ENABLED',            'true').lower() != 'false'
     demo_mode               = cfg(cp, 'certificates', 'demo_mode',               'DEMO_MODE',                    'false').lower() == 'true'
@@ -248,6 +257,17 @@ def main():
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
     kafka_sasl_password    = cfg(cp, 'kafka', 'sasl_password',     'KAFKA_SASL_PASSWORD',     '')
 
+    # Synthetic end-to-end canary against an external test-server's use cases
+    # (see agent/system_test.py). Enabled by default, but only actually starts
+    # when test_server_url is set -- most deployments (real customer clusters)
+    # have no test-server, and this must degrade silently there rather than
+    # log connection failures forever.
+    system_test_enabled          = cfg(cp, 'system_test', 'enabled',          'SYSTEM_TEST_ENABLED',          'true').lower() != 'false'
+    system_test_url              = cfg(cp, 'system_test', 'test_server_url',  'SYSTEM_TEST_SERVER_URL',       '')
+    system_test_interval_seconds = cfg_int(cp, 'system_test', 'interval_seconds', 'SYSTEM_TEST_INTERVAL_SECONDS', '300')
+    _system_test_use_cases_str   = cfg(cp, 'system_test', 'use_cases',        'SYSTEM_TEST_USE_CASES',        '')
+    system_test_use_cases = [u.strip() for u in _system_test_use_cases_str.split(',') if u.strip()] or None
+
     logger.info("="*60)
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
     logger.info("="*60)
@@ -274,6 +294,7 @@ def main():
     logger.info(f"Scan interval:     {scan_interval} seconds")
     logger.info(f"Filter self events: {filter_self}")
     logger.info(f"Host prefix:       '{host_prefix}' (empty = standalone mode)")
+    logger.info(f"Synthetic path prefixes: {synthetic_path_prefixes}")
     logger.info(f"Kafka enabled:     {kafka_enabled}")
     if kafka_enabled:
         logger.info(f"Kafka brokers:     {kafka_bootstrap}")
@@ -292,6 +313,12 @@ def main():
     if connect_probe_enabled:
         _effective_ports = tls_outbound_ports if tls_outbound_ports is not None else CertificateAnalyzer.TLS_OUTBOUND_PORTS
         logger.info(f"TLS outbound ports:        {sorted(_effective_ports)}")
+    if system_test_enabled and system_test_url:
+        logger.info(f"System test:       enabled — server: {system_test_url}, interval: {system_test_interval_seconds}s, use cases: {system_test_use_cases or 'all'}")
+    elif system_test_enabled:
+        logger.info("System test:       enabled but no [system_test] test_server_url configured — not started")
+    else:
+        logger.info("System test:       disabled")
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -342,7 +369,8 @@ def main():
                                    retry_queue_max_size=retry_queue_max_size,
                                    scan_paths=scan_paths,
                                    scan_interval_seconds=scan_interval,
-                                   metrics_port=metrics_port)
+                                   metrics_port=metrics_port,
+                                   synthetic_path_prefixes=synthetic_path_prefixes)
 
     health = HealthServer(
         analyzer=analyzer,
@@ -366,6 +394,15 @@ def main():
         scanner_thread = threading.Thread(target=periodic_scanner, daemon=True)
         scanner_thread.start()
         logger.info(f"Started periodic scanner (interval: {scan_interval}s)")
+
+    if system_test_enabled and system_test_url:
+        system_test_runner = SystemTestRunner(
+            base_url=system_test_url,
+            interval_seconds=system_test_interval_seconds,
+            use_case_allowlist=system_test_use_cases,
+        )
+        system_test_runner.start()
+        logger.info(f"Started system-test runner against {system_test_url} (interval: {system_test_interval_seconds}s)")
 
     try:
         analyzer.start()

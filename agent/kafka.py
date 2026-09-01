@@ -521,6 +521,7 @@ class KafkaPublisher:
             'is_ca':                         cert_info.is_ca,
             'basic_constraints_path_length': cert_info.basic_constraints_path_length,
             'is_self_signed':                cert_info.is_self_signed,
+            'synthetic':                     cert_info.synthetic,
         }
 
         # Use unique_key (path:cert_index:serial) as the partition key.
@@ -659,6 +660,12 @@ class KafkaPublisher:
         (no nested/dict fields), so it calls _wrap_connect_envelope directly.
         """
         envelope = self._wrap_connect_envelope(self._connect_schema, message)
+        # 'synthetic' is deliberately not in _CONNECT_SCHEMA_FIELDS -- adding a
+        # field there is schema drift the module docstring says Connect sinks
+        # don't tolerate on an existing topic (a new connect_topic name would
+        # be needed). It stays in the plain-JSON message (schema-tolerant per
+        # KAFKA_SCHEMA_VERSION) and is stripped here so payload matches schema.
+        envelope['payload'].pop('synthetic', None)
         envelope['payload']['pod_annotations'] = json.dumps(envelope['payload'].get('pod_annotations') or {})
         return envelope
 

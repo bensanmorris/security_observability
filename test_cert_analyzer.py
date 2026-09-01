@@ -6761,7 +6761,11 @@ class TestKafkaPublisher:
             for key, value in plain_msg.items():
                 if key == 'pod_annotations':
                     continue  # JSON-encoded in the envelope, checked separately below
+                if key == 'synthetic':
+                    continue  # deliberately absent from the Connect envelope, checked below
                 assert connect_payload[key] == value, f"Mismatch on {key}"
+
+            assert 'synthetic' not in connect_payload
 
     def test_publish_connect_schema_is_stable_across_calls(self, monkeypatch, sample_cert_info):
         """The Connect schema is built once and reused, not rebuilt per message."""

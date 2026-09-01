@@ -86,6 +86,11 @@ class CertificateInfo:
     # verifies against its own public key). Root CA certificates are legitimately
     # self-signed; self-signed leaf certificates are typically a configuration risk.
     is_self_signed: bool = False
+    # True when this cert's path/synthetic-URI matched a known test-server
+    # generation pattern (see CertificateAnalyzer._is_synthetic_path) --
+    # i.e. it came from a demo click or system_test.py, not real workload
+    # traffic. Lets downstream fleet/inventory dashboards filter it out.
+    synthetic: bool = False
     # Distinct (process, parent_process, pod_name, namespace, app_label,
     # container_name) tuples already given their own tls_certificate_process_info
     # series for this cert, capped at max_processes_per_cert (see

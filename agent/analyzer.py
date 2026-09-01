@@ -132,6 +132,15 @@ class CertificateAnalyzer:
         9443,  # HTTPS alternate
     })
 
+    # Synthetic (non-file) path schemes used exclusively by this analyzer's own
+    # bind-probe/connect-probe/in-memory-uprobe discovery paths (see
+    # _handle_tls_bind_event/_handle_tls_connect_event and the uprobe handlers
+    # below) -- a real workload's certificate can never be discovered under one
+    # of these prefixes, so they're always synthetic regardless of config.
+    # Keep in sync with the synthetic_path values built at each of those call
+    # sites (f'uprobe://{symbol}/...', f'tls-{mechanism}-probe://...').
+    _SYNTHETIC_URI_SCHEMES = ('uprobe://', 'tls-bind-probe://', 'tls-connect-probe://')
+
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
                  health_server: Optional['HealthServer'] = None,
@@ -156,7 +165,8 @@ class CertificateAnalyzer:
                  retry_queue_max_size: int = 2000,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600,
-                 metrics_port: int = 9090):
+                 metrics_port: int = 9090,
+                 synthetic_path_prefixes: Optional[list] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -223,6 +233,11 @@ class CertificateAnalyzer:
         self._retry_queue_lock = threading.Lock()
         self._scan_paths = list(scan_paths) if scan_paths else []
         self._scan_interval_seconds = scan_interval_seconds
+        # Real filesystem path prefixes (e.g. a test-server's generated-cert
+        # directory) that should also be treated as synthetic, in addition to
+        # the always-synthetic _SYNTHETIC_URI_SCHEMES above. Tuple so
+        # str.startswith() can check both in one call.
+        self._synthetic_path_prefixes = tuple(synthetic_path_prefixes) if synthetic_path_prefixes else ()
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
         self.metrics.config_info.labels(node_name=_NODE_NAME).info({
             'checksum_enabled':                  str(checksum_enabled).lower(),
@@ -245,6 +260,7 @@ class CertificateAnalyzer:
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
             'scan_paths':                          ','.join(self._scan_paths),
+            'synthetic_path_prefixes':              ','.join(self._synthetic_path_prefixes),
             'kafka_enabled':                       str(kafka_publisher is not None).lower(),
             'kafka_bootstrap_servers':              kafka_publisher.bootstrap_servers if kafka_publisher is not None else '',
             'kafka_plain_enabled':                  str(kafka_publisher.plain_enabled).lower() if kafka_publisher is not None else 'false',
@@ -670,6 +686,18 @@ class CertificateAnalyzer:
             self.metrics.cert_analysis_errors.labels(error_type='read_error', node_name=self.metrics._node_name).inc()
             return []
 
+    def _is_synthetic_path(self, cert_path: str) -> bool:
+        """
+        True if cert_path came from this analyzer's own synthetic discovery
+        mechanisms (bind/connect-probe, in-memory uprobe) or from a configured
+        test-server generated-cert directory -- i.e. it's demo/system-test
+        traffic, not a real workload certificate. See CertificateInfo.synthetic.
+        """
+        return (
+            cert_path.startswith(self._SYNTHETIC_URI_SCHEMES)
+            or cert_path.startswith(self._synthetic_path_prefixes)
+        )
+
     def extract_certificate_info(
         self,
         cert: x509.Certificate,
@@ -933,6 +961,7 @@ class CertificateAnalyzer:
             is_ca=is_ca,
             basic_constraints_path_length=basic_constraints_path_length,
             is_self_signed=is_self_signed,
+            synthetic=self._is_synthetic_path(cert_path),
         )
 
     def _count_pem_certs(self, cert_path: str) -> int:
