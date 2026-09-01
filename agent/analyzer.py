@@ -132,6 +132,21 @@ class CertificateAnalyzer:
         9443,  # HTTPS alternate
     })
 
+    # Bounds how long connect-probe's background thread will poll for a
+    # same-PID SSL_ctrl capture before giving up and falling back to the raw
+    # IP as SNI. The tcp_connect kprobe event (which schedules the probe) and
+    # the SSL_ctrl uprobe event (which populates _recent_client_sni) are
+    # emitted microseconds apart by the same process, but arrive over
+    # Tetragon's gRPC stream and are handled by process_event independently
+    # -- a single point-in-time cache check right after the probe thread
+    # starts can run before the SSL_ctrl event has even been processed,
+    # silently defeating the capture even though it's about to land. Polling
+    # briefly instead closes that window; this runs on the probe's own
+    # background thread, never the single-threaded process_event dispatch
+    # loop, so it can't delay any other event's processing.
+    _SNI_CAPTURE_POLL_INTERVAL_SECONDS = 0.02
+    _SNI_CAPTURE_POLL_MAX_SECONDS = 0.25
+
     def __init__(self, tetragon_address: str, alert_threshold_days: int = 30,
                  filter_self_events: bool = True,
                  health_server: Optional['HealthServer'] = None,
@@ -2116,6 +2131,31 @@ class CertificateAnalyzer:
             logger.debug(f"fib_trie lookup failed for PID {pid}: {e}")
         return ip or '127.0.0.1'
 
+    def _await_captured_sni(self, pid: int) -> Optional[str]:
+        """Poll self._recent_client_sni for a fresh capture for this PID,
+        for up to _SNI_CAPTURE_POLL_MAX_SECONDS, instead of a single
+        point-in-time check -- see the constant's own comment for why a
+        single check races the SSL_ctrl uprobe event. Runs entirely on the
+        caller's own background probe thread. Returns the hostname once a
+        capture younger than sni_capture_window_seconds is seen, or None if
+        the deadline passes first (never-arriving capture, non-OpenSSL
+        client, feature genuinely has nothing for this PID, etc.) -- a
+        stale/missing entry is treated the same as "not yet arrived" and
+        polling continues, since a longer-lived PID can have a stale entry
+        from an earlier connection sitting in the cache right up until this
+        connection's own fresh one overwrites it.
+        """
+        deadline = time.monotonic() + self._SNI_CAPTURE_POLL_MAX_SECONDS
+        while True:
+            captured = self._recent_client_sni.get(pid)
+            if captured is not None:
+                real_hostname, captured_at = captured
+                if time.time() - captured_at < self._sni_capture_window_seconds:
+                    return real_hostname
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self._SNI_CAPTURE_POLL_INTERVAL_SECONDS)
+
     def _probe_tls_endpoint(
         self,
         host: str,
@@ -2163,15 +2203,13 @@ class CertificateAnalyzer:
         # extras/PRESENTATION-QA.md's "Scale & Performance" section.
         server_hostname = host
         if mechanism == 'connect' and self._sni_capture_enabled:
-            captured = self._recent_client_sni.get(pid)
-            if captured is not None:
-                real_hostname, captured_at = captured
-                if time.time() - captured_at < self._sni_capture_window_seconds:
-                    server_hostname = real_hostname
-                    logger.debug(
-                        "TLS probe: using captured real SNI '%s' instead of %s for PID %s",
-                        real_hostname, host, pid,
-                    )
+            real_hostname = self._await_captured_sni(pid)
+            if real_hostname is not None:
+                server_hostname = real_hostname
+                logger.debug(
+                    "TLS probe: using captured real SNI '%s' instead of %s for PID %s",
+                    real_hostname, host, pid,
+                )
 
         raw_sock = None
         tls_version = None
@@ -2431,7 +2469,8 @@ class CertificateAnalyzer:
             if event.HasField('process_uprobe'):
                 symbol = event.process_uprobe.symbol
                 if symbol == "SSL_ctrl":
-                    self._handle_ssl_ctrl_sni_capture(event)
+                    if self._sni_capture_enabled:
+                        self._handle_ssl_ctrl_sni_capture(event)
                     return
                 if symbol == "NSC_CreateObject":
                     self._handle_nsc_create_object(event)
