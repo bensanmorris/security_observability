@@ -2099,6 +2099,16 @@ class CertificateAnalyzer:
         cipher_name = None
         try:
             raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
+            # KNOWN LIMITATION: server_hostname=host is the raw destination IP,
+            # not the real hostname the original process's TLS ClientHello sent
+            # -- Tetragon's kprobe only sees L3/L4 (connect()/bind()), fired
+            # before any TLS bytes including SNI exist, so there's no real
+            # hostname available here to send. Harmless against a single-tenant
+            # server, but against an SNI-multiplexed CDN edge (Fastly,
+            # Cloudflare, CloudFront, ...) an IP-string SNI matches no real
+            # customer vhost, so the edge falls back to its own generic
+            # default cert instead of the one the real process negotiated.
+            # See extras/PRESENTATION-QA.md's "Scale & Performance" section.
             with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
                 raw_sock = None  # SSL socket owns it now; closed by the with-block
                 der_bytes = ssock.getpeercert(binary_form=True)

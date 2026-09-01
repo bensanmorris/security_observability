@@ -81,6 +81,9 @@ It's O(1) dedup with no TTL — each unique `host:port` is probed at most once p
 **On a node with thousands of outbound TLS connections, what's the per-event overhead from the eBPF hooks?**
 The `perf_tests/` directory contains `cert_agent_hook_overhead.py` and a companion Java perf test (`CertAgentPerfTest`) that measure hook overhead. Refer to `perf_tests/README.md` for benchmark methodology and results.
 
+**Bind/connect probe against an SNI-multiplexed CDN edge (Fastly, Cloudflare, CloudFront, ...) — does it capture the real certificate?**
+This is a known limitation. The kprobe on `tcp_connect`/`security_socket_bind` only gives Tetragon the destination IP:port (L3/L4) — it fires before any TLS bytes, including the ClientHello's SNI extension, are sent, so cert-analyzer has no way to know what hostname the real process's handshake actually used. `agent/analyzer.py`'s `_probe_and_ingest_tls_cert` (`server_hostname=host`, ~line 2131) has no better option than passing the raw destination IP as SNI on its own verification handshake. Against a single-tenant server this is harmless — but a CDN edge that multiplexes many customer certs by SNI won't match an IP-string SNI to any real vhost, so it falls back to serving its own generic "no SNI match" default certificate instead of the real one the process negotiated. Confirmed live on the AWS demo box (2026-09-01): `dnf`'s outbound package-mirror traffic, fronted by Fastly, probed back as three different destination IPs all resolving to the identical `*.sni-<n>-default.ssl.fastly.net` fallback cert (same SPKI hash *and* same checksum) rather than the mirror's actual certificate. This is a data-fidelity gap in the probe mechanism itself, not a bug in the per-endpoint dedup (see the connect-probe dedup entry above) — dedup is correctly keeping each `host:port` distinct, it's just that some of those "certificates" are the CDN's fallback, not the real one.
+
 ---
 
 ## Security & Compliance
