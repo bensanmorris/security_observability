@@ -147,6 +147,8 @@ class CertificateAnalyzer:
                  port_probe_timeout: float = 5.0,
                  port_probe_connect_delay: float = 2.0,
                  tls_outbound_ports: Optional[frozenset] = None,
+                 sni_capture_enabled: bool = False,
+                 sni_capture_window_seconds: float = 2.0,
                  large_file_cert_threshold: int = 20,
                  large_file_metrics_cap: int = 300,
                  large_file_byte_cap: int = 2 * 1024 * 1024,
@@ -172,6 +174,8 @@ class CertificateAnalyzer:
         self._port_probe_timeout = port_probe_timeout
         self._port_probe_connect_delay = port_probe_connect_delay
         self._tls_outbound_ports = tls_outbound_ports if tls_outbound_ports is not None else self.TLS_OUTBOUND_PORTS
+        self._sni_capture_enabled = sni_capture_enabled
+        self._sni_capture_window_seconds = sni_capture_window_seconds
         self._large_file_cert_threshold = large_file_cert_threshold
         self._large_file_metrics_cap = large_file_metrics_cap
         self._large_file_byte_cap = large_file_byte_cap
@@ -236,6 +240,8 @@ class CertificateAnalyzer:
             'port_probe_timeout':                 str(port_probe_timeout),
             'port_probe_connect_delay':            str(port_probe_connect_delay),
             'tls_outbound_ports':                  ','.join(str(p) for p in sorted(self._tls_outbound_ports)),
+            'sni_capture_enabled':                 str(sni_capture_enabled).lower(),
+            'sni_capture_window_seconds':          str(sni_capture_window_seconds),
             'large_file_cert_threshold':           str(large_file_cert_threshold),
             'large_file_metrics_cap':              str(large_file_metrics_cap),
             'large_file_byte_cap':                 str(large_file_byte_cap),
@@ -286,6 +292,17 @@ class CertificateAnalyzer:
         self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
         self._probe_in_flight_lock = threading.Lock()
+        # pid -> (hostname, captured_at) from the SSL_ctrl(cmd==55) uprobe --
+        # the real SNI hostname a client process is about to send, captured
+        # just before its own TLS handshake. Consulted (not actively expired;
+        # staleness is checked against sni_capture_window_seconds at lookup
+        # time in _probe_and_ingest_tls_cert) by connect-probe so it can dial
+        # with the real hostname instead of the raw destination IP. See
+        # _handle_ssl_ctrl_sni_capture. No extra lock needed -- LRUCache
+        # already guards each individual get/set internally, and this is
+        # only ever read/written as single atomic ops, never a compound
+        # check-then-act sequence.
+        self._recent_client_sni: LRUCache = LRUCache()
         # Paths whose large multi-cert file (see _count_pem_certs) is currently
         # being parsed on a background thread — de-dupes repeat Tetragon events
         # for the same path that arrive before the worker populates known_certs.
@@ -1938,6 +1955,46 @@ class CertificateAnalyzer:
                         return True
         return False
 
+    def _handle_ssl_ctrl_sni_capture(self, event) -> bool:
+        """
+        Handle an SSL_ctrl(cmd==SSL_CTRL_SET_TLSEXT_HOSTNAME) uprobe event --
+        the real SNI hostname a client process is about to send, captured
+        just before its own TLS handshake (the openssl3-cert-load policy's
+        matchArgs already filtered to cmd==55 at the eBPF layer, so every
+        event reaching here carries a hostname, not some other SSL_ctrl use).
+
+        Records pid -> (hostname, now) in self._recent_client_sni for
+        connect-probe (_probe_and_ingest_tls_cert) to consult instead of the
+        raw destination IP. Never extracts or publishes a certificate -- this
+        event carries a hostname, not cert bytes. Returns True if a hostname
+        was captured, False otherwise (no string_arg, event malformed, etc.).
+        """
+        if not event.HasField('process_uprobe'):
+            return False
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+
+        if self.filter_self_events:
+            if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
+                return False
+            if pid == os.getpid():
+                return False
+
+        hostname = None
+        for arg in uprobe.args:
+            if arg.HasField('string_arg'):
+                hostname = arg.string_arg
+                break
+
+        if not hostname or not pid:
+            return False
+
+        self._recent_client_sni[pid] = (hostname, time.time())
+        logger.debug(f"Captured real SNI hostname '{hostname}' for PID {pid} ({process_name})")
+        return True
+
     def _handle_uprobe_in_memory_cert(self, event) -> bool:
         """
         Handle a process_uprobe event where the cert arrives as raw DER bytes
@@ -2094,12 +2151,34 @@ class CertificateAnalyzer:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
+        # KNOWN LIMITATION (mitigated for 'connect' below when sni_capture_enabled):
+        # server_hostname defaults to the raw destination IP, not the real
+        # hostname the original process's TLS ClientHello sent -- Tetragon's
+        # kprobe only sees L3/L4 (connect()/bind()), fired before any TLS
+        # bytes including SNI exist. Harmless against a single-tenant server,
+        # but against an SNI-multiplexed CDN edge (Fastly, Cloudflare,
+        # CloudFront, ...) an IP-string SNI matches no real customer vhost,
+        # so the edge falls back to its own generic default cert instead of
+        # the one the real process negotiated. See
+        # extras/PRESENTATION-QA.md's "Scale & Performance" section.
+        server_hostname = host
+        if mechanism == 'connect' and self._sni_capture_enabled:
+            captured = self._recent_client_sni.get(pid)
+            if captured is not None:
+                real_hostname, captured_at = captured
+                if time.time() - captured_at < self._sni_capture_window_seconds:
+                    server_hostname = real_hostname
+                    logger.debug(
+                        "TLS probe: using captured real SNI '%s' instead of %s for PID %s",
+                        real_hostname, host, pid,
+                    )
+
         raw_sock = None
         tls_version = None
         cipher_name = None
         try:
             raw_sock = socket.create_connection((host, port), timeout=self._port_probe_timeout)
-            with ctx.wrap_socket(raw_sock, server_hostname=host) as ssock:
+            with ctx.wrap_socket(raw_sock, server_hostname=server_hostname) as ssock:
                 raw_sock = None  # SSL socket owns it now; closed by the with-block
                 der_bytes = ssock.getpeercert(binary_form=True)
                 tls_version = ssock.version()
@@ -2351,6 +2430,9 @@ class CertificateAnalyzer:
             # Route PKCS11/NSS events (Java FIPS) to dedicated handlers first.
             if event.HasField('process_uprobe'):
                 symbol = event.process_uprobe.symbol
+                if symbol == "SSL_ctrl":
+                    self._handle_ssl_ctrl_sni_capture(event)
+                    return
                 if symbol == "NSC_CreateObject":
                     self._handle_nsc_create_object(event)
                     return

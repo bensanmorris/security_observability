@@ -221,6 +221,14 @@ def main():
     connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
     port_probe_timeout       = cfg_float(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5')
     port_probe_connect_delay = cfg_float(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2')
+    # Uses the real SNI hostname (captured via an SSL_ctrl uprobe -- see
+    # agent/analyzer.py's _handle_ssl_ctrl_sni_capture) instead of the raw
+    # destination IP when connect-probe re-dials, so CDN-fronted destinations
+    # return their real certificate instead of a generic fallback. No effect
+    # unless the openssl3-cert-load policy's SSL_ctrl uprobe is also applied
+    # (Helm: policies.opensslCertLoad.captureConnectSni) -- off by default.
+    sni_capture_enabled        = cfg(cp, 'port_probe', 'sni_capture_enabled', 'SNI_CAPTURE_ENABLED', 'false').lower() == 'true'
+    sni_capture_window_seconds = cfg_float(cp, 'port_probe', 'sni_capture_window_seconds', 'SNI_CAPTURE_WINDOW_SECONDS', '2')
     _tls_ports_raw = cfg(cp, 'port_probe', 'tls_outbound_ports', 'TLS_OUTBOUND_PORTS', '')
     if _tls_ports_raw.strip():
         try:
@@ -292,6 +300,7 @@ def main():
     if connect_probe_enabled:
         _effective_ports = tls_outbound_ports if tls_outbound_ports is not None else CertificateAnalyzer.TLS_OUTBOUND_PORTS
         logger.info(f"TLS outbound ports:        {sorted(_effective_ports)}")
+        logger.info(f"SNI capture:               {'enabled' if sni_capture_enabled else 'disabled'}" + (f" (window: {sni_capture_window_seconds}s)" if sni_capture_enabled else ""))
     logger.info("="*60)
 
     logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
@@ -333,6 +342,8 @@ def main():
                                    port_probe_timeout=port_probe_timeout,
                                    port_probe_connect_delay=port_probe_connect_delay,
                                    tls_outbound_ports=tls_outbound_ports,
+                                   sni_capture_enabled=sni_capture_enabled,
+                                   sni_capture_window_seconds=sni_capture_window_seconds,
                                    large_file_cert_threshold=large_file_cert_threshold,
                                    large_file_metrics_cap=large_file_metrics_cap,
                                    large_file_byte_cap=large_file_byte_cap,

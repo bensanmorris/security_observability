@@ -181,6 +181,16 @@ policies:
     enabled: true
   opensslCertLoad:
     enabled: true
+    # Adds an SSL_ctrl(cmd==SSL_CTRL_SET_TLSEXT_HOSTNAME) uprobe that captures the real SNI
+    # hostname a client is about to send, so connect-probe (agent/analyzer.py, [port_probe]
+    # sni_capture_enabled) can use it instead of the raw destination IP when re-dialing to
+    # verify a Tetragon-observed outbound connection -- fixes CDN-fronted destinations
+    # (Fastly, Cloudflare, CloudFront, ...) returning their generic fallback cert instead of
+    # the real one. Off by default (opt-in, like connect_probe_enabled itself); requires a
+    # kernel that supports string uprobe args (6.3+, RHEL9-class -- no effect otherwise since
+    # this project has no RHEL8 build of this specific uprobe). See
+    # extras/PRESENTATION-QA.md's "Scale & Performance" section.
+    captureConnectSni: false
 
 rbac:
   # Cluster-scoped ClusterRole/ClusterRoleBinding granting read access to pods/workload

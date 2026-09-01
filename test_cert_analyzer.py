@@ -9082,6 +9082,161 @@ class TestPortProbe:
 
         assert probe_analyzer.metrics.tls_port_probes_total.labels(status='failed', node_name=probe_analyzer.metrics._node_name)._value.get() == 1
 
+    # ── SSL_ctrl SNI capture (_handle_ssl_ctrl_sni_capture / _probe_tls_endpoint) ──
+
+    @staticmethod
+    def _make_ssl_ctrl_event(hostname, pid=1234, binary='/usr/bin/dnf'):
+        """A process_uprobe event for SSL_ctrl(cmd==55), carrying the real SNI
+        hostname as a string_arg -- matches what the openssl3-cert-load
+        policy's matchArgs filter (cmd==SSL_CTRL_SET_TLSEXT_HOSTNAME) lets
+        through in practice."""
+        from unittest.mock import MagicMock
+        string_arg = MagicMock()
+        string_arg.HasField.side_effect = lambda f: f == 'string_arg'
+        string_arg.string_arg = hostname
+
+        uprobe = MagicMock()
+        uprobe.symbol = 'SSL_ctrl'
+        uprobe.process.binary = binary
+        uprobe.process.pid.value = pid
+        uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        uprobe.args = [string_arg]
+
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        event.process_uprobe = uprobe
+        return event
+
+    @staticmethod
+    def _start_tls_server_capturing_sni(cert_path, key_path):
+        """Like _start_tls_server, but records the SNI hostname each accepted
+        connection actually sent. Returns (port, stop_event, sni_seen list)."""
+        import queue
+        import ssl as _ssl
+        import socket as _socket
+        port_q = queue.Queue()
+        stop = threading.Event()
+        sni_seen = []
+
+        def _sni_callback(sslsock, servername, sslctx):
+            sni_seen.append(servername)
+
+        def _serve():
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert_path, key_path)
+            ctx.sni_callback = _sni_callback
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as raw:
+                raw.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                raw.bind(('127.0.0.1', 0))
+                raw.listen(5)
+                port_q.put(raw.getsockname()[1])
+                raw.settimeout(0.5)
+                while not stop.is_set():
+                    try:
+                        conn, _ = raw.accept()
+                        try:
+                            with ctx.wrap_socket(conn, server_side=True) as tls:
+                                tls.recv(1)
+                        except _ssl.SSLError:
+                            pass
+                    except (_socket.timeout, OSError):
+                        pass
+
+        threading.Thread(target=_serve, daemon=True).start()
+        return port_q.get(timeout=3), stop, sni_seen
+
+    def test_ssl_ctrl_sni_capture_records_hostname(self, probe_analyzer):
+        """A matching SSL_ctrl event records (hostname, timestamp) for its PID."""
+        event = self._make_ssl_ctrl_event('real.example.com', pid=555)
+        result = probe_analyzer._handle_ssl_ctrl_sni_capture(event)
+        assert result is True
+        hostname, captured_at = probe_analyzer._recent_client_sni[555]
+        assert hostname == 'real.example.com'
+        assert abs(time.time() - captured_at) < 1.0
+
+    def test_ssl_ctrl_sni_capture_ignores_event_without_string_arg(self, probe_analyzer):
+        """No string_arg present (shouldn't happen given the policy's matchArgs, but
+        defensively) -- nothing is recorded."""
+        from unittest.mock import MagicMock
+        uprobe = MagicMock()
+        uprobe.symbol = 'SSL_ctrl'
+        uprobe.process.binary = '/usr/bin/dnf'
+        uprobe.process.pid.value = 555
+        uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        uprobe.args = []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        event.process_uprobe = uprobe
+
+        result = probe_analyzer._handle_ssl_ctrl_sni_capture(event)
+        assert result is False
+        assert 555 not in probe_analyzer._recent_client_sni
+
+    def test_probe_uses_captured_sni_for_connect_mechanism(self, probe_analyzer, temp_dir):
+        """connect-probe dials with the real captured hostname, not the raw IP,
+        when sni_capture_enabled and a fresh capture exists for that PID."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
+        probe_analyzer._sni_capture_enabled = True
+        probe_analyzer._sni_capture_window_seconds = 2.0
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time())
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='connect'
+            )
+        finally:
+            stop.set()
+
+        assert sni_seen == ['real.example.com']
+
+    def test_probe_falls_back_to_raw_host_when_capture_disabled(self, probe_analyzer, temp_dir):
+        """sni_capture_enabled=False (the default) -- behavior is unchanged from
+        today even with a fresh capture sitting in the cache."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time())
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='connect'
+            )
+        finally:
+            stop.set()
+
+        assert sni_seen != ['real.example.com']
+
+    def test_probe_falls_back_to_raw_host_when_capture_stale(self, probe_analyzer, temp_dir):
+        """A capture older than sni_capture_window_seconds is not trusted."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
+        probe_analyzer._sni_capture_enabled = True
+        probe_analyzer._sni_capture_window_seconds = 2.0
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time() - 10.0)
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='connect'
+            )
+        finally:
+            stop.set()
+
+        assert sni_seen != ['real.example.com']
+
+    def test_probe_never_uses_captured_sni_for_bind_mechanism(self, probe_analyzer, temp_dir):
+        """bind-probe (server side) never substitutes a captured client SNI,
+        even when one is present and fresh for that PID."""
+        cert_path, key_path, _ = self._gen_server_cert(temp_dir)
+        port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
+        probe_analyzer._sni_capture_enabled = True
+        probe_analyzer._sni_capture_window_seconds = 2.0
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time())
+        try:
+            probe_analyzer._probe_tls_endpoint(
+                '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='bind'
+            )
+        finally:
+            stop.set()
+
+        assert sni_seen != ['real.example.com']
+
     def test_probe_publishes_to_kafka_on_success(self, probe_analyzer, temp_dir):
         """Discovered cert is forwarded to the Kafka publisher when configured."""
         from unittest.mock import MagicMock
