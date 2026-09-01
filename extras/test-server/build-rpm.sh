@@ -67,6 +67,7 @@ trap 'rm -rf "$TMPDIR_SRC"' EXIT
 mkdir -p "$TMPDIR_SRC/$TARNAME"
 cp "$SCRIPT_DIR/server.py"                       "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/blast_radius.py"                 "$TMPDIR_SRC/$TARNAME/"
+cp "$SCRIPT_DIR/fleet_blast_radius.py"           "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/chain_explorer.py"               "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/use_cases.py"                    "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/tls_probe_helper.py"             "$TMPDIR_SRC/$TARNAME/"

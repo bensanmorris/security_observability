@@ -124,8 +124,9 @@ to point at. `--topic` defaults to `cert-analyzer-events` (cert-analyzer's
 own default); pass `--port` to change this server's own listen port
 (default `8090`). `--prometheus-url` defaults to `http://127.0.0.1:9090`
 (an IPv4 literal, not `localhost` -- see below) and only matters for the
-"Certificate blast radius explorer" / "Certificate chain explorer" links --
-adjust it if Prometheus lives elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
+"Certificate blast radius explorer" / "Fleet certificate blast radius" /
+"Certificate chain explorer" links -- adjust it if Prometheus lives
+elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
 
 If either link fails with `[Errno 97] Address family not supported by
 protocol`, the host has IPv6 disabled at the kernel level (common on
@@ -147,8 +148,15 @@ any browser that can reach it.
 
 ## Certificate blast radius explorer
 
-The "Certificate blast radius explorer" link in the header
-(`blast_radius.py`) is generated live, on click, against Prometheus --
+No longer linked from the console header -- superseded there by the fleet
+view below, which covers the same ground across every node. Still reachable
+directly at `/blast-radius` (`blast_radius.py`), and still the one to reach
+for if a node has both `checksum` and `spki_hash` disabled: the fleet view
+depends on at least one of those labels being populated to group anything,
+while this one keys purely on `cert_path`/`cert_index` and always works
+regardless of that config.
+
+It's generated live, on click, against Prometheus --
 querying cert-analyzer's own `tls_certificate_expiry_days` and
 `tls_certificate_process_info` metrics fresh each time rather than a
 pre-baked snapshot. It shows every certificate cert-analyzer has
@@ -166,6 +174,37 @@ This is a bundled copy of the standalone
 [`extras/cert_blast_radius.py`](../cert_blast_radius.py) script (same
 rendering logic, trimmed to a library) -- see that file if you want to
 generate a static HTML report without running this console at all.
+
+## Fleet certificate blast radius explorer
+
+The "Fleet certificate blast radius" link (`fleet_blast_radius.py`) answers
+the same question as the explorer above -- "what breaks if this is rotated
+or revoked?" -- but across every node Prometheus is scraping instead of
+one. It groups the same two metrics by certificate **identity** rather than
+`cert_path`: by `checksum` (SHA-256 of the DER-encoded cert -- exact
+byte-for-byte matches only) or by `spki_hash` (SHA-256 of the public key
+alone -- also matches across a renewal that reused the same key pair). A
+toggle switches between the two groupings, each labeled with how many
+certificates actually report a value for it; a lookup box jumps straight to
+a specific checksum/spki_hash if you already have one (from an alert, or
+pasted from elsewhere on this page).
+
+`checksum` is **disabled by default** (`CERT_CHECKSUM_ENABLED=false`)
+while `spki_hash` is **enabled by default** -- if your fleet has mixed or
+default config, the checksum grouping may show few or no certificates, and
+the page opens on whichever dimension actually has more coverage. Any
+certificate missing the selected dimension's label on a given node is
+excluded from that grouping (not lumped into one false "shared" bucket) --
+the page shows how many were excluded rather than silently understating the
+blast radius.
+
+Needs the same reachable Prometheus as the explorer above -- but one that
+is actually scraping multiple nodes (a Prometheus Operator ServiceMonitor
+in Kubernetes/OpenShift, or a bare-metal Prometheus configured with
+multiple scrape targets); pointed at a single-node Prometheus, it still
+works, just with nothing to show fleet-wide. Same `--prometheus-url` /
+`TEST_SERVER_PROMETHEUS_URL` config, same plain-text-error behavior if
+Prometheus is unreachable or has no data yet.
 
 ## Certificate chain explorer
 

@@ -120,6 +120,7 @@ install -d %{buildroot}%{app_home}/static
 
 install -m 0644 server.py             %{buildroot}%{app_home}/server.py
 install -m 0644 blast_radius.py       %{buildroot}%{app_home}/blast_radius.py
+install -m 0644 fleet_blast_radius.py %{buildroot}%{app_home}/fleet_blast_radius.py
 install -m 0644 chain_explorer.py     %{buildroot}%{app_home}/chain_explorer.py
 install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
 install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
@@ -200,6 +201,7 @@ exit 0
 %dir %{app_home}
 %{app_home}/server.py
 %{app_home}/blast_radius.py
+%{app_home}/fleet_blast_radius.py
 %{app_home}/chain_explorer.py
 %{app_home}/use_cases.py
 %{app_home}/tls_probe_helper.py
@@ -215,6 +217,15 @@ exit 0
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add a "Fleet certificate blast radius" link to the console header
+  (fleet_blast_radius.py), generated live on click against Prometheus --
+  groups tls_certificate_expiry_days/tls_certificate_process_info by
+  checksum or spki_hash (shared certificate/key identity) instead of
+  cert_path, so the same cert/key deployed across many nodes shows one
+  fleet-wide blast radius instead of fragmenting per node; lets you jump
+  directly to a specific checksum/spki_hash value; no new package
+  dependencies (stdlib only)
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Default --prometheus-url / TEST_SERVER_PROMETHEUS_URL to
   http://127.0.0.1:9090 instead of http://localhost:9090 -- on hosts with

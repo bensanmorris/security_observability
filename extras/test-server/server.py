@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from use_cases import USE_CASES, USE_CASES_BY_ID, UseCaseResult  # noqa: E402
 import blast_radius  # noqa: E402
 import chain_explorer  # noqa: E402
+import fleet_blast_radius  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test-server")
@@ -134,6 +135,8 @@ def make_handler(broadcaster: EventBroadcaster, prometheus_url: str):
                 self._serve_events()
             elif path == "/blast-radius":
                 self._serve_generated_page(blast_radius, "blast radius")
+            elif path == "/fleet-blast-radius":
+                self._serve_generated_page(fleet_blast_radius, "fleet blast radius")
             elif path == "/chain-explorer":
                 self._serve_generated_page(chain_explorer, "chain explorer")
             else:
@@ -325,8 +328,9 @@ def parse_args() -> argparse.Namespace:
         "--prometheus-url",
         default=os.environ.get("TEST_SERVER_PROMETHEUS_URL", "http://127.0.0.1:9090"),
         help=(
-            "Prometheus base URL for the 'Blast radius explorer' / 'Chain explorer' "
-            "links (default: http://127.0.0.1:9090, env: TEST_SERVER_PROMETHEUS_URL) "
+            "Prometheus base URL for the 'Blast radius explorer' / 'Fleet blast radius "
+            "explorer' / 'Chain explorer' links (default: http://127.0.0.1:9090, "
+            "env: TEST_SERVER_PROMETHEUS_URL) "
             "-- deliberately an IPv4 literal, not 'localhost': on hosts with IPv6 "
             "disabled at the kernel level, resolving 'localhost' to ::1 fails with "
             "'[Errno 97] Address family not supported by protocol' before any IPv4 "
