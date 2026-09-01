@@ -124,8 +124,9 @@ to point at. `--topic` defaults to `cert-analyzer-events` (cert-analyzer's
 own default); pass `--port` to change this server's own listen port
 (default `8090`). `--prometheus-url` defaults to `http://127.0.0.1:9090`
 (an IPv4 literal, not `localhost` -- see below) and only matters for the
-"Certificate blast radius explorer" / "Certificate chain explorer" links --
-adjust it if Prometheus lives elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
+"Certificate blast radius explorer" / "Fleet certificate blast radius" /
+"Certificate chain explorer" links -- adjust it if Prometheus lives
+elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
 
 If either link fails with `[Errno 97] Address family not supported by
 protocol`, the host has IPv6 disabled at the kernel level (common on
@@ -147,8 +148,15 @@ any browser that can reach it.
 
 ## Certificate blast radius explorer
 
-The "Certificate blast radius explorer" link in the header
-(`blast_radius.py`) is generated live, on click, against Prometheus --
+No longer linked from the console header -- superseded there by the fleet
+view below, which covers the same ground across every node. Still reachable
+directly at `/blast-radius` (`blast_radius.py`), and still the one to reach
+for if a node has both `checksum` and `spki_hash` disabled: the fleet view
+depends on at least one of those labels being populated to group anything,
+while this one keys purely on `cert_path`/`cert_index` and always works
+regardless of that config.
+
+It's generated live, on click, against Prometheus --
 querying cert-analyzer's own `tls_certificate_expiry_days` and
 `tls_certificate_process_info` metrics fresh each time rather than a
 pre-baked snapshot. It shows every certificate cert-analyzer has
@@ -167,10 +175,48 @@ This is a bundled copy of the standalone
 rendering logic, trimmed to a library) -- see that file if you want to
 generate a static HTML report without running this console at all.
 
+## Fleet certificate blast radius explorer
+
+The "Fleet certificate blast radius" link (`fleet_blast_radius.py`) answers
+the same question as the explorer above -- "what breaks if this is rotated
+or revoked?" -- but across every node Prometheus is scraping instead of
+one. It groups the same two metrics by certificate **identity** rather than
+`cert_path`: by `checksum` (SHA-256 of the DER-encoded cert -- exact
+byte-for-byte matches only) or by `spki_hash` (SHA-256 of the public key
+alone -- also matches across a renewal that reused the same key pair). A
+toggle switches between the two groupings, each labeled with how many
+certificates actually report a value for it; a lookup box jumps straight to
+a specific checksum/spki_hash if you already have one (from an alert, or
+pasted from elsewhere on this page).
+
+`checksum` is **disabled by default** (`CERT_CHECKSUM_ENABLED=false`)
+while `spki_hash` is **enabled by default** -- if your fleet has mixed or
+default config, the checksum grouping may show few or no certificates, and
+the page opens on whichever dimension actually has more coverage. Any
+certificate missing the selected dimension's label on a given node is
+excluded from that grouping (not lumped into one false "shared" bucket) --
+the page shows how many were excluded rather than silently understating the
+blast radius.
+
+Needs the same reachable Prometheus as the explorer above -- but one that
+is actually scraping multiple nodes (a Prometheus Operator ServiceMonitor
+in Kubernetes/OpenShift, or a bare-metal Prometheus configured with
+multiple scrape targets); pointed at a single-node Prometheus, it still
+works, just with nothing to show fleet-wide. Same `--prometheus-url` /
+`TEST_SERVER_PROMETHEUS_URL` config, same plain-text-error behavior if
+Prometheus is unreachable or has no data yet.
+
 ## Certificate chain explorer
 
-The "Certificate chain explorer" link (`chain_explorer.py`) is generated
-live the same way, grouping cert-analyzer's `tls_certificate_expiry_days`
+No longer linked from the console header -- superseded there by the fleet
+view below for browsing. Still reachable directly at `/chain-explorer`
+(`chain_explorer.py`), and still the one to reach for if you want to click
+through a cross-file "found elsewhere" resolution to the bundle that
+completes it: the fleet view renders that same resolution as plain text
+only, since it's aggregated by path and the resolving bundle may belong to
+a different path-group there with no stable cross-group link target today.
+
+It's generated live the same way, grouping cert-analyzer's `tls_certificate_expiry_days`
 and `tls_certificate_self_signed` metrics by `cert_path` and ordering each
 bundle by `cert_index` (0 = leaf) to show its chain length and
 leaf/intermediate/root structure.
@@ -188,6 +234,41 @@ since it was enabled.
 Also needs the reachable Prometheus described above (`--prometheus-url` /
 `TEST_SERVER_PROMETHEUS_URL`); same plain-text-error behavior if it's
 unreachable or has no data yet.
+
+## Fleet certificate chain explorer
+
+The "Fleet certificate chain explorer" link (`fleet_chain_explorer.py`)
+aggregates the same missing-intermediate detection across every node
+Prometheus is scraping, grouped by `cert_path` -- the value here isn't
+deduping (unlike the fleet blast radius explorer), it's surfacing **drift**:
+is the same bundle path consistently correct across the fleet, or missing
+its intermediate on some nodes but not others? Each path's detail view
+shows a per-node table (chain length, status) plus chain diagrams for any
+node in a MISSING or FOUND-ELSEWHERE state (capped at 8, prioritizing
+MISSING nodes, with a count of any further affected nodes not diagrammed).
+
+**Cross-file issuer resolution is scoped per node, never globally across
+the fleet -- do not "simplify" this back to one shared index.** The
+single-node tool's global `subject_index` is safe on one host but would be
+actively wrong fleet-wide: a genuinely missing intermediate on node A could
+get marked "found elsewhere" just because node B happens to have a copy of
+it in some unrelated file, even though node A's process can never load a
+file that only exists on node B's filesystem. `fleet_chain_explorer.py`
+builds a fresh `subject_index` per node from only that node's own bundles
+before reusing `chain_explorer._find_chain_gaps` unmodified. Because of this
+scoping, a cross-file resolution shown in the fleet view is always same-node
+and is rendered as plain text (not a clickable jump, unlike the single-node
+tool) -- the resolving bundle may belong to a different path-group in this
+by-path fleet view with no stable cross-group link target today.
+
+It also flags a signal invisible to the single-node tool: if most nodes at
+a path carry the full multi-cert bundle but a few carry only the standalone
+leaf, those nodes are called out as a "possible missing chain" rather than
+a plain OK -- the single-node rule that never flags a lone leaf as MISSING
+is correct for one host in isolation, but a fleet norm to compare against
+makes that specific pattern a real, actionable signal.
+
+Same reachable-Prometheus requirement and config as the tools above.
 
 ## Running under systemd (RPM install only)
 
