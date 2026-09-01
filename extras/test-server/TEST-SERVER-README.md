@@ -208,8 +208,15 @@ Prometheus is unreachable or has no data yet.
 
 ## Certificate chain explorer
 
-The "Certificate chain explorer" link (`chain_explorer.py`) is generated
-live the same way, grouping cert-analyzer's `tls_certificate_expiry_days`
+No longer linked from the console header -- superseded there by the fleet
+view below for browsing. Still reachable directly at `/chain-explorer`
+(`chain_explorer.py`), and still the one to reach for if you want to click
+through a cross-file "found elsewhere" resolution to the bundle that
+completes it: the fleet view renders that same resolution as plain text
+only, since it's aggregated by path and the resolving bundle may belong to
+a different path-group there with no stable cross-group link target today.
+
+It's generated live the same way, grouping cert-analyzer's `tls_certificate_expiry_days`
 and `tls_certificate_self_signed` metrics by `cert_path` and ordering each
 bundle by `cert_index` (0 = leaf) to show its chain length and
 leaf/intermediate/root structure.
