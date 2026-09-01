@@ -43,6 +43,13 @@ streamed live via Server-Sent Events as it arrives.
 - For the "dial out to a TLS port" use case specifically: cert-analyzer
   configured with `[port_probe] connect_probe_enabled = true`, and the
   `tcp-connect-tls.yaml` TracingPolicy loaded (under `tetragon-policies/`)
+- For the "dial out with a real SNI hostname" use case specifically: the
+  same `connect_probe_enabled` / `tcp-connect-tls.yaml` prerequisites as
+  above, plus the `openssl3-cert-load.yaml` TracingPolicy (see the next
+  bullet) -- and, to see the fix actually take effect rather than just its
+  default fallback behavior, `[port_probe] sni_capture_enabled = true`
+  (RHEL9-class kernels only; see `extras/PRESENTATION-QA.md`'s
+  "SNI-multiplexed CDN edge" entry)
 - For the "load a certificate straight into memory" use case specifically:
   the `openssl3-cert-load.yaml` (or `openssl3-cert-load-rhel8.yaml` on
   RHEL8) TracingPolicy loaded, and `/usr/lib64/libssl.so.3` present on
@@ -327,6 +334,7 @@ you've made to it.
 | generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
 | bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<random high port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
 | dial out to a TLS port and let CertSight discover it | Spawns `tcp_connect_probe_helper.py` as a separate process, which binds a real TLS listener on one of `tcp-connect-tls.yaml`'s TLS ports and then connects back to itself | Outbound connect detection via the `tcp-connect-tls.yaml` Tetragon policy (`tcp_connect` kprobe) plus cert-analyzer's `[port_probe]` TLS handshake probe |
+| dial out with a real SNI hostname behind a CDN-style edge | Spawns `tcp_connect_sni_probe_helper.py`, which binds a TLS listener that serves a different cert depending on the SNI it receives, then connects back to itself presenting a real hostname as SNI | The `SSL_ctrl` uprobe fix for connect-probe's CDN fallback-cert gap: compare the Kafka event's CN to see whether cert-analyzer's probe used the real hostname (`[port_probe] sni_capture_enabled = true`) or the raw destination IP (the default) |
 | load a certificate straight into memory (no file) | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
 | load a certificate into a Java KeyStore (JCA) | Spawns a JVM (`CertAgentTest`), jattaches CertSight's cert-agent Java instrumentation into it, then watches it call `KeyStore.setCertificateEntry()` on a fresh in-memory cert every few seconds | In-memory JCA cert detection via the `java-non-fips-cert.yaml` Tetragon policy (`java_cert_agent_write` uprobe); cert-analyzer builds a synthetic `uprobe://java_cert_agent_write/<pid>/<serial>` path since there's no real file |
 
@@ -538,6 +546,58 @@ just a bigger buffer than the 7-port list this used to be.
 At most 2 of these can run concurrently
 (`_MAX_CONCURRENT_CONNECT_PROBES` in `use_cases.py`), for the same
 unauthenticated-endpoint reason as the bind-probe use case's own cap.
+
+### dial out with a real SNI hostname behind a CDN-style edge
+
+Verifies the `SSL_ctrl` uprobe fix on branch `connect_probe_sni_capture`
+for connect-probe's CDN fallback-cert gap (see
+`extras/PRESENTATION-QA.md`'s "SNI-multiplexed CDN edge" entry): Tetragon's
+`tcp_connect` kprobe only sees the destination IP:port, before any TLS
+bytes -- including the ClientHello's SNI extension -- exist, so
+cert-analyzer's own verification handshake has no real hostname to send
+and falls back to the raw destination IP as SNI. Against a
+single-tenant server that's harmless; against an SNI-multiplexed edge
+(Fastly, Cloudflare, CloudFront, ...) an IP-string SNI matches no real
+customer vhost, so the edge serves its own generic default certificate
+instead of the real one.
+
+`tcp_connect_sni_probe_helper.py` reproduces that edge locally instead of
+needing a real one: it binds a TLS listener with an SNI callback that
+serves one of *two* different certs depending on the SNI it actually
+receives -- a "real" cert for the exact hostname this helper's own client
+role presents, a "fallback" cert (standing in for the edge's generic
+vhost) for anything else, including a bare IP or no SNI at all. It then
+makes a real outbound TLS `connect()` back to itself, presenting the real
+hostname as SNI via `server_hostname=` -- exactly what any ordinary HTTPS
+client does. That `connect()` fires the same `tcp_connect` kprobe as the
+plain connect-probe use case above; a moment later, still the same
+process, CPython's `ssl` module calls `SSL_set_tlsext_host_name` to attach
+the SNI, which compiles down to `SSL_ctrl(cmd==SSL_CTRL_SET_TLSEXT_HOSTNAME)`
+-- a symbol `openssl3-cert-load.yaml` also hooks, filtered to that exact
+`cmd` value at the eBPF layer.
+
+CertSight's `_handle_ssl_ctrl_sni_capture` (`agent/analyzer.py`) records
+`pid -> (hostname, timestamp)` from that second event in a short-lived
+in-memory cache -- it never publishes to Kafka itself, since it carries a
+hostname, not cert bytes. When `[port_probe] connect_probe_enabled = true`
+handles the `tcp_connect` event and re-dials the endpoint, it decides what
+SNI to send: with `[port_probe] sni_capture_enabled` left at its default
+`false`, it sends the raw destination IP, same as before this fix, which
+the helper's callback doesn't recognize -- fallback cert. With it set to
+`true` (and the `openssl3-cert-load.yaml` TracingPolicy loaded -- RHEL9-class
+kernels only, string uprobe args need kernel 6.3+), it checks the
+SSL_ctrl-populated cache for that PID and, if the capture is younger than
+`sni_capture_window_seconds` (default 2s -- comfortably true here, since
+both events fire microseconds apart in the same process), sends the real
+captured hostname instead -- which the callback does recognize, so it
+gets served the real cert.
+
+Both outcomes publish to the identical synthetic path
+(`tls-connect-probe://127.0.0.1:<port>`), sharing the plain connect-probe
+use case's dedup cache entry for that exact port -- the only thing that
+tells the two outcomes apart is the CN inside the resulting Kafka event,
+which `use_cases.py`'s result message reports back alongside the port so
+you know what to look for either way.
 
 ### load a certificate straight into memory (no file)
 

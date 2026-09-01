@@ -71,7 +71,10 @@ STATIC_FILES = {
 # read arbitrary files this process can access. Served from disk (not a
 # GitHub link) so it keeps working on an RPM install with zero internet
 # access, which is a supported deployment mode for this tool.
-SOURCE_FILES = {"tls_probe_helper.py", "tcp_connect_probe_helper.py", "use_cases.py", "CertAgentTest.java"}
+SOURCE_FILES = {
+    "tls_probe_helper.py", "tcp_connect_probe_helper.py", "tcp_connect_sni_probe_helper.py",
+    "use_cases.py", "CertAgentTest.java",
+}
 
 
 class EventBroadcaster:
