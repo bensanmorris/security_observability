@@ -245,6 +245,14 @@ def _cap_leaves_for_svg(leaves, cap):
     return picked, len(leaves) - len(picked)
 
 
+def _short_hash(value):
+    """Truncates a checksum/spki_hash for table display; an em dash when the
+    flag was disabled on that node and the value is empty."""
+    if not value:
+        return "—"
+    return value[:12] + "…" if len(value) > 12 else value
+
+
 def _render_group_card(dimension, value, group, idx, node_count):
     status = blast_radius._status_bucket(group["days_left"])
     short_value = value[:12] + "…" if len(value) > 12 else value
@@ -285,27 +293,35 @@ def _render_group_detail(dimension, value, group, ns_color, idx, node_count):
         if member0["serial"]:
             subtitle_bits.append(f'serial {member0["serial"][:16]}')
         rows = "".join(
-            f'<tr><td>{blast_radius._esc(m["cert_path"])}</td><td>{blast_radius._esc(m["node_name"])}</td></tr>'
+            f'<tr><td>{blast_radius._esc(m["cert_path"])}</td><td>{blast_radius._esc(m["node_name"])}</td>'
+            f'<td>{blast_radius._esc(_short_hash(m["checksum"]))}</td>'
+            f'<td>{blast_radius._esc(_short_hash(m["spki_hash"]))}</td></tr>'
             for m in members
         )
         table = (
-            '<table class="member-table"><thead><tr><th>Path</th><th>Node</th></tr></thead>'
+            '<table class="member-table"><thead><tr><th>Path</th><th>Node</th>'
+            '<th>Checksum</th><th>SPKI hash</th></tr></thead>'
             f'<tbody>{rows}</tbody></table>'
         )
     else:
         # spki_hash only hashes the public key -- members can legitimately
         # be different logical certs/renewals, so there's no single shared
-        # identity to headline; list them all instead.
-        title = f'Shared key ({blast_radius._esc(value[:16])}&hellip;)'
+        # identity to headline; list them all instead. Use the actual
+        # ellipsis character (not the &hellip; entity) here -- the whole
+        # title string is HTML-escaped once more below, which would
+        # otherwise turn a literal "&hellip;" into visible "&amp;hellip;".
+        title = f'Shared key ({value[:16]}…)'
         rows = "".join(
             f'<tr><td>{blast_radius._esc(m["cert_path"])}</td><td>{blast_radius._esc(m["node_name"])}</td>'
             f'<td>{blast_radius._esc(m["common_name"])}</td><td>{blast_radius._esc(m["serial"][:16])}</td>'
-            f'<td>{blast_radius._esc(blast_radius._days_label(m["days_left"]))}</td></tr>'
+            f'<td>{blast_radius._esc(blast_radius._days_label(m["days_left"]))}</td>'
+            f'<td>{blast_radius._esc(_short_hash(m["checksum"]))}</td>'
+            f'<td>{blast_radius._esc(_short_hash(m["spki_hash"]))}</td></tr>'
             for m in members
         )
         table = (
             '<table class="member-table"><thead><tr><th>Path</th><th>Node</th><th>Common name</th>'
-            '<th>Serial</th><th>Expiry</th></tr></thead>'
+            '<th>Serial</th><th>Expiry</th><th>Checksum</th><th>SPKI hash</th></tr></thead>'
             f'<tbody>{rows}</tbody></table>'
         )
 
