@@ -228,6 +228,41 @@ Also needs the reachable Prometheus described above (`--prometheus-url` /
 `TEST_SERVER_PROMETHEUS_URL`); same plain-text-error behavior if it's
 unreachable or has no data yet.
 
+## Fleet certificate chain explorer
+
+The "Fleet certificate chain explorer" link (`fleet_chain_explorer.py`)
+aggregates the same missing-intermediate detection across every node
+Prometheus is scraping, grouped by `cert_path` -- the value here isn't
+deduping (unlike the fleet blast radius explorer), it's surfacing **drift**:
+is the same bundle path consistently correct across the fleet, or missing
+its intermediate on some nodes but not others? Each path's detail view
+shows a per-node table (chain length, status) plus chain diagrams for any
+node in a MISSING or FOUND-ELSEWHERE state (capped at 8, prioritizing
+MISSING nodes, with a count of any further affected nodes not diagrammed).
+
+**Cross-file issuer resolution is scoped per node, never globally across
+the fleet -- do not "simplify" this back to one shared index.** The
+single-node tool's global `subject_index` is safe on one host but would be
+actively wrong fleet-wide: a genuinely missing intermediate on node A could
+get marked "found elsewhere" just because node B happens to have a copy of
+it in some unrelated file, even though node A's process can never load a
+file that only exists on node B's filesystem. `fleet_chain_explorer.py`
+builds a fresh `subject_index` per node from only that node's own bundles
+before reusing `chain_explorer._find_chain_gaps` unmodified. Because of this
+scoping, a cross-file resolution shown in the fleet view is always same-node
+and is rendered as plain text (not a clickable jump, unlike the single-node
+tool) -- the resolving bundle may belong to a different path-group in this
+by-path fleet view with no stable cross-group link target today.
+
+It also flags a signal invisible to the single-node tool: if most nodes at
+a path carry the full multi-cert bundle but a few carry only the standalone
+leaf, those nodes are called out as a "possible missing chain" rather than
+a plain OK -- the single-node rule that never flags a lone leaf as MISSING
+is correct for one host in isolation, but a fleet norm to compare against
+makes that specific pattern a real, actionable signal.
+
+Same reachable-Prometheus requirement and config as the tools above.
+
 ## Running under systemd (RPM install only)
 
 The RPM installs `certsight-test-server.service`, enabled on install so it

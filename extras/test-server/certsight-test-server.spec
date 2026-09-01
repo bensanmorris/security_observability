@@ -122,6 +122,7 @@ install -m 0644 server.py             %{buildroot}%{app_home}/server.py
 install -m 0644 blast_radius.py       %{buildroot}%{app_home}/blast_radius.py
 install -m 0644 fleet_blast_radius.py %{buildroot}%{app_home}/fleet_blast_radius.py
 install -m 0644 chain_explorer.py     %{buildroot}%{app_home}/chain_explorer.py
+install -m 0644 fleet_chain_explorer.py %{buildroot}%{app_home}/fleet_chain_explorer.py
 install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
 install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
 install -m 0644 tcp_connect_probe_helper.py %{buildroot}%{app_home}/tcp_connect_probe_helper.py
@@ -203,6 +204,7 @@ exit 0
 %{app_home}/blast_radius.py
 %{app_home}/fleet_blast_radius.py
 %{app_home}/chain_explorer.py
+%{app_home}/fleet_chain_explorer.py
 %{app_home}/use_cases.py
 %{app_home}/tls_probe_helper.py
 %{app_home}/tcp_connect_probe_helper.py
@@ -217,6 +219,18 @@ exit 0
 
 
 %changelog
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add a "Fleet certificate chain explorer" link to the console header
+  (fleet_chain_explorer.py), generated live on click against Prometheus --
+  aggregates chain_explorer's per-bundle missing-intermediate detection
+  across every scraped node, grouped by cert_path, to surface fleet-wide
+  drift (a bundle missing its intermediate on some nodes but not others).
+  Cross-file issuer resolution is scoped per node (never global across the
+  fleet) to avoid a genuinely missing intermediate on one host being
+  falsely marked resolved by an unrelated file that only exists on a
+  different host; also flags nodes carrying only a standalone leaf where
+  most of the fleet carries the full bundle at the same path. No new
+  package dependencies (stdlib only)
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add a "Fleet certificate blast radius" link to the console header
   (fleet_blast_radius.py), generated live on click against Prometheus --
