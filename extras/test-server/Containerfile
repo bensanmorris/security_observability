@@ -22,7 +22,8 @@ RUN pip install --no-cache-dir \
     -r requirements.txt
 
 COPY server.py use_cases.py blast_radius.py chain_explorer.py \
-     tls_probe_helper.py tcp_connect_probe_helper.py CertAgentTest.java ./
+     tls_probe_helper.py tcp_connect_probe_helper.py tcp_connect_sni_probe_helper.py \
+     CertAgentTest.java ./
 COPY static ./static
 
 # Unlike probe_tests/openshift-soak/'s image, this one needs no hostPath
