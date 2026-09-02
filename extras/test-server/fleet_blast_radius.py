@@ -58,6 +58,11 @@ EXTRA_CSS = """
 }
 .mode-btn.active { color: var(--primary); border-color: var(--primary); font-weight: 600; }
 .mode-btn:hover { border-color: var(--muted); }
+.checksum-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--warning); color: var(--warning);
+  font-size: 0.7rem; font-weight: 600; vertical-align: middle;
+}
 #lookup { display: flex; gap: 8px; align-items: center; margin: 0 0 1.5rem; }
 #lookup input {
   flex: 1; max-width: 420px; padding: 6px 10px; border: 1px solid var(--border);
@@ -222,6 +227,7 @@ def _group_by(all_certs, dimension):
             group["leaves"].append(leaf)
     for group in groups.values():
         del group["_leaf_keys"]
+        group["distinct_checksums"] = len({m["checksum"] for m in group["members"] if m["checksum"]})
     return groups, excluded
 
 
@@ -260,11 +266,15 @@ def _render_group_card(dimension, value, group, idx, node_count):
         name = group["members"][0]["common_name"]
     else:
         name = f'{len(group["members"])} certificate(s) sharing a key'
+    badge = (
+        f'<span class="checksum-badge">{group["distinct_checksums"]} checksums</span>'
+        if dimension == "spki_hash" and group["distinct_checksums"] > 1 else ""
+    )
     return (
         f'<div class="cert-card" data-mode="{dimension}" data-idx="{idx}" data-value="{blast_radius._esc(value)}" '
         f'onclick="showDetail(\'{dimension}\', {idx})">'
         f'<span class="cert-dot" style="background: var(--{status})"></span>'
-        f'<div><div class="cert-name">{blast_radius._esc(name)}</div>'
+        f'<div><div class="cert-name">{blast_radius._esc(name)}{badge}</div>'
         f'<div class="cert-meta">{blast_radius._esc(blast_radius._days_label(group["days_left"]))} '
         f'&middot; {len(group["members"])} cert(s) &middot; {node_count} node(s) &middot; {blast_radius._esc(short_value)}</div>'
         f'</div></div>'
