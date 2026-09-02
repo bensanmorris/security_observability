@@ -348,7 +348,21 @@ def _render_group_detail(dimension, value, group, ns_color, idx, node_count):
 
 def _render_dimension_section(dimension, groups, excluded, ns_color, display):
     if groups:
-        ordered = sorted(groups.items(), key=lambda kv: (kv[1]["days_left"], -len(kv[1]["leaves"])))
+        # SPKI mode: key-reuse groups (the checksum-badge condition) sort
+        # first, ahead of expiry urgency -- otherwise they're scattered
+        # across the grid by days-left like any other group, and the badge
+        # is easy to miss unless you scan every card. Checksum mode is
+        # unaffected (distinct_checksums is always 1 there, so this key is
+        # always 1 and falls through to the existing order).
+        if dimension == "spki_hash":
+            sort_key = lambda kv: (
+                0 if kv[1]["distinct_checksums"] > 1 else 1,
+                kv[1]["days_left"],
+                -len(kv[1]["leaves"]),
+            )
+        else:
+            sort_key = lambda kv: (kv[1]["days_left"], -len(kv[1]["leaves"]))
+        ordered = sorted(groups.items(), key=sort_key)
         cards = []
         details = []
         for idx, (value, group) in enumerate(ordered):
