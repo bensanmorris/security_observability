@@ -126,6 +126,7 @@ install -m 0644 fleet_chain_explorer.py %{buildroot}%{app_home}/fleet_chain_expl
 install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
 install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
 install -m 0644 tcp_connect_probe_helper.py %{buildroot}%{app_home}/tcp_connect_probe_helper.py
+install -m 0644 tcp_connect_sni_probe_helper.py %{buildroot}%{app_home}/tcp_connect_sni_probe_helper.py
 install -m 0644 CertAgentTest.java    %{buildroot}%{app_home}/CertAgentTest.java
 install -m 0644 %{_builddir}/CertAgentTest.class %{buildroot}%{app_home}/CertAgentTest.class
 install -m 0644 static/index.html     %{buildroot}%{app_home}/static/index.html
@@ -208,6 +209,7 @@ exit 0
 %{app_home}/use_cases.py
 %{app_home}/tls_probe_helper.py
 %{app_home}/tcp_connect_probe_helper.py
+%{app_home}/tcp_connect_sni_probe_helper.py
 %{app_home}/CertAgentTest.java
 %{app_home}/CertAgentTest.class
 %{app_home}/static/
