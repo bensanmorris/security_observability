@@ -7,12 +7,14 @@
 # blanket exemption: each entry has a specific, checked reason, and an expiry
 # date that forces a re-review rather than letting an ignore go stale forever.
 #
-# cryptography==41.0.7 and protobuf==4.25.3 are both several versions behind
-# their patched releases (cryptography needs 42.0-46.x depending on the CVE;
-# protobuf needs 4.25.8+ or 5.29.6+). Upgrading is the real fix and is tracked
-# as separate follow-up work, since protobuf 5.x has known generated-code
-# breaking changes and both are security-sensitive parsing libraries that
-# deserve a dedicated, tested upgrade rather than a drive-by version bump here.
+# cryptography==41.0.7, protobuf==4.25.3, and kafka-python==2.0.3 are all
+# several versions behind their patched releases (cryptography needs
+# 42.0-46.x depending on the CVE; protobuf needs 4.25.8+ or 5.29.6+;
+# kafka-python needs 2.3.2+). Upgrading is the real fix and is tracked as
+# separate follow-up work, since protobuf 5.x has known generated-code
+# breaking changes and all three are security-sensitive parsing/protocol
+# libraries that deserve a dedicated, tested upgrade rather than a
+# drive-by version bump here.
 security:
     ignore-unpinned-requirements: True  # psutil and kubernetes are deliberately unpinned
     ignore-cvss-severity-below: 0
@@ -102,5 +104,25 @@ security:
             expires: '2026-10-04'
         77740: # CVE-2025-4565 -- DoS via unbounded recursion parsing protobuf messages
             reason: "Same reasoning as CVE-2026-0994 (85151) above -- same recursion-DoS class, same trust boundary."
+            expires: '2026-10-04'
+        # -- kafka-python 2.0.3 -------------------------------------------------
+        SFTY-20260611-84190: # CVE-2026-10143 -- DoS via SCRAM authentication handling
+            reason: >-
+                agent/kafka.py's KafkaProducer wrapper supports sasl_mechanism but
+                defaults to security_protocol='PLAINTEXT' with no SASL configured,
+                so this isn't reachable in the default/demo deployments seen so
+                far. Where a deployment does configure SASL/SCRAM, the broker is
+                still within the same trust boundary as the rest of the pipeline
+                (same class of argument as the protobuf/Tetragon entries above) --
+                exploiting this requires that broker to already be malicious or
+                compromised. Real fix is the kafka-python upgrade, tracked
+                separately.
+            expires: '2026-10-04'
+        SFTY-20260611-52551: # CVE-2026-10142 -- DoS via the Kafka wire protocol parser
+            reason: >-
+                Requires a malicious/compromised broker (or a MITM on the Kafka
+                connection) to send a crafted response -- same trust-boundary
+                reasoning as the SCRAM entry above and the protobuf/Tetragon
+                entries. Real fix is the kafka-python upgrade, tracked separately.
             expires: '2026-10-04'
     continue-on-vulnerability-error: False
