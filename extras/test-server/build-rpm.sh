@@ -65,15 +65,11 @@ TMPDIR_SRC="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_SRC"' EXIT
 
 mkdir -p "$TMPDIR_SRC/$TARNAME"
-cp "$SCRIPT_DIR/server.py"                       "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/blast_radius.py"                 "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/fleet_blast_radius.py"           "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/chain_explorer.py"               "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/fleet_chain_explorer.py"         "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/use_cases.py"                    "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/tls_probe_helper.py"             "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/tcp_connect_probe_helper.py"     "$TMPDIR_SRC/$TARNAME/"
-cp "$SCRIPT_DIR/tcp_connect_sni_probe_helper.py" "$TMPDIR_SRC/$TARNAME/"
+# Every .py file in this directory ships -- glob instead of naming each one,
+# so a new use case/helper module is packaged automatically instead of
+# silently missing until someone notices (see the certsight-test-server.spec
+# and Containerfile comments next to their matching globs).
+cp "$SCRIPT_DIR"/*.py                            "$TMPDIR_SRC/$TARNAME/"
 cp "$SCRIPT_DIR/CertAgentTest.java"              "$TMPDIR_SRC/$TARNAME/"
 cp -r "$SCRIPT_DIR/static"                       "$TMPDIR_SRC/$TARNAME/static"
 cp "$SCRIPT_DIR/certsight-test-server.service"   "$TMPDIR_SRC/$TARNAME/"

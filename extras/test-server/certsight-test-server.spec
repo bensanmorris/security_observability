@@ -118,15 +118,14 @@ install -d %{buildroot}%{app_home}
 install -d %{buildroot}%{app_venv}
 install -d %{buildroot}%{app_home}/static
 
-install -m 0644 server.py             %{buildroot}%{app_home}/server.py
-install -m 0644 blast_radius.py       %{buildroot}%{app_home}/blast_radius.py
-install -m 0644 fleet_blast_radius.py %{buildroot}%{app_home}/fleet_blast_radius.py
-install -m 0644 chain_explorer.py     %{buildroot}%{app_home}/chain_explorer.py
-install -m 0644 fleet_chain_explorer.py %{buildroot}%{app_home}/fleet_chain_explorer.py
-install -m 0644 use_cases.py          %{buildroot}%{app_home}/use_cases.py
-install -m 0644 tls_probe_helper.py   %{buildroot}%{app_home}/tls_probe_helper.py
-install -m 0644 tcp_connect_probe_helper.py %{buildroot}%{app_home}/tcp_connect_probe_helper.py
-install -m 0644 tcp_connect_sni_probe_helper.py %{buildroot}%{app_home}/tcp_connect_sni_probe_helper.py
+# Every .py file in the source tarball ships -- glob instead of naming each
+# one, so a new use case/helper module lands in the package automatically.
+# %files below uses the matching %{app_home}/*.py wildcard; build-rpm.sh's
+# tarball assembly globs the same way, so all three stay in sync by
+# construction instead of by remembering to edit three files at once.
+for f in *.py; do
+    install -m 0644 "$f" %{buildroot}%{app_home}/"$f"
+done
 install -m 0644 CertAgentTest.java    %{buildroot}%{app_home}/CertAgentTest.java
 install -m 0644 %{_builddir}/CertAgentTest.class %{buildroot}%{app_home}/CertAgentTest.class
 install -m 0644 static/index.html     %{buildroot}%{app_home}/static/index.html
@@ -201,15 +200,7 @@ exit 0
 %files
 %license %{_defaultlicensedir}/%{name}/LICENSE
 %dir %{app_home}
-%{app_home}/server.py
-%{app_home}/blast_radius.py
-%{app_home}/fleet_blast_radius.py
-%{app_home}/chain_explorer.py
-%{app_home}/fleet_chain_explorer.py
-%{app_home}/use_cases.py
-%{app_home}/tls_probe_helper.py
-%{app_home}/tcp_connect_probe_helper.py
-%{app_home}/tcp_connect_sni_probe_helper.py
+%{app_home}/*.py
 %{app_home}/CertAgentTest.java
 %{app_home}/CertAgentTest.class
 %{app_home}/static/

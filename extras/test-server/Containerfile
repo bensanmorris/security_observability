@@ -21,9 +21,11 @@ RUN pip install --no-cache-dir \
     --trusted-host ${PIP_TRUSTED_HOST} \
     -r requirements.txt
 
-COPY server.py use_cases.py blast_radius.py chain_explorer.py \
-     tls_probe_helper.py tcp_connect_probe_helper.py tcp_connect_sni_probe_helper.py \
-     CertAgentTest.java ./
+# Every .py file here ships -- glob instead of naming each one, so a new use
+# case/helper module lands in the image automatically instead of silently
+# missing until someone notices (matches certsight-test-server.spec's and
+# build-rpm.sh's globs, so all three package definitions stay in sync).
+COPY *.py CertAgentTest.java ./
 COPY static ./static
 
 # Unlike probe_tests/openshift-soak/'s image, this one needs no hostPath
