@@ -502,9 +502,11 @@ def _generate_key_reused_certs(params: dict) -> UseCaseResult:
             f"generated two certificates (CN={cn_a}, CN={cn_b}) from the same 2048-bit RSA "
             f"key and cat'd each from its own path -- same SPKI hash, different subjects and "
             f"checksums, simulating the same private key backing two unrelated-looking "
-            f"services. Open the [fleet blast radius explorer](/fleet-blast-radius), switch "
-            f"to SPKI mode, and look for a shared-key group carrying a '2 checksums' badge -- "
-            f"its detail table should list both certs above under different common names"
+            f"services. Open the [fleet blast radius explorer](/fleet-blast-radius) and click "
+            f"the 'SPKI hash' button near the top -- it opens on 'Checksum' by default, which "
+            f"won't show this. In SPKI mode, badged groups (key reuse) now sort first, so the "
+            f"one from this run should be at or near the top of the grid; its detail table "
+            f"lists both certs above under different common names"
         ),
         token=token,
     )
@@ -1752,9 +1754,10 @@ USE_CASES: List[UseCase] = [
             "different subjects, simulating the same private key backing "
             "two unrelated-looking services -- unlike a same-CN renewal "
             "(expected, low-risk key preservation across rotation), this is "
-            "the SPKI-reuse shape that's actually worth flagging. Check the "
-            "fleet blast radius explorer's SPKI mode for the resulting "
-            "shared-key group and its distinct-checksums badge."
+            "the SPKI-reuse shape that's actually worth flagging. Afterwards, "
+            "open the fleet blast radius explorer and click the 'SPKI hash' "
+            "button near the top (it opens on 'Checksum' by default) to see "
+            "the resulting shared-key group and its distinct-checksums badge."
         ),
         run=_generate_key_reused_certs,
         pipeline=[
@@ -1785,11 +1788,14 @@ USE_CASES: List[UseCase] = [
             "same way as every other use case here.",
 
             "Open the [fleet blast radius explorer](/fleet-blast-radius) "
-            "afterwards and switch to SPKI mode: both certs group under "
-            "the one spki_hash value, and since they carry two distinct "
-            "checksums the overview card shows a '2 checksums' badge -- "
-            "the at-a-glance signal that this key backs more than one "
-            "logically distinct certificate.",
+            "afterwards and click 'SPKI hash' near the top -- it opens on "
+            "'Checksum' by default, which groups by whole-cert identity and "
+            "won't show this. In SPKI mode both certs group under the one "
+            "spki_hash value, and since they carry two distinct checksums "
+            "the overview card shows a '2 checksums' badge -- the at-a-"
+            "glance signal that this key backs more than one logically "
+            "distinct certificate. Badged groups sort first in SPKI mode, "
+            "so this one should be near the top of the grid.",
         ],
     ),
 ]

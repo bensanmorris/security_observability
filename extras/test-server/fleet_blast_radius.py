@@ -441,6 +441,7 @@ def _render_page(all_certs, coverage):
   <button class="mode-btn" id="mode-btn-spki_hash" onclick="setMode('spki_hash')">{blast_radius._esc(spki_label)}</button>
   <button class="mode-btn" id="mode-btn-checksum" onclick="setMode('checksum')">{blast_radius._esc(checksum_label)}</button>
 </div>
+<p class="note">&#128161; Looking for key reuse (one private key backing multiple certificates)? Click <strong>SPKI hash</strong> above -- this page opens on <strong>Checksum</strong> by default, which groups by whole-cert identity and never shows it. In SPKI mode, a group whose members carry more than one distinct checksum gets a badge and sorts to the front.</p>
 <div id="lookup">
   <input type="text" id="lookup-input" placeholder="Paste a checksum or spki_hash to jump to it">
   <button onclick="lookup()">Find</button>
