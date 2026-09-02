@@ -452,6 +452,64 @@ def _generate_chain_across_multiple_files(params: dict) -> UseCaseResult:
     )
 
 
+def _generate_key_reused_certs(params: dict) -> UseCaseResult:
+    token = _resolve_token(params)
+    cn_a = f"certsight-test-keyreuse-svc-a-{token}.local"
+    cn_b = f"certsight-test-keyreuse-svc-b-{token}.local"
+
+    # One key, two otherwise-unrelated certs -- the interesting case for
+    # SPKI-based grouping isn't a same-CN renewal (expected, low-risk: an op
+    # keeping a key across rotation), it's the same private key backing two
+    # certs that look unrelated at a glance. That's what the fleet blast
+    # radius explorer's SPKI mode + distinct-checksums badge is for.
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.now(timezone.utc)
+
+    def _build(cn: str):
+        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+        return (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+            .sign(private_key, hashes.SHA256())
+        )
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+
+    written_paths = []
+    for name, cn in (("svc-a", cn_a), ("svc-b", cn_b)):
+        cert = _build(cn)
+        path = _GENERATED_CERT_DIR / f"keyreuse-{name}-{token}.crt"
+        path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        path.chmod(0o644)
+        try:
+            proc = subprocess.run(["cat", str(path)], capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            return UseCaseResult(ok=False, detail=f"cat {path} timed out")
+        if proc.returncode != 0:
+            return UseCaseResult(ok=False, detail=f"cat {path} exited {proc.returncode}: {proc.stderr.strip()}")
+        written_paths.append(path)
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"generated two certificates (CN={cn_a}, CN={cn_b}) from the same 2048-bit RSA "
+            f"key and cat'd each from its own path -- same SPKI hash, different subjects and "
+            f"checksums, simulating the same private key backing two unrelated-looking "
+            f"services. Open the [fleet blast radius explorer](/fleet-blast-radius), switch "
+            f"to SPKI mode, and look for a shared-key group carrying a '2 checksums' badge -- "
+            f"its detail table should list both certs above under different common names"
+        ),
+        token=token,
+    )
+
+
 # tls_probe_helper.py runs as its own OS process (not a thread here) so that
 # Tetragon's security_socket_bind hook attributes the bind() call to a PID
 # that's independently visible and verifiable, rather than this test
@@ -1684,6 +1742,54 @@ USE_CASES: List[UseCase] = [
             "even with intermediates dropped here, this use case only ever "
             "demonstrates the FOUND ELSEWHERE state, not MISSING -- use the "
             "single-bundle use case above for that.",
+        ],
+    ),
+    UseCase(
+        id="spki-key-reuse",
+        label="reuse one key across two unrelated certs",
+        description=(
+            "Generates two certificates from the same RSA key but with "
+            "different subjects, simulating the same private key backing "
+            "two unrelated-looking services -- unlike a same-CN renewal "
+            "(expected, low-risk key preservation across rotation), this is "
+            "the SPKI-reuse shape that's actually worth flagging. Check the "
+            "fleet blast radius explorer's SPKI mode for the resulting "
+            "shared-key group and its distinct-checksums badge."
+        ),
+        run=_generate_key_reused_certs,
+        pipeline=[
+            "This server generates one 2048-bit RSA key, then builds two "
+            "independent self-signed X.509 certificates from it -- same "
+            "public key both times, different subject/SAN and serial "
+            "number -- and writes each to its own brand-new path under "
+            f"{_GENERATED_CERT_DIR}/.",
+
+            "This server runs 'cat <path>' against each file individually "
+            "-- two real open()/read() calls, same as the multi-file chain "
+            "use case above.",
+
+            "Tetragon's kprobe on fd_install fires once per file via the "
+            "certificate-file-access.yaml TracingPolicy, and CertSight "
+            "discovers each as its own independent cert_path.",
+
+            "CertSight parses both certs and computes each one's SPKI hash "
+            "(SHA-256 of the DER-encoded public key) and checksum (SHA-256 "
+            "of the whole DER cert). The public key bytes are identical "
+            "between the two, so their spki_hash values match even though "
+            "every other field -- subject, serial, checksum -- differs.",
+
+            "CertSight records each cert as its own first-time discovery "
+            "(unique path + serial) and -- since [kafka] enabled = true -- "
+            "publishes a 'certificate_discovered' event per file to the "
+            "cert-analyzer-events Kafka topic, pushed to the browser the "
+            "same way as every other use case here.",
+
+            "Open the [fleet blast radius explorer](/fleet-blast-radius) "
+            "afterwards and switch to SPKI mode: both certs group under "
+            "the one spki_hash value, and since they carry two distinct "
+            "checksums the overview card shows a '2 checksums' badge -- "
+            "the at-a-glance signal that this key backs more than one "
+            "logically distinct certificate.",
         ],
     ),
 ]
