@@ -242,7 +242,7 @@ def _render_node_card(node_name, node, idx):
         f'<div class="cert-card" onclick="showDetail({idx})">'
         f'<span class="cert-dot" style="background: var(--{status})"></span>'
         f'<div><div class="cert-name">{blast_radius._esc(node_name)}</div>'
-        f'<div class="cert-meta">{blast_radius._esc(" &middot; ".join(bits))}</div>'
+        f'<div class="cert-meta">{" &middot; ".join(bits)}</div>'
         f'</div></div>'
     )
 
