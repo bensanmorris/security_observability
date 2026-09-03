@@ -348,7 +348,21 @@ def _render_group_detail(dimension, value, group, ns_color, idx, node_count):
 
 def _render_dimension_section(dimension, groups, excluded, ns_color, display):
     if groups:
-        ordered = sorted(groups.items(), key=lambda kv: (kv[1]["days_left"], -len(kv[1]["leaves"])))
+        # SPKI mode: key-reuse groups (the checksum-badge condition) sort
+        # first, ahead of expiry urgency -- otherwise they're scattered
+        # across the grid by days-left like any other group, and the badge
+        # is easy to miss unless you scan every card. Checksum mode is
+        # unaffected (distinct_checksums is always 1 there, so this key is
+        # always 1 and falls through to the existing order).
+        if dimension == "spki_hash":
+            sort_key = lambda kv: (
+                0 if kv[1]["distinct_checksums"] > 1 else 1,
+                kv[1]["days_left"],
+                -len(kv[1]["leaves"]),
+            )
+        else:
+            sort_key = lambda kv: (kv[1]["days_left"], -len(kv[1]["leaves"]))
+        ordered = sorted(groups.items(), key=sort_key)
         cards = []
         details = []
         for idx, (value, group) in enumerate(ordered):
@@ -427,6 +441,7 @@ def _render_page(all_certs, coverage):
   <button class="mode-btn" id="mode-btn-spki_hash" onclick="setMode('spki_hash')">{blast_radius._esc(spki_label)}</button>
   <button class="mode-btn" id="mode-btn-checksum" onclick="setMode('checksum')">{blast_radius._esc(checksum_label)}</button>
 </div>
+<p class="note">&#128161; Looking for key reuse (one private key backing multiple certificates)? Click <strong>SPKI hash</strong> above -- this page opens on <strong>Checksum</strong> by default, which groups by whole-cert identity and never shows it. In SPKI mode, a group whose members carry more than one distinct checksum gets a badge and sorts to the front.</p>
 <div id="lookup">
   <input type="text" id="lookup-input" placeholder="Paste a checksum or spki_hash to jump to it">
   <button onclick="lookup()">Find</button>
