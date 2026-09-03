@@ -4,6 +4,36 @@ Questions and answers covering architecture, bare metal deployment, Kubernetes d
 
 ---
 
+## CSO / Executive Q&A
+
+Risk, compliance, and operational questions a security leader would ask before approving a rollout — separate from the engineering Q&A below, which assumes a technical audience already sold on the approach.
+
+**If CertSight crashes or is killed, does anything in production break?**
+No. It's a passive observer, not an inline component — the eBPF programs only read process memory and kernel arguments (`bpf_probe_read`), they never redirect, proxy, or block a packet or syscall. There's no iptables/nftables rule, no MITM proxy, no code path that can deny or delay a TLS handshake. Killing `cert-analyzer` (or Tetragon itself) stops visibility, not traffic. This is an architectural property, not a resilience feature bolted on afterward.
+
+**What's the actual attack surface this adds to a host?**
+The largest addition is Tetragon itself: privileged eBPF loading, running as root, with a Unix socket (`/run/tetragon/tetragon.sock`) that cert-analyzer talks to over gRPC. cert-analyzer's own service account is non-root (`cert-analyzer.spec:194-204`), reaches that socket only via group membership (`chgrp cert-analyzer` on the socket, not a SUID binary or a broadened root grant), and the Java deployer's elevated capabilities are scoped narrowly: `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`, `CAP_KILL`, `CAP_SETUID`/`CAP_SETGID` — enough to attach to other users' JVMs via `jattach`, nothing broader. No new inbound network listener is opened by cert-analyzer itself.
+
+**Does this ever see or transmit a private key?**
+No, by design, not just by policy — none of the hook points (`fd_install` for file-backed certs, OpenSSL/NSS uprobes for in-memory certs, the JCA agent for Java) touch key material; they fire on certificate load/store paths only. This is stated as a top-line product claim in `README.md:10` (README claims are not independently audited here — worth confirming against your own review before repeating externally, but the mechanism itself supports the claim: uprobes are attached to certificate-object and DER-buffer symbols, not key-handling functions).
+
+**What does CertSight NOT catch — what's the honest residual risk?**
+Documented gaps, not hidden ones: statically-linked crypto (common in Go binaries) never calls `libssl.so`, so uprobes don't fire; the cipher suite negotiated in a handshake isn't inspected, only the certificate itself (a FIPS-compliant cert served over a non-FIPS cipher suite won't be flagged); OCSP revocation status isn't checked (latency/reliability tradeoff, on the roadmap); outbound connect-probe SNI capture only works for OpenSSL clients on RHEL9-class kernels; ephemeral containers that exit before cert-analyzer processes their event have no replay if cert-analyzer itself was down. None of these are silent failures a customer would discover the hard way — they're called out in this same doc and the roadmap.
+
+**How do you manage CertSight's own supply-chain/CVE exposure?**
+`.safety-policy.yml` runs in CI on every build via `safety check`. Every ignored CVE has a dated, reasoned entry — not a blanket suppression — explaining why it's unreachable in this deployment's trust boundary or tracking the real fix as separate follow-up work with an expiry that forces re-review. Example: two kafka-python CVEs (SCRAM auth DoS, wire-protocol-parser DoS) disclosed 2026-09-02 were deferred because the default deployment runs Kafka over `PLAINTEXT` with no SASL, and even where SASL is configured, exploitation requires the Kafka broker itself to already be compromised or malicious — the same trust boundary already accepted elsewhere in the pipeline. Nothing is ignored indefinitely; each entry has an `expires:` date.
+
+**Where does certificate data go once captured — any cloud dependency?**
+No cloud call in the base architecture: events flow eBPF → Tetragon (local) → cert-analyzer (local) → Prometheus metrics (local scrape) and optionally Kafka (self-hosted, operator-controlled broker) for downstream consumption. There's no phone-home telemetry to a vendor-run service in this codebase — deployment is entirely on infrastructure you control (bare metal, K8s, OpenShift), which matters for data residency and vendor lock-in/exit risk.
+
+**Is this a compliance checkbox or does it generate audit-usable evidence?**
+It generates continuous, runtime evidence — which certs are actually loaded by which processes, right now, not what a scan found last Tuesday or what a CA's issuance log claims should be deployed. The FIPS check (key type, minimum key size, approved curves, signature hash) runs on every observed cert load, so gaps between "policy says FIPS-only" and "what's actually running" surface as they happen rather than at the next audit cycle. It complements a CA/PKI system of record (cert-manager, Vault) rather than replacing it — those tools know what they issued, this tool sees what's actually used, including certs those systems never touched (bundled in JARs, imported from external PKIs, supposed-to-be-rotated-but-wasn't).
+
+**What's the rollback story if this needs to come out?**
+Uninstalling `cert-analyzer` and reverting the Tetragon systemd drop-in restores the pre-install state — Tetragon itself can keep running independently (it has no dependency back on cert-analyzer) or be removed too. Because nothing is inline, there's no "flip traffic back to the old path" step; removal is a service/package operation, not a network cutover.
+
+---
+
 ## Architecture & Detection
 
 **How does CertSight avoid needing a network scanner or CA impersonation?**
