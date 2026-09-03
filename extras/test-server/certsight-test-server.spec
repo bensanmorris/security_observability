@@ -213,6 +213,21 @@ exit 0
 
 %changelog
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add a "Fleet FIPS rollout" link to the console header
+  (fleet_fips_rollout.py), generated live on click against Prometheus --
+  groups every certificate by node_name (the closest available
+  migration-cohort axis) and shows, per node, how many certificates are
+  FIPS-compliant, non-compliant, or unchecked, reusing
+  tls_certificate_fips_compliant as-is. Cross-references
+  tls_certificate_negotiated_protocol against a NIST SP 800-52 Rev. 2
+  allowlist of approved TLS 1.2/1.3 protocol+cipher combinations and flags
+  drift independently of each certificate's own compliance judgement -- a
+  certificate can be individually FIPS-compliant while its live session
+  still negotiates a non-approved cipher (e.g. a silent provider fallback),
+  and a node with any such drift is shown as critical even when every
+  certificate on it passes on its own. No new package dependencies or agent
+  changes (stdlib only, existing metrics only)
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add a "Fleet certificate chain explorer" link to the console header
   (fleet_chain_explorer.py), generated live on click against Prometheus --
   aggregates chain_explorer's per-bundle missing-intermediate detection

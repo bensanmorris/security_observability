@@ -51,6 +51,7 @@ import blast_radius  # noqa: E402
 import chain_explorer  # noqa: E402
 import fleet_blast_radius  # noqa: E402
 import fleet_chain_explorer  # noqa: E402
+import fleet_fips_rollout  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("test-server")
@@ -145,6 +146,8 @@ def make_handler(broadcaster: EventBroadcaster, prometheus_url: str):
                 self._serve_generated_page(chain_explorer, "chain explorer")
             elif path == "/fleet-chain-explorer":
                 self._serve_generated_page(fleet_chain_explorer, "fleet chain explorer")
+            elif path == "/fleet-fips-rollout":
+                self._serve_generated_page(fleet_fips_rollout, "fleet FIPS rollout")
             else:
                 self.send_error(404)
 

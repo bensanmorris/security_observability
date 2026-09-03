@@ -132,8 +132,8 @@ own default); pass `--port` to change this server's own listen port
 (default `8090`). `--prometheus-url` defaults to `http://127.0.0.1:9090`
 (an IPv4 literal, not `localhost` -- see below) and only matters for the
 "Certificate blast radius explorer" / "Fleet certificate blast radius" /
-"Certificate chain explorer" links -- adjust it if Prometheus lives
-elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
+"Certificate chain explorer" / "Fleet FIPS rollout" links -- adjust it if
+Prometheus lives elsewhere (env: `TEST_SERVER_PROMETHEUS_URL`).
 
 If either link fails with `[Errno 97] Address family not supported by
 protocol`, the host has IPv6 disabled at the kernel level (common on
@@ -267,6 +267,36 @@ scoping, a cross-file resolution shown in the fleet view is always same-node
 and is rendered as plain text (not a clickable jump, unlike the single-node
 tool) -- the resolving bundle may belong to a different path-group in this
 by-path fleet view with no stable cross-group link target today.
+
+## Fleet FIPS rollout
+
+The "Fleet FIPS rollout" link (`fleet_fips_rollout.py`) groups every
+certificate cert-analyzer has discovered fleet-wide by `node_name` -- the
+closest thing to a migration-cohort axis the existing labels give us -- and
+shows, per node, how many certificates are FIPS-compliant, non-compliant, or
+unchecked (`fips_compliance_enabled=false` on that node), reusing
+`tls_certificate_fips_compliant` as-is.
+
+It adds one cross-check neither existing metric answers alone: a
+certificate can be FIPS-compliant on its own (approved key type/size/curve/
+hash) while the *live TLS session* still negotiates a non-approved cipher --
+e.g. a provider silently falling back to a non-FIPS cipher when no approved
+one is available, rather than failing the handshake outright. Node detail
+view cross-references `tls_certificate_negotiated_protocol` (only populated
+for nodes with `bind_probe_enabled`/`connect_probe_enabled` -- see the main
+README's `[port_probe]` section) against a NIST SP 800-52 Rev. 2 allowlist
+of approved TLS 1.2/1.3 protocol+cipher combinations, and flags any drift as
+"non-FIPS" independently of the certificate's own compliance status. A node
+with a drifted negotiation is shown as critical even when every certificate
+on it individually passes -- that combination is exactly the "silent
+fallback" case a point-in-time certificate check can't see.
+
+Needs the same reachable Prometheus as the other fleet views above --
+`--prometheus-url` / `TEST_SERVER_PROMETHEUS_URL`; same plain-text-error
+behavior if it's unreachable or has no data yet. Nodes with the port probes
+disabled still show correctly, just with no negotiated-session data (a note
+in the node detail explains why, rather than showing an empty table with no
+context).
 
 It also flags a signal invisible to the single-node tool: if most nodes at
 a path carry the full multi-cert bundle but a few carry only the standalone
