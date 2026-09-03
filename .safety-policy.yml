@@ -93,6 +93,27 @@ security:
                 dereference is a native crash that no Python try/except can catch.
                 Prioritize the cryptography upgrade.
             expires: '2026-10-04'
+        SFTY-20260803-29229: # CVE-2026-69249 -- DoS via exponential path-building on duplicate self-signed intermediates in build_chain_inner
+            reason: >-
+                Not applicable: the vulnerable path is cryptography's
+                PolicyBuilder/build_chain multi-candidate path-validation API
+                (cryptography.x509.verification), never called by this codebase.
+                The only path-validation-adjacent call is the single-cert
+                self-signed check at analyzer.py:857
+                (cert.verify_directly_issued_by(cert), one candidate checked
+                against itself, not a multi-certificate chain build), which
+                can't exhibit the reported exponential blowup across duplicate
+                self-signed intermediates.
+            expires: '2026-10-04'
+        SFTY-20260803-89041: # CVE-2026-69248 -- improper certificate validation via wildcard DNS SAN bypass in DNSConstraint.matches
+            reason: >-
+                Not applicable: same PolicyBuilder-based path-validation API as
+                SFTY-20260803-29229 above, specifically its
+                DNSConstraint/NameConstraints enforcement -- this app never
+                calls that verifier, and TLS probes run with
+                check_hostname=False (inventory only, not authentication; same
+                reasoning as SFTY-20260327-04621 above).
+            expires: '2026-10-04'
         # -- protobuf 4.25.3 --------------------------------------------------
         85151: # CVE-2026-0994 -- DoS via missing recursion-depth accounting when parsing protobuf messages
             reason: >-
