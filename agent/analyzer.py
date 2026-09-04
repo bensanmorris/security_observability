@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -60,6 +59,7 @@ from .kafka import KafkaPublisher
 from .java_fips import _JavaFipsMixin
 from .tls_probe import _TlsProbeMixin
 from .tetragon_monitor import _TetragonMonitorMixin
+from .event_context import _EventContextMixin, _PodContextSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -93,32 +93,6 @@ class _TokenBucket:
             return False
 
 
-class _PodContextSnapshot(NamedTuple):
-    """
-    A flat, string/scalar-only snapshot of the pod/container fields
-    `CertificateAnalyzer._apply_pod_context` pulls off a live Tetragon pod
-    proto. Retry-queue entries store one of these instead of the raw proto
-    (see _RetryEntry) so queued entries don't hold a live gRPC message for
-    the lifetime of the queue.
-    """
-    pod_name: str
-    namespace: str
-    workload_kind: str
-    workload_name: str
-    pod_labels: dict
-    pod_uid: str
-    pod_annotations: dict
-    app_label: str
-    container_id: str
-    container_name: str
-    container_image: str
-    container_image_id: str
-    container_maybe_exec_probe: bool
-    container_privileged: Optional[bool]
-    container_pid: Optional[int]
-    container_start_time: Optional[datetime]
-
-
 class _RetryEntry(NamedTuple):
     """
     Captures everything needed to fully replay a rate-limited new-certificate
@@ -143,7 +117,7 @@ class _RetryEntry(NamedTuple):
     node_name: str
 
 
-class CertificateAnalyzer(_JavaFipsMixin, _TlsProbeMixin, _TetragonMonitorMixin):
+class CertificateAnalyzer(_JavaFipsMixin, _TlsProbeMixin, _TetragonMonitorMixin, _EventContextMixin):
     """
     Main analyzer that processes Tetragon events and extracts certificate info.
 
@@ -151,7 +125,7 @@ class CertificateAnalyzer(_JavaFipsMixin, _TlsProbeMixin, _TetragonMonitorMixin)
     it contributes and what shared instance state it expects from __init__
     below): _JavaFipsMixin (agent/java_fips.py), _TlsProbeMixin
     (agent/tls_probe.py), _TetragonMonitorMixin (agent/tetragon_monitor.py),
-    for now, more to follow.
+    _EventContextMixin (agent/event_context.py), for now, more to follow.
     """
 
     CERT_EXTENSIONS  = {'.crt', '.pem', '.cert', '.cer', '.key'}
@@ -1539,370 +1513,6 @@ class CertificateAnalyzer(_JavaFipsMixin, _TlsProbeMixin, _TetragonMonitorMixin)
             with self._new_path_lock:
                 self._large_file_in_flight.discard(cert_path)
             self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached', node_name=self.metrics._node_name).inc()
-
-    @staticmethod
-    def _snapshot_pod_context(tetragon_pod) -> Optional[_PodContextSnapshot]:
-        """
-        Extract the flat, string/scalar fields `_apply_pod_context` needs out
-        of a live Tetragon pod proto, without mutating a CertificateInfo.
-
-        Used by _enqueue_rate_limited_retry to capture pod context at enqueue
-        time so the retry queue doesn't have to hold the live proto -- see
-        _PodContextSnapshot.
-        """
-        if tetragon_pod is None:
-            return None
-
-        pod_labels = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
-        pod_annotations = dict(tetragon_pod.pod_annotations) if tetragon_pod.pod_annotations else {}
-
-        app_label = ""
-        for key in ["app.kubernetes.io/name", "app", "name"]:
-            if key in pod_labels:
-                app_label = pod_labels[key]
-                break
-
-        c = tetragon_pod.container
-        container_privileged = c.security_context.privileged if c.HasField('security_context') else None
-        container_pid = c.pid.value if c.HasField('pid') else None
-        container_start_time = c.start_time.ToDatetime() if c.HasField('start_time') else None
-
-        return _PodContextSnapshot(
-            pod_name=tetragon_pod.name,
-            namespace=tetragon_pod.namespace,
-            workload_kind=tetragon_pod.workload_kind,
-            workload_name=tetragon_pod.workload,
-            pod_labels=pod_labels,
-            # pod.uid available from Tetragon v1.6.0; empty string on older servers
-            pod_uid=tetragon_pod.uid,
-            # pod.pod_annotations available from Tetragon v1.5.0; empty map on older servers
-            pod_annotations=pod_annotations,
-            app_label=app_label,
-            container_id=c.id,
-            container_name=c.name,
-            container_image=c.image.name,
-            container_image_id=c.image.id,
-            container_maybe_exec_probe=c.maybe_exec_probe,
-            # container.security_context/pid/start_time available from Tetragon
-            # v1.5.0; None on older servers
-            container_privileged=container_privileged,
-            container_pid=container_pid,
-            container_start_time=container_start_time,
-        )
-
-    @staticmethod
-    def _is_self_event(process_name: str, pid: int) -> bool:
-        """
-        True if an event looks like it was generated by cert-analyzer itself
-        rather than the workload being observed -- used to avoid a feedback
-        loop when FILTER_SELF_EVENTS is enabled (the default).
-
-        pid == os.getpid() is the reliable guard, checked first. The
-        name-based checks are only a secondary heuristic: Tetragon may report
-        the process binary as '/' on some systems, so name matching alone is
-        insufficient and can't be relied on by itself -- but it still catches
-        cases (e.g. a re-exec'd or forked descendant) the PID check alone
-        would miss.
-        """
-        if pid == os.getpid():
-            return True
-        return (
-            process_name == "/app"
-            or "cert-analyzer" in process_name
-            or "cert_analyzer" in process_name
-        )
-
-    def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
-        """
-        Populate all Tetragon Pod proto fields onto cert_info.
-
-        Accepts either a live Tetragon pod proto (the normal, real-time-event
-        case) or a _PodContextSnapshot already extracted from one (the
-        retry-queue-replay case) -- both carry the same information, so
-        callers along the new-certificate-file pipeline (which just thread
-        this value through to here) don't need to know or care which they
-        were handed.
-        """
-        if tetragon_pod is None:
-            return
-
-        snapshot = (
-            tetragon_pod if isinstance(tetragon_pod, _PodContextSnapshot)
-            else self._snapshot_pod_context(tetragon_pod)
-        )
-
-        cert_info.pod_name        = snapshot.pod_name
-        cert_info.namespace       = snapshot.namespace
-        cert_info.workload_kind   = snapshot.workload_kind
-        cert_info.workload_name   = snapshot.workload_name
-        cert_info.pod_labels      = snapshot.pod_labels
-        if snapshot.pod_uid:
-            cert_info.pod_uid = snapshot.pod_uid
-        cert_info.pod_annotations = snapshot.pod_annotations
-
-        if snapshot.app_label:
-            cert_info.app_label = snapshot.app_label
-
-        cert_info.container_id               = snapshot.container_id
-        cert_info.container_name             = snapshot.container_name
-        cert_info.container_image            = snapshot.container_image
-        cert_info.container_image_id         = snapshot.container_image_id
-        cert_info.container_maybe_exec_probe = snapshot.container_maybe_exec_probe
-        if snapshot.container_privileged is not None:
-            cert_info.container_privileged = snapshot.container_privileged
-        if snapshot.container_pid is not None:
-            cert_info.container_pid = snapshot.container_pid
-        if snapshot.container_start_time is not None:
-            cert_info.container_start_time = snapshot.container_start_time
-
-        logger.debug(
-            "Tetragon pod context: pod=%s uid=%s namespace=%s workload=%s/%s "
-            "container=%s image=%s privileged=%s labels=%s",
-            cert_info.pod_name, cert_info.pod_uid, cert_info.namespace,
-            cert_info.workload_kind, cert_info.workload_name,
-            cert_info.container_name, cert_info.container_image,
-            cert_info.container_privileged, cert_info.pod_labels,
-        )
-
-    @staticmethod
-    def _derive_app_label_and_container_name(tetragon_pod) -> Tuple[str, str]:
-        """
-        Derive (app_label, container_name) directly from a raw Tetragon pod
-        proto, without mutating a CertificateInfo.
-
-        Used for per-access attribution (tls_certificate_process_info), where
-        the *current* event's pod/container may differ from the cert's own
-        (sticky, set-once-by-the-discoverer) pod_name/namespace/app_label/
-        container_name -- see _apply_pod_context's "only if not already set"
-        guard at its call site. Mirrors the same app_label preference order
-        (app.kubernetes.io/name, then app, then name) that _apply_pod_context
-        uses, so the two stay consistent for the same pod.
-
-        Returns ("", "") if tetragon_pod is None.
-        """
-        if tetragon_pod is None:
-            return "", ""
-        app_label = ""
-        pod_labels = tetragon_pod.pod_labels
-        if pod_labels:
-            for key in ["app.kubernetes.io/name", "app", "name"]:
-                if key in pod_labels:
-                    app_label = pod_labels[key]
-                    break
-        return app_label, tetragon_pod.container.name
-
-    def log_certificate_status(self, info: CertificateInfo, summary_only: bool = False):
-        """
-        Log certificate status with appropriate severity.
-
-        summary_only skips the verbose detail dump (Subject/Issuer/SAN/FIPS/etc.)
-        below the headline status line — used on cache-hit re-detections, where
-        those static cert properties haven't changed since they were last logged
-        in full.
-        """
-        days_left = info.days_until_expiry
-
-        display_path = info.path
-        if info.cert_index > 0:
-            display_path = f"{info.path} [cert #{info.cert_index + 1}]"
-
-        # Build workload context suffix for log lines
-        k8s_ctx = ""
-        if info.pod_name:
-            k8s_ctx = (
-                f" | pod={info.pod_name} namespace={info.namespace}"
-                + (f" node={info.node_name}" if info.node_name else "")
-                + (f" workload={info.workload}" if info.workload else "")
-                + (f" container={info.container_name}" if info.container_name else "")
-            )
-        elif info.node_name:
-            k8s_ctx = f" | node={info.node_name}"
-
-        if info.is_expired:
-            logger.error(
-                f"🔴 EXPIRED: {display_path} "
-                f"(process={info.process} CN={info.common_name}) "
-                f"expired {abs(days_left):.1f} days ago"
-                f"{k8s_ctx}"
-            )
-        elif days_left < 7:
-            logger.critical(
-                f"🔴 CRITICAL: {display_path} "
-                f"(process={info.process} CN={info.common_name}) "
-                f"expires in {days_left:.1f} days"
-                f"{k8s_ctx}"
-            )
-        elif days_left < self.alert_threshold_days:
-            logger.warning(
-                f"⚠️  WARNING: {display_path} "
-                f"(process={info.process} CN={info.common_name}) "
-                f"expires in {days_left:.1f} days"
-                f"{k8s_ctx}"
-            )
-        else:
-            logger.info(
-                f"✅ OK: {display_path} "
-                f"(process={info.process} CN={info.common_name}) "
-                f"valid for {days_left:.1f} more days"
-                f"{k8s_ctx}"
-            )
-
-        if summary_only:
-            return
-
-        detail_log = logger.info if self.demo_mode else logger.debug
-        detail_log(f"   Subject: {info.subject}")
-        detail_log(f"   Issuer: {info.issuer}")
-        detail_log(f"   Serial: {info.serial_number}")
-        if info.checksum:
-            detail_log(f"   SHA-256: {info.checksum}")
-        if info.spki_hash:
-            detail_log(f"   SPKI SHA-256: {info.spki_hash}")
-        detail_log(
-            f"   Valid: {info.not_before.strftime('%Y-%m-%d')} -> "
-            f"{info.not_after.strftime('%Y-%m-%d')}"
-        )
-        if info.san_dns_names:
-            detail_log(f"   SAN DNS: {', '.join(info.san_dns_names[:5])}")
-        if info.san_ip_addresses:
-            detail_log(f"   SAN IP:  {', '.join(info.san_ip_addresses[:5])}")
-        if info.key_usage is not None or info.extended_key_usage is not None:
-            ku  = ', '.join(info.key_usage)         if info.key_usage         else '—'
-            eku = ', '.join(info.extended_key_usage) if info.extended_key_usage else '—'
-            detail_log(f"   Key Usage: {ku} | EKU: {eku}")
-        if info.is_ca is not None:
-            bc = "CA" if info.is_ca else "end-entity"
-            if info.is_ca and info.basic_constraints_path_length is not None:
-                bc += f" (path length {info.basic_constraints_path_length})"
-            detail_log(f"   Basic Constraints: {bc}")
-        if info.ocsp_responder_urls or info.ca_issuers_urls:
-            ocsp = ', '.join(info.ocsp_responder_urls) if info.ocsp_responder_urls else '—'
-            ca_issuers = ', '.join(info.ca_issuers_urls) if info.ca_issuers_urls else '—'
-            detail_log(f"   OCSP: {ocsp} | CA Issuers: {ca_issuers}")
-        if info.fips_compliant:
-            alg = info.key_algorithm
-            if info.key_size:
-                alg += f" {info.key_size}-bit"
-            if info.curve_name:
-                alg += f"/{info.curve_name}"
-            if info.signature_hash:
-                alg += f"/{info.signature_hash}"
-            detail_log(f"   FIPS: compliant ({alg})")
-        elif info.fips_violations:
-            logger.warning(
-                f"⚠️  FIPS NON-COMPLIANT: {display_path} — "
-                + " | ".join(info.fips_violations)
-            )
-        if info.is_self_signed:
-            logger.warning(
-                f"⚠️  SELF-SIGNED: {display_path} "
-                f"(process={info.process} CN={info.common_name})"
-                f"{k8s_ctx}"
-            )
-        if info.pod_name:
-            detail_log(f"   Pod: {info.namespace}/{info.pod_name}")
-            detail_log(f"   Workload: {info.workload}")
-            detail_log(f"   Container: {info.container_name} ({info.container_image})")
-
-    def _resolve_process_binary(self, process_name: str, pid: int) -> str:
-        """Resolve the full binary path when Tetragon truncates it to a parent directory.
-
-        Always probes /proc/{pid}/exe so that ProtectHome (which makes os.path.isdir()
-        unreliable for /home paths inside the service namespace) does not prevent
-        resolution while the process is still alive.
-        """
-        try:
-            exe = os.readlink(f"/proc/{pid}/exe")
-            prefix = process_name.rstrip("/")
-            if exe == prefix or exe.startswith(prefix + "/"):
-                if exe != process_name:
-                    logger.debug(f"Resolved truncated binary path for PID {pid}: {process_name!r} -> {exe!r}")
-                return exe
-        except OSError as e:
-            logger.debug(f"Could not resolve binary path for PID {pid}: {e}")
-        return process_name
-
-    def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
-        """
-        Extract certificate path, process name, PID, namespace, and the raw
-        Tetragon pod proto from a Tetragon event.
-
-        Returns the pod proto object directly rather than individual string fields
-        so that _apply_pod_context can read all available pod metadata (name,
-        namespace, workload, labels) in one place without multiple return values.
-        """
-        cert_path      = None
-        process_name   = ""
-        pid            = 0
-        namespace      = ""
-        tetragon_pod   = None
-        parent_process = ""
-        parent_pid     = 0
-
-        # Handle kprobe events
-        if event.HasField('process_kprobe'):
-            kprobe = event.process_kprobe
-            pid = kprobe.process.pid.value if kprobe.process.HasField('pid') else 0
-            process_name = self._resolve_process_binary(kprobe.process.binary, pid)
-
-            if kprobe.process.HasField('pod'):
-                tetragon_pod = kprobe.process.pod
-                namespace    = tetragon_pod.namespace
-
-            if kprobe.HasField('parent'):
-                parent_process = kprobe.parent.binary
-                parent_pid = kprobe.parent.pid.value if kprobe.parent.HasField('pid') else 0
-
-            for arg in kprobe.args:
-                if arg.HasField('file_arg'):
-                    path = arg.file_arg.path
-                    if self.is_cert_path(path):
-                        cert_path = path
-                        logger.debug("Found cert path in file_arg: %s", cert_path)
-                        break
-                elif arg.HasField('string_arg'):
-                    path = arg.string_arg
-                    if self.is_cert_path(path):
-                        cert_path = path
-                        logger.debug("Found cert path in string_arg: %s", cert_path)
-                        break
-
-        # Handle uprobe events
-        elif event.HasField('process_uprobe'):
-            uprobe = event.process_uprobe
-            pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-            process_name = self._resolve_process_binary(uprobe.process.binary, pid)
-
-            if uprobe.process.HasField('pod'):
-                tetragon_pod = uprobe.process.pod
-                namespace    = tetragon_pod.namespace
-
-            if uprobe.HasField('parent'):
-                parent_process = uprobe.parent.binary
-                parent_pid = uprobe.parent.pid.value if uprobe.parent.HasField('pid') else 0
-
-            for arg in uprobe.args:
-                if arg.HasField('string_arg'):
-                    path = arg.string_arg
-                    if self.is_cert_path(path):
-                        cert_path = path
-                        logger.debug("Found cert path in uprobe string_arg: %s", cert_path)
-                        break
-
-        # Translate host paths — in Kubernetes the cert-analyzer runs in a
-        # container where /host is a bind mount of the node root filesystem.
-        # In standalone mode this prefix is empty so paths are used as-is.
-        #
-        # Tetragon may report either the prefixed path (e.g. /host/etc/pki/...)
-        # when a container process accesses the file via the bind mount, or the
-        # bare host path (e.g. /etc/pki/...) when a host process opens it.
-        # Normalise to the prefixed form so the cert file is always resolvable
-        # inside the container, but avoid double-prefixing paths already prefixed.
-        if cert_path and self.host_prefix:
-            if not cert_path.startswith(self.host_prefix):
-                cert_path = self.host_prefix + cert_path
-
-        return cert_path, process_name, pid, namespace, tetragon_pod, parent_process, parent_pid
 
     def process_event(self, event):
         """Process a single Tetragon event"""
