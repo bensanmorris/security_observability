@@ -1,23 +1,15 @@
 import grpc
 import logging
-import os
 import random
-import re
-import socket
-import ssl
-import struct
-import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from .health import HealthServer
 
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
 # _fips_check/_get_algorithm_oids are no longer called directly in this file
 # (their callers moved to agent/cert_parsing.py) but stay imported here too --
 # test_cert_analyzer.py monkeypatches them via agent.analyzer._fips_check /
@@ -58,9 +50,9 @@ from .kafka import KafkaPublisher
 from .java_fips import _JavaFipsMixin
 from .tls_probe import _TlsProbeMixin
 from .tetragon_monitor import _TetragonMonitorMixin
-from .event_context import _EventContextMixin, _PodContextSnapshot
+from .event_context import _EventContextMixin
 from .cert_parsing import _CertParsingMixin
-from .retry_queue import _TokenBucket, _RetryEntry, _RateLimitRetryQueueMixin
+from .retry_queue import _TokenBucket, _RateLimitRetryQueueMixin
 
 logger = logging.getLogger(__name__)
 

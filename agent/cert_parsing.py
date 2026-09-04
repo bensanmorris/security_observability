@@ -25,10 +25,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from .constants import _EKU_NAMES
 from .fips_compliance_checker import (
-    check_certificate as _fips_check,
     extract_key_info as _extract_key_info,
     FipsComplianceResult,
-    get_algorithm_oids as _get_algorithm_oids,
 )
 from .models import CertificateInfo
 
