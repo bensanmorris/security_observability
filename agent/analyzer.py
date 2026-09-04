@@ -3068,7 +3068,7 @@ class CertificateAnalyzer:
                     # instances losing their Tetragon connection at the same
                     # moment (e.g. a Tetragon rollout) don't all reconnect in
                     # lockstep and thunder-herd it right back down.
-                    sleep_for = retry_delay * (0.5 + random.random() * 0.5)
+                    sleep_for = retry_delay * (0.5 + random.random() * 0.5)  # nosec B311 - jitter for backoff timing, not a security/crypto use
                     logger.warning(
                         f"Tetragon connection lost ({e.code().name}), "
                         f"retrying in {sleep_for:.1f}s..."
@@ -3079,7 +3079,7 @@ class CertificateAnalyzer:
                 except Exception as e:
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
-                    sleep_for = retry_delay * (0.5 + random.random() * 0.5)
+                    sleep_for = retry_delay * (0.5 + random.random() * 0.5)  # nosec B311 - jitter for backoff timing, not a security/crypto use
                     logger.error(
                         f"Unexpected error in event stream: {e} — "
                         f"retrying in {sleep_for:.1f}s",
