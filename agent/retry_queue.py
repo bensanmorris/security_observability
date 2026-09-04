@@ -8,11 +8,11 @@ instance state set up in CertificateAnalyzer.__init__ (self._rate_limit_log_lock
 self._rate_limit_dropped_since_log, self._rate_limit_last_log_time,
 self.processed_paths, self.known_certs, self.kafka_publisher, self.metrics,
 self._new_cert_rate_limiter, self._retry_queue/_retry_queue_lock/
-_retry_queue_paths/_retry_queue_max_size, self._known_paths/_known_paths_lock)
-and methods from its sibling mixins (self.parse_certificates,
-self.extract_certificate_info, self._apply_pod_context,
-self.log_certificate_status, self._snapshot_pod_context) and the core class
-(self._update_cache_metrics).
+_retry_queue_paths/_retry_queue_max_size) and methods from its sibling
+mixins (self.parse_certificates, self.extract_certificate_info,
+self._apply_pod_context, self.log_certificate_status,
+self._snapshot_pod_context) and the core class (self._update_cache_metrics,
+self._path_has_live_known_cert).
 """
 import logging
 import threading
@@ -362,10 +362,11 @@ class _RateLimitRetryQueueMixin:
                 # unrelated event (a fresh Tetragon re-access, or
                 # periodic_scan finding it under scan_paths) since it was
                 # queued -- drop it without spending a token on a no-op
-                # replay.
-                with self._known_paths_lock:
-                    already_known = entry.cert_path in self._known_paths
-                if already_known:
+                # replay. _path_has_live_known_cert (not a bare _known_paths
+                # check) confirms against known_certs itself -- see its own
+                # docstring for why a bare membership check here could
+                # wrongly and permanently drop a still-needed retry.
+                if self._path_has_live_known_cert(entry.cert_path):
                     with self._retry_queue_lock:
                         if self._retry_queue and self._retry_queue[0] == entry:
                             self._retry_queue.popleft()

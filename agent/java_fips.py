@@ -7,6 +7,8 @@ see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _JavaFipsMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self.filter_self_events,
 self.known_certs, self._known_paths/_known_paths_lock, self._recent_client_sni,
+self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_log_lock/
+_uprobe_rate_limit_last_log_time/_uprobe_rate_limit_dropped_since_log,
 self.metrics, self.kafka_publisher, self.last_event_time) and methods from its
 sibling mixins (self._resolve_process_binary, self._is_self_event,
 self.extract_certificate_info, self._apply_pod_context,
@@ -31,6 +33,30 @@ class _JavaFipsMixin:
     PKCS11/NSS helpers (Java FIPS mode) plus the generic in-memory-DER-bytes
     uprobe handler. Mixed into CertificateAnalyzer -- see module docstring.
     """
+
+    def _log_rate_limited_uprobe_cert(self, synthetic_path: str) -> None:
+        """
+        Log a uprobe-cert rate-limit hit at most once every 10 seconds, with
+        a count of how many were dropped in between -- mirrors
+        _log_rate_limited_new_cert's throttling in agent/retry_queue.py, kept
+        as a separate counter/lock here since these are a different trigger
+        (uprobe captures, not file discovery) and shouldn't share one
+        dropped-count with it.
+        """
+        with self._uprobe_rate_limit_log_lock:
+            self._uprobe_rate_limit_dropped_since_log += 1
+            now = time.monotonic()
+            if now - self._uprobe_rate_limit_last_log_time < 10.0:
+                return
+            dropped = self._uprobe_rate_limit_dropped_since_log
+            self._uprobe_rate_limit_dropped_since_log = 0
+            self._uprobe_rate_limit_last_log_time = now
+        logger.warning(
+            f"Uprobe-cert analysis rate limit reached (most recently for {synthetic_path}) -- "
+            f"{dropped} uprobe capture(s) skipped in the last ~10s. Tune via "
+            f"[certificates] uprobe_cert_events_per_second in cert-analyzer.conf or "
+            f"UPROBE_CERT_EVENTS_PER_SECOND."
+        )
 
     @staticmethod
     def _read_process_memory(pid: int, address: int, size: int) -> Optional[bytes]:
@@ -163,18 +189,27 @@ class _JavaFipsMixin:
             logger.info(f"Re-detected known Java FIPS certificate: {synthetic_path}")
             return True
 
+        # Bypasses _analyze_and_finish_new_certificate_file's file-oriented
+        # rate limiter/retry queue -- this isn't a file, and a throttled
+        # capture can't be usefully "replayed" later (the bytes only existed
+        # transiently in the discovering process's memory) -- but is gated by
+        # its own _uprobe_cert_rate_limiter instead. The _known_paths dedup
+        # above only catches an *identical* replay: a compromised or
+        # malicious process on the node can call NSC_CreateObject with a
+        # freshly forged certificate (a different serial every time) as fast
+        # as it likes, trivially defeating that dedup, so without a
+        # throughput ceiling here this path had no bound on how much
+        # extract_certificate_info/logging/Kafka-publish cost it could force
+        # per second.
+        if not self._uprobe_cert_rate_limiter.try_acquire():
+            self._log_rate_limited_uprobe_cert(synthetic_path)
+            self.metrics.cert_analysis_errors.labels(error_type='uprobe_rate_limited', node_name=self.metrics._node_name).inc()
+            return False
+
         cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid, namespace)
         if cert_info is None:
             return False
 
-        # Deliberately bypasses _analyze_and_finish_new_certificate_file's
-        # rate limiter/retry queue: that machinery exists to protect against
-        # bulk-file floods (e.g. a directory of thousands of certs, or a scan
-        # sweeping many paths at once). A NSC_CreateObject uprobe fires once
-        # per PKCS11 object creation -- inherently low-volume and already
-        # deduped per pid+serial via the _known_paths check above -- so
-        # rate-limiting it would only drop real, rare captures with no
-        # cardinality benefit.
         self._apply_pod_context(cert_info, tetragon_pod)
         cert_info.node_name      = event.node_name
         cert_info.parent_process = parent_process
@@ -335,16 +370,22 @@ class _JavaFipsMixin:
             logger.info(f"Re-detected known in-memory certificate: {synthetic_path}")
             return True
 
+        # Bypasses _analyze_and_finish_new_certificate_file's file-oriented
+        # rate limiter/retry queue but is gated by its own
+        # _uprobe_cert_rate_limiter -- see the identical comment in
+        # _handle_nsc_create_object. In-memory DER captures (e.g. via
+        # SSL_CTX_use_certificate_ASN1) are dedup'd only by pid+serial, which
+        # a compromised/malicious process can trivially defeat by forging a
+        # different serial on every call.
+        if not self._uprobe_cert_rate_limiter.try_acquire():
+            self._log_rate_limited_uprobe_cert(synthetic_path)
+            self.metrics.cert_analysis_errors.labels(error_type='uprobe_rate_limited', node_name=self.metrics._node_name).inc()
+            return False
+
         cert_info = self.extract_certificate_info(cert, synthetic_path, process_name, pid, namespace)
         if cert_info is None:
             return False
 
-        # Deliberately bypasses _analyze_and_finish_new_certificate_file's
-        # rate limiter/retry queue -- see the identical comment in
-        # _handle_nsc_create_object. In-memory DER captures (e.g. via
-        # SSL_CTX_use_certificate_ASN1) are low-volume and already deduped
-        # per pid+serial via the _known_paths check above, so there's no
-        # flood scenario here for the rate limiter to guard against.
         self._apply_pod_context(cert_info, tetragon_pod)
         cert_info.node_name      = event.node_name
         cert_info.parent_process = parent_process
