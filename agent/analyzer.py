@@ -2,6 +2,7 @@ import grpc
 import hashlib
 import logging
 import os
+import random
 import re
 import socket
 import ssl
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from .fips_compliance_checker import (
     check_certificate as _fips_check,
     extract_key_info as _extract_key_info,
@@ -83,6 +85,32 @@ class _TokenBucket:
             return False
 
 
+class _PodContextSnapshot(NamedTuple):
+    """
+    A flat, string/scalar-only snapshot of the pod/container fields
+    `CertificateAnalyzer._apply_pod_context` pulls off a live Tetragon pod
+    proto. Retry-queue entries store one of these instead of the raw proto
+    (see _RetryEntry) so queued entries don't hold a live gRPC message for
+    the lifetime of the queue.
+    """
+    pod_name: str
+    namespace: str
+    workload_kind: str
+    workload_name: str
+    pod_labels: dict
+    pod_uid: str
+    pod_annotations: dict
+    app_label: str
+    container_id: str
+    container_name: str
+    container_image: str
+    container_image_id: str
+    container_maybe_exec_probe: bool
+    container_privileged: Optional[bool]
+    container_pid: Optional[int]
+    container_start_time: Optional[datetime]
+
+
 class _RetryEntry(NamedTuple):
     """
     Captures everything needed to fully replay a rate-limited new-certificate
@@ -90,12 +118,18 @@ class _RetryEntry(NamedTuple):
     periodic_scan's rediscovery path, this preserves the real triggering
     process/pod context instead of falling back to synthetic
     process="periodic_scan", pid=0 attribution.
+
+    Stores a _PodContextSnapshot rather than the live Tetragon pod proto:
+    entries can sit in the queue (up to retry_queue_max_size, unbounded time)
+    long enough that the originating pid is almost certain to have been
+    recycled by replay time, and there's no reason to keep a live gRPC
+    message alive that long just to read a handful of strings out of it.
     """
     cert_path: str
     process_name: str
     pid: int
     namespace: str
-    tetragon_pod: object
+    pod_context: Optional[_PodContextSnapshot]
     parent_process: str
     parent_pid: int
     node_name: str
@@ -131,6 +165,19 @@ class CertificateAnalyzer:
         9094,  # Kafka TLS alternate
         9443,  # HTTPS alternate
     })
+
+    # Matches PEM certificate blocks in parse_certificates. Compiled once at
+    # class-definition time instead of per-call -- this runs on every small
+    # cert-file event on the single-threaded event-consumer loop.
+    _PEM_CERT_PATTERN = re.compile(
+        b'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
+        re.DOTALL,
+    )
+
+    # Matches a bare-IP fib_trie leaf line in _read_primary_ip_from_fib_trie.
+    # Compiled once instead of per-call -- this runs on every TLS bind/connect
+    # probe.
+    _FIB_TRIE_IP_ONLY_PATTERN = re.compile(r'\|--\s+(\d+\.\d+\.\d+\.\d+)\s*$')
 
     # Bounds how long connect-probe's background thread will poll for a
     # same-PID SSL_ctrl capture before giving up and falling back to the raw
@@ -281,6 +328,15 @@ class CertificateAnalyzer:
         # pair, not a single op, so it needs its own lock.
         self._known_paths: Dict[str, Set[str]] = {}
         self._known_paths_lock = threading.Lock()
+        # known_certs[unique_key] = cert_info is written from several threads
+        # (the event-consumer thread, probe threads, the retry-queue drainer,
+        # and large-file background workers) with no lock at any call site --
+        # safe only because LRUCache guards every public method (including
+        # __setitem__) with its own internal RLock. Don't add a second lock
+        # around these call sites; it would just be redundant. (Reading a
+        # cert_info's fields back out after it's cached is a separate concern
+        # -- see the comment on the known-file re-access mutation in
+        # process_event.)
         self.known_certs: LRUCache = LRUCache(
             on_set=self._index_known_cert, on_evict=self._deindex_known_cert
         )
@@ -289,6 +345,12 @@ class CertificateAnalyzer:
         # crypto operations on every subsequent Tetragon event for the same file.
         # LRU eviction gives previously-failed paths a second chance after enough
         # other activity, which is desirable if JKS_PASSWORD has since been set.
+        # Caveat: in a small deployment with few distinct keystores, other
+        # cache activity may never push a failed entry out before the operator
+        # notices and fixes the password. There's no active eviction/TTL here,
+        # so today the only ways to force a retry after fixing
+        # JKS_PASSWORD/PKCS12_PASSWORD are restarting the analyzer or waiting
+        # for enough unrelated cache churn to evict the entry naturally.
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
         self._known_policy_labels: Set[Tuple[str, str, str, str]] = set()
@@ -659,11 +721,7 @@ class CertificateAnalyzer:
 
             # Try PEM format first (can contain multiple certs)
             try:
-                pem_pattern = re.compile(
-                    b'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
-                    re.DOTALL
-                )
-                pem_certs = pem_pattern.findall(cert_data)
+                pem_certs = self._PEM_CERT_PATTERN.findall(cert_data)
 
                 if pem_certs:
                     for pem_cert in pem_certs:
@@ -870,7 +928,6 @@ class CertificateAnalyzer:
         checksum = ""
         if self.checksum_enabled:
             try:
-                from cryptography.hazmat.primitives.serialization import Encoding
                 der_bytes = cert.public_bytes(Encoding.DER)
                 checksum = hashlib.sha256(der_bytes).hexdigest()
             except Exception as e:
@@ -895,7 +952,6 @@ class CertificateAnalyzer:
         spki_hash = ""
         if self.spki_hash_enabled and pub_key is not None:
             try:
-                from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
                 spki_der = pub_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
                 spki_hash = hashlib.sha256(spki_der).hexdigest()
             except Exception as e:
@@ -1302,6 +1358,7 @@ class CertificateAnalyzer:
         keeps getting touched while already queued doesn't pile up repeat
         entries.
         """
+        pod_context = self._snapshot_pod_context(tetragon_pod)
         with self._retry_queue_lock:
             if cert_path in self._retry_queue_paths:
                 return
@@ -1315,7 +1372,7 @@ class CertificateAnalyzer:
                 )
             self._retry_queue.append(_RetryEntry(
                 cert_path, process_name, pid, namespace,
-                tetragon_pod, parent_process, parent_pid, node_name,
+                pod_context, parent_process, parent_pid, node_name,
             ))
             self._retry_queue_paths.add(cert_path)
             depth = len(self._retry_queue)
@@ -1359,7 +1416,7 @@ class CertificateAnalyzer:
                 try:
                     result = self._try_process_new_certificate_file(
                         entry.cert_path, entry.process_name, entry.pid, entry.namespace,
-                        entry.tetragon_pod, entry.parent_process, entry.parent_pid, entry.node_name,
+                        entry.pod_context, entry.parent_process, entry.parent_pid, entry.node_name,
                     )
                 except Exception as e:
                     logger.error(f"Error replaying queued certificate file {entry.cert_path}: {e}",
@@ -1472,40 +1529,139 @@ class CertificateAnalyzer:
                 self._large_file_in_flight.discard(cert_path)
             self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached', node_name=self.metrics._node_name).inc()
 
-    def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
-        """Populate all Tetragon Pod proto fields onto cert_info."""
+    @staticmethod
+    def _snapshot_pod_context(tetragon_pod) -> Optional[_PodContextSnapshot]:
+        """
+        Extract the flat, string/scalar fields `_apply_pod_context` needs out
+        of a live Tetragon pod proto, without mutating a CertificateInfo.
+
+        Used by _enqueue_rate_limited_retry to capture pod context at enqueue
+        time so the retry queue doesn't have to hold the live proto -- see
+        _PodContextSnapshot.
+        """
         if tetragon_pod is None:
-            return
+            return None
 
-        cert_info.pod_name        = tetragon_pod.name
-        cert_info.namespace       = tetragon_pod.namespace
-        cert_info.workload_kind   = tetragon_pod.workload_kind
-        cert_info.workload_name   = tetragon_pod.workload
-        cert_info.pod_labels      = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
-        # pod.uid available from Tetragon v1.6.0; empty string on older servers
-        if tetragon_pod.uid:
-            cert_info.pod_uid = tetragon_pod.uid
-        # pod.pod_annotations available from Tetragon v1.5.0; empty map on older servers
-        cert_info.pod_annotations = dict(tetragon_pod.pod_annotations) if tetragon_pod.pod_annotations else {}
+        pod_labels = dict(tetragon_pod.pod_labels) if tetragon_pod.pod_labels else {}
+        pod_annotations = dict(tetragon_pod.pod_annotations) if tetragon_pod.pod_annotations else {}
 
+        app_label = ""
         for key in ["app.kubernetes.io/name", "app", "name"]:
-            if key in cert_info.pod_labels:
-                cert_info.app_label = cert_info.pod_labels[key]
+            if key in pod_labels:
+                app_label = pod_labels[key]
                 break
 
         c = tetragon_pod.container
-        cert_info.container_id               = c.id
-        cert_info.container_name             = c.name
-        cert_info.container_image            = c.image.name
-        cert_info.container_image_id         = c.image.id
-        cert_info.container_maybe_exec_probe = c.maybe_exec_probe
-        # container.security_context available from Tetragon v1.5.0; unset on older servers
-        if c.HasField('security_context'):
-            cert_info.container_privileged = c.security_context.privileged
-        if c.HasField('pid'):
-            cert_info.container_pid = c.pid.value
-        if c.HasField('start_time'):
-            cert_info.container_start_time = c.start_time.ToDatetime()
+        container_privileged = c.security_context.privileged if c.HasField('security_context') else None
+        container_pid = c.pid.value if c.HasField('pid') else None
+        container_start_time = c.start_time.ToDatetime() if c.HasField('start_time') else None
+
+        return _PodContextSnapshot(
+            pod_name=tetragon_pod.name,
+            namespace=tetragon_pod.namespace,
+            workload_kind=tetragon_pod.workload_kind,
+            workload_name=tetragon_pod.workload,
+            pod_labels=pod_labels,
+            # pod.uid available from Tetragon v1.6.0; empty string on older servers
+            pod_uid=tetragon_pod.uid,
+            # pod.pod_annotations available from Tetragon v1.5.0; empty map on older servers
+            pod_annotations=pod_annotations,
+            app_label=app_label,
+            container_id=c.id,
+            container_name=c.name,
+            container_image=c.image.name,
+            container_image_id=c.image.id,
+            container_maybe_exec_probe=c.maybe_exec_probe,
+            # container.security_context/pid/start_time available from Tetragon
+            # v1.5.0; None on older servers
+            container_privileged=container_privileged,
+            container_pid=container_pid,
+            container_start_time=container_start_time,
+        )
+
+    @staticmethod
+    def _int_env(name: str, default: int) -> int:
+        """
+        Read an integer env var, falling back to `default` (and logging a
+        warning) on a missing or non-integer value, so a typo'd override
+        (e.g. PROCESS_METRICS_INTERVAL=15s) degrades to the default instead
+        of crashing analyzer startup with an unhandled ValueError.
+        """
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning(
+                f"Invalid integer value {raw!r} for {name}, using default {default}"
+            )
+            return default
+
+    @staticmethod
+    def _is_self_event(process_name: str, pid: int) -> bool:
+        """
+        True if an event looks like it was generated by cert-analyzer itself
+        rather than the workload being observed -- used to avoid a feedback
+        loop when FILTER_SELF_EVENTS is enabled (the default).
+
+        pid == os.getpid() is the reliable guard, checked first. The
+        name-based checks are only a secondary heuristic: Tetragon may report
+        the process binary as '/' on some systems, so name matching alone is
+        insufficient and can't be relied on by itself -- but it still catches
+        cases (e.g. a re-exec'd or forked descendant) the PID check alone
+        would miss.
+        """
+        if pid == os.getpid():
+            return True
+        return (
+            process_name == "/app"
+            or "cert-analyzer" in process_name
+            or "cert_analyzer" in process_name
+        )
+
+    def _apply_pod_context(self, cert_info: CertificateInfo, tetragon_pod):
+        """
+        Populate all Tetragon Pod proto fields onto cert_info.
+
+        Accepts either a live Tetragon pod proto (the normal, real-time-event
+        case) or a _PodContextSnapshot already extracted from one (the
+        retry-queue-replay case) -- both carry the same information, so
+        callers along the new-certificate-file pipeline (which just thread
+        this value through to here) don't need to know or care which they
+        were handed.
+        """
+        if tetragon_pod is None:
+            return
+
+        snapshot = (
+            tetragon_pod if isinstance(tetragon_pod, _PodContextSnapshot)
+            else self._snapshot_pod_context(tetragon_pod)
+        )
+
+        cert_info.pod_name        = snapshot.pod_name
+        cert_info.namespace       = snapshot.namespace
+        cert_info.workload_kind   = snapshot.workload_kind
+        cert_info.workload_name   = snapshot.workload_name
+        cert_info.pod_labels      = snapshot.pod_labels
+        if snapshot.pod_uid:
+            cert_info.pod_uid = snapshot.pod_uid
+        cert_info.pod_annotations = snapshot.pod_annotations
+
+        if snapshot.app_label:
+            cert_info.app_label = snapshot.app_label
+
+        cert_info.container_id               = snapshot.container_id
+        cert_info.container_name             = snapshot.container_name
+        cert_info.container_image            = snapshot.container_image
+        cert_info.container_image_id         = snapshot.container_image_id
+        cert_info.container_maybe_exec_probe = snapshot.container_maybe_exec_probe
+        if snapshot.container_privileged is not None:
+            cert_info.container_privileged = snapshot.container_privileged
+        if snapshot.container_pid is not None:
+            cert_info.container_pid = snapshot.container_pid
+        if snapshot.container_start_time is not None:
+            cert_info.container_start_time = snapshot.container_start_time
 
         logger.debug(
             "Tetragon pod context: pod=%s uid=%s namespace=%s workload=%s/%s "
@@ -1811,11 +1967,8 @@ class CertificateAnalyzer:
         parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
         parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
 
-        if self.filter_self_events:
-            if "cert-analyzer" in process_name or "cert_analyzer" in process_name:
-                return False
-            if pid == os.getpid():
-                return False
+        if self.filter_self_events and self._is_self_event(process_name, pid):
+            return False
 
         # Extract the three uint64 args: session, pTemplate, ulCount
         uint64_args = [arg.size_arg for arg in uprobe.args if arg.HasField('size_arg')]
@@ -1898,6 +2051,14 @@ class CertificateAnalyzer:
         if cert_info is None:
             return False
 
+        # Deliberately bypasses _analyze_and_finish_new_certificate_file's
+        # rate limiter/retry queue: that machinery exists to protect against
+        # bulk-file floods (e.g. a directory of thousands of certs, or a scan
+        # sweeping many paths at once). A NSC_CreateObject uprobe fires once
+        # per PKCS11 object creation -- inherently low-volume and already
+        # deduped per pid+serial via the _known_paths check above -- so
+        # rate-limiting it would only drop real, rare captures with no
+        # cardinality benefit.
         self._apply_pod_context(cert_info, tetragon_pod)
         cert_info.node_name      = event.node_name
         cert_info.parent_process = parent_process
@@ -1930,7 +2091,7 @@ class CertificateAnalyzer:
         pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
         process_name = self._resolve_process_binary(uprobe.process.binary, pid)
 
-        if self.filter_self_events and pid == os.getpid():
+        if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
 
         uint64_args = [arg.size_arg for arg in uprobe.args if arg.HasField('size_arg')]
@@ -1991,11 +2152,8 @@ class CertificateAnalyzer:
         pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
         process_name = self._resolve_process_binary(uprobe.process.binary, pid)
 
-        if self.filter_self_events:
-            if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
-                return False
-            if pid == os.getpid():
-                return False
+        if self.filter_self_events and self._is_self_event(process_name, pid):
+            return False
 
         hostname = None
         for arg in uprobe.args:
@@ -2006,7 +2164,7 @@ class CertificateAnalyzer:
         if not hostname or not pid:
             return False
 
-        self._recent_client_sni[pid] = (hostname, time.time())
+        self._recent_client_sni[pid] = (hostname, time.monotonic())
         logger.debug(f"Captured real SNI hostname '{hostname}' for PID {pid} ({process_name})")
         return True
 
@@ -2028,13 +2186,9 @@ class CertificateAnalyzer:
         parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
         parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
 
-        if self.filter_self_events:
-            if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
-                logger.debug(f"Skipping self-generated uprobe bytes event from {process_name}")
-                return False
-            if pid == os.getpid():
-                logger.debug(f"Skipping self-generated uprobe bytes event from PID {pid}")
-                return False
+        if self.filter_self_events and self._is_self_event(process_name, pid):
+            logger.debug(f"Skipping self-generated uprobe bytes event from {process_name} (PID {pid})")
+            return False
 
         raw_bytes = None
         for arg in uprobe.args:
@@ -2069,6 +2223,12 @@ class CertificateAnalyzer:
         if cert_info is None:
             return False
 
+        # Deliberately bypasses _analyze_and_finish_new_certificate_file's
+        # rate limiter/retry queue -- see the identical comment in
+        # _handle_nsc_create_object. In-memory DER captures (e.g. via
+        # SSL_CTX_use_certificate_ASN1) are low-volume and already deduped
+        # per pid+serial via the _known_paths check above, so there's no
+        # flood scenario here for the rate limiter to guard against.
         self._apply_pod_context(cert_info, tetragon_pod)
         cert_info.node_name      = event.node_name
         cert_info.parent_process = parent_process
@@ -2103,10 +2263,9 @@ class CertificateAnalyzer:
         # The kernel renders each LOCAL /32 leaf as a bare-IP line ("|-- x.x.x.x")
         # immediately followed by its mask/type line ("/32 host LOCAL") -- the IP
         # and "/32" never share a line, so a single-line regex never matches.
-        ip_only_pat = re.compile(r'\|--\s+(\d+\.\d+\.\d+\.\d+)\s*$')
         for prev_line, line in zip(lines, lines[1:]):
             if 'LOCAL' in line and '/32 host' in line:
-                m = ip_only_pat.search(prev_line)
+                m = self._FIB_TRIE_IP_ONLY_PATTERN.search(prev_line)
                 if m:
                     ip = m.group(1)
                     if not ip.startswith('127.') and ip != '0.0.0.0':  # nosec B104 - comparing an observed process's bind address, not binding our own socket
@@ -2128,7 +2287,7 @@ class CertificateAnalyzer:
         try:
             ip = self._read_primary_ip_from_fib_trie(pid)
         except Exception as e:
-            logger.debug(f"fib_trie lookup failed for PID {pid}: {e}")
+            logger.debug("fib_trie lookup failed for PID %s: %s", pid, e)
         return ip or '127.0.0.1'
 
     def _await_captured_sni(self, pid: int) -> Optional[str]:
@@ -2150,7 +2309,7 @@ class CertificateAnalyzer:
             captured = self._recent_client_sni.get(pid)
             if captured is not None:
                 real_hostname, captured_at = captured
-                if time.time() - captured_at < self._sni_capture_window_seconds:
+                if time.monotonic() - captured_at < self._sni_capture_window_seconds:
                     return real_hostname
             if time.monotonic() >= deadline:
                 return None
@@ -2223,7 +2382,7 @@ class CertificateAnalyzer:
                 cipher = ssock.cipher()
                 cipher_name = cipher[0] if cipher else None
         except Exception as e:
-            logger.debug(f"TLS probe failed {host}:{port}: {e}")
+            logger.debug("TLS probe failed %s:%s: %s", host, port, e)
             self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
         finally:
@@ -2237,7 +2396,7 @@ class CertificateAnalyzer:
         try:
             cert = x509.load_der_x509_certificate(der_bytes, default_backend())
         except Exception as e:
-            logger.debug(f"TLS probe: DER parse failed for {host}:{port}: {e}")
+            logger.debug("TLS probe: DER parse failed for %s:%s: %s", host, port, e)
             self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
 
@@ -2253,7 +2412,16 @@ class CertificateAnalyzer:
         self.metrics.update_certificate_metrics(cert_info)
         self.log_certificate_status(cert_info)
         self.known_certs[cert_info.unique_key] = cert_info
-        self._probed_endpoints.add(endpoint_key)
+        # Guarded by _probe_in_flight_lock -- the same lock the event-consumer
+        # thread holds while checking "already probed or in flight" before
+        # spawning a probe (see _handle_tls_bind_event/_handle_tls_connect_event).
+        # This runs on the probe's own background thread, so without the lock
+        # this write would race that check. The caller's finally block adds
+        # the same key again (alongside its in-flight discard) for the
+        # failure path, where this success-only add never runs; the success
+        # path's double-add through the same lock is harmless.
+        with self._probe_in_flight_lock:
+            self._probed_endpoints.add(endpoint_key)
         self._update_cache_metrics()
 
         if tls_version and cipher_name:
@@ -2333,7 +2501,7 @@ class CertificateAnalyzer:
             try:
                 self._probe_tls_endpoint(host, port, process_name, pid, node_name, tetragon_pod, mechanism='bind')
             except Exception as e:
-                logger.debug(f"TLS probe thread error {host}:{port}: {e}")
+                logger.debug("TLS probe thread error %s:%s: %s", host, port, e)
             finally:
                 # discard-from-in-flight and add-to-probed must happen as one
                 # atomic step under the same lock — otherwise there's a window
@@ -2354,7 +2522,10 @@ class CertificateAnalyzer:
                 self._probe_in_flight.discard(endpoint_key)
             self.metrics.tls_port_probes_total.labels(status='skipped', node_name=self.metrics._node_name).inc()
             return
-        logger.debug(f"Scheduled TLS probe {host}:{port} delay={delay}s pid={pid} process={process_name}")
+        logger.debug(
+            "Scheduled TLS probe %s:%s delay=%ss pid=%s process=%s",
+            host, port, delay, pid, process_name,
+        )
 
     def _handle_tls_connect_event(self, event) -> None:
         """Extract destination address/port from a tcp_connect kprobe event and schedule a TLS probe.
@@ -2404,7 +2575,7 @@ class CertificateAnalyzer:
             try:
                 self._probe_tls_endpoint(daddr, dport, process_name, pid, node_name, tetragon_pod, mechanism='connect')
             except Exception as e:
-                logger.debug(f"TLS outbound probe thread error {daddr}:{dport}: {e}")
+                logger.debug("TLS outbound probe thread error %s:%s: %s", daddr, dport, e)
             finally:
                 # discard-from-in-flight and add-to-probed must happen as one
                 # atomic step under the same lock — otherwise there's a window
@@ -2478,23 +2649,22 @@ class CertificateAnalyzer:
                 if symbol == "NSC_FindObjectsInit":
                     self._handle_nsc_find_objects_init(event)
                     return
-            self._handle_uprobe_in_memory_cert(event)
+                # Fallback: any other uprobe symbol may still be delivering the
+                # cert as raw DER bytes (e.g. SSL_CTX_use_certificate_ASN1).
+                # Kept inside this HasField('process_uprobe') guard so kprobe
+                # events with no file_arg match don't reach a handler that
+                # only ever does anything for uprobes.
+                self._handle_uprobe_in_memory_cert(event)
             return
 
         # Optionally skip events from the analyzer itself to avoid a feedback loop.
         # Set FILTER_SELF_EVENTS=false to disable this - useful for demos where the
         # cert-analyzer pod is itself the workload being observed.
-        if self.filter_self_events:
-            if process_name == "/app" or "cert-analyzer" in process_name or "cert_analyzer" in process_name:
-                logger.debug("Skipping self-generated event from %s", process_name)
-                return
-            # Also filter by PID — Tetragon may report the process binary as '/'
-            # on some systems, so name-based filtering alone is insufficient
-            if pid == os.getpid():
-                logger.debug("Skipping self-generated event from PID %s", pid)
-                return
+        if self.filter_self_events and self._is_self_event(process_name, pid):
+            logger.debug("Skipping self-generated event from %s (PID %s)", process_name, pid)
+            return
 
-        logger.debug(f"🔍 Detected certificate access: {cert_path} by {process_name} (PID: {pid})")
+        logger.debug("🔍 Detected certificate access: %s by %s (PID: %s)", cert_path, process_name, pid)
 
         # Update the event timestamp now — we have confirmed a cert-file access event
         # regardless of whether we can parse it. This keeps the readiness probe alive
@@ -2510,7 +2680,7 @@ class CertificateAnalyzer:
         with self._known_paths_lock:
             matching_keys = list(self._known_paths.get(cert_path, ()))
         if matching_keys:
-            logger.debug(f"Re-detected known certificate file: {cert_path}")
+            logger.debug("Re-detected known certificate file: %s", cert_path)
             # A bundle file re-accessed by many distinct processes (e.g. the
             # system CA bundle opened by dozens of unrelated binaries) would
             # otherwise mint a cert_process_info series per (cached cert,
@@ -2536,8 +2706,18 @@ class CertificateAnalyzer:
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
                     continue
+                # cert_info is already published/cached and may be read
+                # concurrently by probe threads, the retry drainer, or another
+                # event-consumer iteration -- pod_name/namespace/node_name/etc.
+                # are not updated atomically as a group here. Tolerated: every
+                # writer of these fields (this call site, _apply_pod_context's
+                # other call sites, _probe_tls_endpoint, the retry drainer)
+                # uses the same set-once-if-empty (or same-value-every-time,
+                # for node_name) semantics, so a reader can at worst see an
+                # earlier-but-still-self-consistent snapshot, never a
+                # torn/mixed one from two different pods.
                 if tetragon_pod is not None and not cert_info.pod_name:
-                    logger.debug(f"Applying pod context to cached entry for {cert_path}")
+                    logger.debug("Applying pod context to cached entry for %s", cert_path)
                     self._apply_pod_context(cert_info, tetragon_pod)
                 if event.node_name:
                     cert_info.node_name = event.node_name
@@ -2590,7 +2770,7 @@ class CertificateAnalyzer:
         # on _new_path_lock in __init__.
         with self._new_path_lock:
             if cert_path in self._new_file_in_flight or cert_path in self._large_file_in_flight:
-                logger.debug(f"New-file parse for {cert_path} already in flight, skipping duplicate")
+                logger.debug("New-file parse for %s already in flight, skipping duplicate", cert_path)
                 return
             self._new_file_in_flight.add(cert_path)
         try:
@@ -2678,7 +2858,7 @@ class CertificateAnalyzer:
         Interval is configurable via TETRAGON_VERSION_CHECK_INTERVAL env var
         (default: 300 seconds / 5 minutes).
         """
-        interval = int(os.getenv('TETRAGON_VERSION_CHECK_INTERVAL', '300'))
+        interval = self._int_env('TETRAGON_VERSION_CHECK_INTERVAL', 300)
 
         def _monitor():
             while True:
@@ -2756,7 +2936,7 @@ class CertificateAnalyzer:
         Interval is configurable via TETRAGON_POLICY_CHECK_INTERVAL env var
         (default: 60 seconds).
         """
-        interval = int(os.getenv('TETRAGON_POLICY_CHECK_INTERVAL', '60'))
+        interval = self._int_env('TETRAGON_POLICY_CHECK_INTERVAL', 60)
 
         def _monitor():
             while True:
@@ -2796,7 +2976,7 @@ class CertificateAnalyzer:
         Interval is configurable via PROCESS_METRICS_INTERVAL env var
         (default: 15 seconds, matching the default Prometheus scrape interval).
         """
-        interval = int(os.getenv('PROCESS_METRICS_INTERVAL', '15'))
+        interval = self._int_env('PROCESS_METRICS_INTERVAL', 15)
 
         def _monitor():
             while True:
@@ -2884,22 +3064,28 @@ class CertificateAnalyzer:
                 except grpc.RpcError as e:
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
+                    # Jittered (50-100% of retry_delay) so that many analyzer
+                    # instances losing their Tetragon connection at the same
+                    # moment (e.g. a Tetragon rollout) don't all reconnect in
+                    # lockstep and thunder-herd it right back down.
+                    sleep_for = retry_delay * (0.5 + random.random() * 0.5)
                     logger.warning(
                         f"Tetragon connection lost ({e.code().name}), "
-                        f"retrying in {retry_delay}s..."
+                        f"retrying in {sleep_for:.1f}s..."
                     )
-                    time.sleep(retry_delay)
+                    time.sleep(sleep_for)
                     retry_delay = min(retry_delay * 2, max_delay)
 
                 except Exception as e:
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
+                    sleep_for = retry_delay * (0.5 + random.random() * 0.5)
                     logger.error(
                         f"Unexpected error in event stream: {e} — "
-                        f"retrying in {retry_delay}s",
+                        f"retrying in {sleep_for:.1f}s",
                         exc_info=True,
                     )
-                    time.sleep(retry_delay)
+                    time.sleep(sleep_for)
                     retry_delay = min(retry_delay * 2, max_delay)
 
         except KeyboardInterrupt:

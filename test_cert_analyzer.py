@@ -9152,7 +9152,7 @@ class TestPortProbe:
         assert result is True
         hostname, captured_at = probe_analyzer._recent_client_sni[555]
         assert hostname == 'real.example.com'
-        assert abs(time.time() - captured_at) < 1.0
+        assert abs(time.monotonic() - captured_at) < 1.0
 
     def test_ssl_ctrl_sni_capture_ignores_event_without_string_arg(self, probe_analyzer):
         """No string_arg present (shouldn't happen given the policy's matchArgs, but
@@ -9179,7 +9179,7 @@ class TestPortProbe:
         port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
         probe_analyzer._sni_capture_enabled = True
         probe_analyzer._sni_capture_window_seconds = 2.0
-        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time())
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.monotonic())
         try:
             probe_analyzer._probe_tls_endpoint(
                 '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='connect'
@@ -9194,7 +9194,7 @@ class TestPortProbe:
         today even with a fresh capture sitting in the cache."""
         cert_path, key_path, _ = self._gen_server_cert(temp_dir)
         port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
-        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time())
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.monotonic())
         try:
             probe_analyzer._probe_tls_endpoint(
                 '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='connect'
@@ -9210,7 +9210,7 @@ class TestPortProbe:
         port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
         probe_analyzer._sni_capture_enabled = True
         probe_analyzer._sni_capture_window_seconds = 2.0
-        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time() - 10.0)
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.monotonic() - 10.0)
         try:
             probe_analyzer._probe_tls_endpoint(
                 '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='connect'
@@ -9227,7 +9227,7 @@ class TestPortProbe:
         port, stop, sni_seen = self._start_tls_server_capturing_sni(cert_path, key_path)
         probe_analyzer._sni_capture_enabled = True
         probe_analyzer._sni_capture_window_seconds = 2.0
-        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.time())
+        probe_analyzer._recent_client_sni[4321] = ('real.example.com', time.monotonic())
         try:
             probe_analyzer._probe_tls_endpoint(
                 '127.0.0.1', port, '/usr/bin/dnf', 4321, 'node-1', None, mechanism='bind'
