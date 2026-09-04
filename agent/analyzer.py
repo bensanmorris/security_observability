@@ -145,6 +145,7 @@ class CertificateAnalyzer(
                  max_concurrent_background_threads: int = 20,
                  max_processes_per_cert: int = 20,
                  new_cert_events_per_second: float = 50.0,
+                 uprobe_cert_events_per_second: float = 50.0,
                  retry_queue_max_size: int = 2000,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600,
@@ -200,6 +201,22 @@ class CertificateAnalyzer(
         self._rate_limit_log_lock = threading.Lock()
         self._rate_limit_last_log_time = 0.0
         self._rate_limit_dropped_since_log = 0
+        # Separate token bucket for the PKCS11/NSS and in-memory-DER uprobe
+        # discovery paths (agent/java_fips.py): those bypass
+        # _new_cert_rate_limiter entirely (see the comment on
+        # _handle_nsc_create_object) and are deduped only on a synthetic
+        # pid+serial path, trivially defeated by a compromised/malicious
+        # process on the node varying the injected certificate's serial
+        # number on every call -- with no limiter of its own, that path had
+        # no ceiling on how much extract_certificate_info/logging/Kafka-
+        # publish work it could force per second. Kept as its own bucket
+        # rather than sharing _new_cert_rate_limiter's so a flood of forged
+        # uprobe captures can't also starve real file-based cert discovery
+        # of its budget.
+        self._uprobe_cert_rate_limiter = _TokenBucket(uprobe_cert_events_per_second)
+        self._uprobe_rate_limit_log_lock = threading.Lock()
+        self._uprobe_rate_limit_last_log_time = 0.0
+        self._uprobe_rate_limit_dropped_since_log = 0
         # A rate-limited file isn't dropped -- it's queued here and replayed
         # by the retry-queue drainer thread once capacity frees up, with its
         # *original* triggering process/pod context intact (unlike
@@ -237,6 +254,7 @@ class CertificateAnalyzer(
             'large_file_byte_cap':                 str(large_file_byte_cap),
             'max_concurrent_background_threads':   str(max_concurrent_background_threads),
             'new_cert_events_per_second':          str(new_cert_events_per_second),
+            'uprobe_cert_events_per_second':       str(uprobe_cert_events_per_second),
             'retry_queue_max_size':                str(retry_queue_max_size),
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
@@ -379,6 +397,37 @@ class CertificateAnalyzer(
             # thread that's mutating the cache (event consumer, periodic scan,
             # or a background parse worker).
             logger.debug(f"Could not remove Prometheus metrics for evicted cert {key}: {e}")
+
+    def _path_has_live_known_cert(self, cert_path: str) -> bool:
+        """
+        True if cert_path has at least one entry that's *actually* still
+        present in known_certs right now -- not just listed in the
+        _known_paths secondary index.
+
+        _known_paths is populated/depopulated by known_certs's on_set/
+        on_evict callbacks (_index_known_cert/_deindex_known_cert), which
+        LRUCache invokes *after* releasing its own internal lock (see
+        agent/cache.py's __setitem__) so it can't hold that lock across an
+        arbitrary caller-supplied callback. That means _known_paths can be
+        transiently stale relative to known_certs's real contents: a reader
+        checking _known_paths_lock alone can catch a path as "known" a
+        moment before it's actually inserted, or a moment after its last
+        entry was actually evicted -- two independently-locked pieces of
+        state that don't move together atomically.
+
+        process_event's own known-file loop already tolerates this per-key
+        (each iteration does its own known_certs.get() and skips a None
+        gracefully); this is the same defensive check for callers --
+        periodic_scan and the retry-queue drainer -- that only want a single
+        yes/no answer and, critically, treat "yes" as a reason to skip work
+        entirely. A false positive there would silently and *permanently*
+        drop legitimate work rather than just delay it, so it's worth the
+        extra known_certs lookups given neither caller is a per-event hot
+        path.
+        """
+        with self._known_paths_lock:
+            keys = list(self._known_paths.get(cert_path, ()))
+        return any(self.known_certs.get(k) is not None for k in keys)
 
     def _update_cache_metrics(self) -> None:
         """Update Prometheus gauges reflecting current LRU cache occupancy."""
@@ -624,10 +673,21 @@ class CertificateAnalyzer(
                 pod_uid = tetragon_pod.uid if tetragon_pod is not None else ""
                 container_id = tetragon_pod.container.id if tetragon_pod is not None else ""
                 container_image = tetragon_pod.container.image.name if tetragon_pod is not None else ""
+            # Tracks whether any candidate key actually resolved -- _known_paths
+            # (this loop's source of matching_keys) can be transiently stale
+            # relative to known_certs's real contents (see
+            # _path_has_live_known_cert's docstring), so it's possible for
+            # every single key here to have already been evicted. Without this,
+            # that edge case would still hit the unconditional `return` below,
+            # silently and permanently treating a now-untracked path as
+            # "already known, nothing to do" instead of falling through to
+            # rediscover it as new.
+            any_live = False
             for i, key in enumerate(matching_keys):
                 cert_info = self.known_certs.get(key)
                 if cert_info is None:  # evicted between snapshot and access
                     continue
+                any_live = True
                 # cert_info is already published/cached and may be read
                 # concurrently by probe threads, the retry drainer, or another
                 # event-consumer iteration -- pod_name/namespace/node_name/etc.
@@ -665,14 +725,24 @@ class CertificateAnalyzer(
                         container_image=container_image,
                     )
 
-            if is_bundle:
+            if is_bundle and any_live:
                 logger.info(
                     f"{cert_path}: re-access by {process_name} covers "
                     f"{len(matching_keys)} cached certs — tracked process-access "
                     f"for the first {metrics_cap}; {len(matching_keys) - metrics_cap} "
                     f"more skipped to bound cert_process_info cardinality"
                 )
-            return
+            if any_live:
+                return
+            # Every candidate key from _known_paths turned out to be already
+            # evicted from known_certs -- this path isn't actually known
+            # anymore (the secondary index was just stale), so fall through
+            # to the large-file/new-file handling below to rediscover it
+            # instead of silently dropping it here.
+            logger.debug(
+                "%s: _known_paths listed %d stale key(s) with no live known_certs "
+                "entry -- treating as a new file", cert_path, len(matching_keys),
+            )
 
         # Large multi-cert files (e.g. system CA bundles with hundreds of
         # certs, or an oversized JKS/PKCS12 keystore) are parsed on a
@@ -848,9 +918,13 @@ class CertificateAnalyzer(
                     # would re-publish "new discovery" Kafka messages for certs that
                     # aren't new. Genuinely new files fall through to the same
                     # threshold-routed / metrics-capped path Tetragon events use.
-                    with self._known_paths_lock:
-                        if cert_path in self._known_paths:
-                            continue
+                    # _path_has_live_known_cert (not a bare _known_paths check)
+                    # confirms against known_certs itself -- see its own
+                    # docstring for why a bare membership check here could
+                    # wrongly and permanently skip a file whose _known_paths
+                    # entry is transiently stale.
+                    if self._path_has_live_known_cert(cert_path):
+                        continue
 
                     if self._is_large_certificate_file(cert_path):
                         self._process_certificate_file_async(

@@ -214,6 +214,15 @@ def main():
     # FIFO so this can't become a second unbounded memory sink for the same
     # abuse new_cert_events_per_second defends against.
     retry_queue_max_size = cfg_int(cp, 'certificates', 'retry_queue_max_size', 'RETRY_QUEUE_MAX_SIZE', '2000')
+    # Separate token bucket for the PKCS11/NSS and in-memory-DER uprobe
+    # discovery paths (agent/java_fips.py), which bypass
+    # new_cert_events_per_second entirely -- those paths are dedup'd only on
+    # a synthetic pid+serial path, trivially defeated by an attacker-
+    # controlled process varying the injected certificate's serial number on
+    # every call. Kept as its own bucket rather than sharing
+    # new_cert_events_per_second's so a flood of forged uprobe captures can't
+    # also starve legitimate file-based cert discovery of its own budget.
+    uprobe_cert_events_per_second = cfg_float(cp, 'certificates', 'uprobe_cert_events_per_second', 'UPROBE_CERT_EVENTS_PER_SECOND', '50')
 
     event_rate_metrics_enabled = cfg(cp, 'metrics', 'event_rate_metrics_enabled', 'EVENT_RATE_METRICS_ENABLED', 'false').lower() == 'true'
 
@@ -274,6 +283,7 @@ def main():
     logger.info(f"Max processes tracked per cert: {max_processes_per_cert}")
     logger.info(f"New-cert analysis rate limit: {new_cert_events_per_second}/sec" if new_cert_events_per_second > 0 else "New-cert analysis rate limit: disabled")
     logger.info(f"Rate-limit retry queue max size: {retry_queue_max_size}")
+    logger.info(f"Uprobe-cert analysis rate limit: {uprobe_cert_events_per_second}/sec" if uprobe_cert_events_per_second > 0 else "Uprobe-cert analysis rate limit: disabled")
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Min scrape interval: {min_scrape_interval}s (too-frequent scrapes get a cached reply)" if min_scrape_interval > 0 else "Min scrape interval: disabled")
     logger.info(f"Health port:       {health_port}")
@@ -350,6 +360,7 @@ def main():
                                    max_concurrent_background_threads=max_concurrent_background_threads,
                                    max_processes_per_cert=max_processes_per_cert,
                                    new_cert_events_per_second=new_cert_events_per_second,
+                                   uprobe_cert_events_per_second=uprobe_cert_events_per_second,
                                    retry_queue_max_size=retry_queue_max_size,
                                    scan_paths=scan_paths,
                                    scan_interval_seconds=scan_interval,

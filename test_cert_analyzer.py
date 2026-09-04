@@ -2875,6 +2875,93 @@ class TestKnownCertsIndex:
         assert len(analyzer._known_paths) == 0
 
 
+class TestPathHasLiveKnownCert:
+    """
+    Tests for _path_has_live_known_cert (agent/analyzer.py) -- confirms a
+    _known_paths hit against known_certs itself before treating "known" as a
+    reason to skip work, since _known_paths is populated/depopulated by
+    on_set/on_evict callbacks LRUCache invokes *after* releasing its own
+    internal lock, so it can be transiently stale relative to known_certs's
+    real contents. Used by periodic_scan, the retry-queue drainer, and
+    process_event's known-file loop (see TestProcessEventFallsThroughOnStaleIndex).
+    """
+
+    def test_true_when_entry_present(self, analyzer, temp_dir):
+        """Sanity check: a real known_certs entry for the path reads as live."""
+        cert, _ = TestCertificateGeneration.generate_certificate("live-check.example.com", 365)
+        path = os.path.join(temp_dir, "live-check.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+
+        assert analyzer._path_has_live_known_cert(path) is True
+
+    def test_false_for_unknown_path(self, analyzer):
+        assert analyzer._path_has_live_known_cert("/no/such/path.pem") is False
+
+    def test_false_when_known_paths_index_is_stale(self, analyzer):
+        """
+        A _known_paths entry with no matching known_certs entry -- exactly
+        the race window on_set/on_evict callbacks running outside
+        LRUCache's own lock can create -- must not read as live.
+        """
+        analyzer._known_paths["/stale/path.pem"] = {"/stale/path.pem:0:1"}
+        assert analyzer._path_has_live_known_cert("/stale/path.pem") is False
+
+    def test_true_when_at_least_one_of_several_keys_is_live(self, analyzer, temp_dir):
+        """A bundle path with some evicted and some live keys still reads as live."""
+        cert, _ = TestCertificateGeneration.generate_certificate("partial-bundle.example.com", 365)
+        path = os.path.join(temp_dir, "partial-bundle.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+
+        # Add a second, stale key under the same path without a matching
+        # known_certs entry.
+        analyzer._known_paths[path].add(f"{path}:1:stale-serial")
+
+        assert analyzer._path_has_live_known_cert(path) is True
+
+
+class TestProcessEventFallsThroughOnStaleIndex:
+    """
+    process_event's known-file loop must not treat a path as "already known,
+    nothing to do" when every _known_paths-indexed key for it has actually
+    been evicted from known_certs -- see _path_has_live_known_cert's
+    docstring for why that index can be transiently stale. Before this fix,
+    that edge case hit the loop's unconditional `return`, permanently
+    dropping the file instead of falling through to rediscover it.
+    """
+
+    def test_rediscovers_file_when_known_paths_index_is_stale(self, analyzer, temp_dir):
+        cert, _ = TestCertificateGeneration.generate_certificate("stale-index.example.com", 365)
+        path = os.path.join(temp_dir, "stale-index.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+
+        # Simulate the stale-index race directly: _known_paths claims this
+        # path is known, but known_certs has nothing under that key.
+        analyzer._known_paths[path] = {f"{path}:0:999"}
+        assert len(analyzer.known_certs) == 0
+
+        analyzer.process_event(TestCacheHitReDetection._MockEvent(path, '/usr/bin/cat'))
+
+        assert any(k.startswith(path + ":") for k in analyzer.known_certs)
+
+    def test_does_not_rediscover_when_index_is_genuinely_live(self, analyzer, temp_dir):
+        """Control case: a real (non-stale) known entry is still treated as known."""
+        import unittest.mock as mock
+
+        cert, _ = TestCertificateGeneration.generate_certificate("genuinely-live.example.com", 365)
+        path = os.path.join(temp_dir, "genuinely-live.pem")
+        TestCertificateGeneration.save_certificate_pem(cert, path)
+        cert_infos = analyzer.analyze_certificate(path, "test", 1)
+        analyzer._finish_new_certificate_file(cert_infos, None, "", 0, "")
+
+        with mock.patch.object(analyzer, 'analyze_certificate') as mock_analyze:
+            analyzer.process_event(TestCacheHitReDetection._MockEvent(path, '/usr/bin/cat'))
+        mock_analyze.assert_not_called()
+
+
 class TestMetricsCleanupOnEviction:
     """
     Tests for PrometheusMetrics.remove_certificate_metrics, wired into
@@ -5694,8 +5781,12 @@ class TestRetryQueueDrainer:
         TestCertificateGeneration.save_certificate_pem(cert, path)
 
         # Simulate the path having already been successfully processed
-        # through some other route.
-        analyzer._known_paths[path] = {f"{path}:0:1"}
+        # through some other route -- a real known_certs entry (not just a
+        # _known_paths one) so _path_has_live_known_cert's confirming lookup
+        # (see its docstring) finds it too, matching what a genuine
+        # already-processed path looks like in production.
+        from types import SimpleNamespace
+        analyzer.known_certs[f"{path}:0:1"] = SimpleNamespace(path=path)
 
         # Directly queue a stale retry entry for that same path.
         analyzer._enqueue_rate_limited_retry(
@@ -7808,6 +7899,76 @@ class TestOpensslUprobeHooking:
         analyzer._handle_uprobe_in_memory_cert(event)
         assert len(analyzer.known_certs) == 1
 
+    def test_handle_bytes_rate_limited_when_bucket_exhausted(self, analyzer):
+        """
+        A distinct forged in-memory DER blob on every call bypasses the
+        pid+serial _known_paths dedup (a compromised/malicious process could
+        do exactly this), but the dedicated _uprobe_cert_rate_limiter still
+        caps it.
+        """
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0  # force exhausted
+        analyzer._uprobe_cert_rate_limiter = bucket
+
+        _, der = self._cert_der(cn='throttled.example.com')
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        result = analyzer._handle_uprobe_in_memory_cert(event)
+        assert result is False
+        assert len(analyzer.known_certs) == 0
+
+    def test_handle_bytes_rate_limited_increments_error_metric(self, analyzer):
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._uprobe_cert_rate_limiter = bucket
+
+        _, der = self._cert_der(cn='throttled-metric.example.com')
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='uprobe_rate_limited', node_name=analyzer.metrics._node_name)._value.get()
+        analyzer._handle_uprobe_in_memory_cert(event)
+        after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='uprobe_rate_limited', node_name=analyzer.metrics._node_name)._value.get()
+        assert after == before + 1
+
+    def test_handle_bytes_repeated_forged_certs_bounded_by_rate_limiter(self, analyzer):
+        """
+        Varying the DER content (and thus the serial) on every call defeats
+        the pid+serial dedup, but the dedicated rate limiter still bounds
+        how many distinct forged certificates get fully processed per
+        second, regardless of how fast the uprobe fires.
+        """
+        from agent.analyzer import _TokenBucket
+        analyzer._uprobe_cert_rate_limiter = _TokenBucket(rate=2)
+
+        processed = 0
+        for i in range(5):
+            _, der = self._cert_der(cn=f'forged-mem{i}.example.com')
+            event = self._make_uprobe_event([self._make_bytes_arg(der)])
+            if analyzer._handle_uprobe_in_memory_cert(event):
+                processed += 1
+        assert processed == 2, "only the burst capacity (2 tokens) should be fully processed"
+        assert len(analyzer.known_certs) == 2
+
+    def test_handle_bytes_redetection_not_rate_limited(self, analyzer):
+        """
+        Re-detecting an already-known cert returns True even with the uprobe
+        rate limiter fully exhausted -- only *new* discoveries are gated.
+        """
+        from agent.analyzer import _TokenBucket
+        _, der = self._cert_der(cn='redetect.example.com')
+        event = self._make_uprobe_event([self._make_bytes_arg(der)])
+        analyzer._handle_uprobe_in_memory_cert(event)
+        assert len(analyzer.known_certs) == 1
+
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._uprobe_cert_rate_limiter = bucket
+        result = analyzer._handle_uprobe_in_memory_cert(event)
+        assert result is True
+        assert len(analyzer.known_certs) == 1
+
     def test_handle_bytes_two_distinct_certs_both_stored(self, analyzer):
         """Two different certs from separate bytes_arg events are both stored."""
         _, der1 = self._cert_der('a.example.com')
@@ -8174,6 +8335,94 @@ class TestJavaNSSFIPSHooking:
         with mock.patch.object(analyzer, '_read_process_memory',
                                side_effect=[tmpl, ck_cert, der]):
             analyzer._handle_nsc_create_object(event)
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is True
+        assert len(analyzer.known_certs) == 1
+
+    def test_create_object_rate_limited_when_bucket_exhausted(self, analyzer):
+        """
+        A distinct forged certificate on every call bypasses the pid+serial
+        _known_paths dedup (a compromised/malicious process could do exactly
+        this), but the dedicated _uprobe_cert_rate_limiter still caps it.
+        """
+        import unittest.mock as mock
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0  # force exhausted
+        analyzer._uprobe_cert_rate_limiter = bucket
+
+        _, der = self._cert_der(cn='fips-throttled.example.com')
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            result = analyzer._handle_nsc_create_object(event)
+        assert result is False
+        assert len(analyzer.known_certs) == 0
+
+    def test_create_object_rate_limited_increments_error_metric(self, analyzer):
+        import unittest.mock as mock
+        from agent.analyzer import _TokenBucket
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._uprobe_cert_rate_limiter = bucket
+
+        _, der = self._cert_der(cn='fips-throttled-metric.example.com')
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        before = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='uprobe_rate_limited', node_name=analyzer.metrics._node_name)._value.get()
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        after = analyzer.metrics.cert_analysis_errors.labels(
+            error_type='uprobe_rate_limited', node_name=analyzer.metrics._node_name)._value.get()
+        assert after == before + 1
+
+    def test_create_object_repeated_forged_certs_bounded_by_rate_limiter(self, analyzer):
+        """
+        Varying the serial on every call defeats the pid+serial dedup, but
+        the dedicated rate limiter still bounds how many distinct forged
+        certificates get fully processed (extracted/logged/published) per
+        second, regardless of how fast the uprobe fires.
+        """
+        import unittest.mock as mock
+        from agent.analyzer import _TokenBucket
+        analyzer._uprobe_cert_rate_limiter = _TokenBucket(rate=2)
+
+        processed = 0
+        for i in range(5):
+            _, der = self._cert_der(cn=f'forged{i}.example.com')
+            tmpl, ck_cert, _ = self._cert_template(der)
+            event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+            with mock.patch.object(analyzer, '_read_process_memory',
+                                   side_effect=[tmpl, ck_cert, der]):
+                if analyzer._handle_nsc_create_object(event):
+                    processed += 1
+        assert processed == 2, "only the burst capacity (2 tokens) should be fully processed"
+        assert len(analyzer.known_certs) == 2
+
+    def test_create_object_redetection_not_rate_limited(self, analyzer):
+        """
+        Re-detecting an already-known cert returns True even with the uprobe
+        rate limiter fully exhausted -- only *new* discoveries are gated,
+        matching the file-based pipeline's own re-access-is-free semantics.
+        """
+        import unittest.mock as mock
+        from agent.analyzer import _TokenBucket
+        _, der = self._cert_der(cn='fips-redetect.example.com')
+        tmpl, ck_cert, _ = self._cert_template(der)
+        event = self._make_event('NSC_CreateObject', [0, self.TMPL_ADDR, 2])
+        with mock.patch.object(analyzer, '_read_process_memory',
+                               side_effect=[tmpl, ck_cert, der]):
+            analyzer._handle_nsc_create_object(event)
+        assert len(analyzer.known_certs) == 1
+
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        analyzer._uprobe_cert_rate_limiter = bucket
         with mock.patch.object(analyzer, '_read_process_memory',
                                side_effect=[tmpl, ck_cert, der]):
             result = analyzer._handle_nsc_create_object(event)
