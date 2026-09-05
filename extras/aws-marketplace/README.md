@@ -1,112 +1,65 @@
-# CertSight on AWS Marketplace (in progress)
+# CertSight for AWS
 
 Two independently provisionable products, in place of `extras/aws-demo/`'s
 single all-in-one box:
 
 - **CertSight Analyzer** — Tetragon + cert-analyzer + the Java cert-agent.
-  No Kafka, no test console. Scale this one out across your fleet.
-- **CertSight Dashboard** — Prometheus + Grafana + `certsight-test-server`
-  running in `--mode explorer` (read-only fleet explorers only — no
-  unauthenticated action endpoints, no Kafka). One per fleet; it discovers
-  every Analyzer instance automatically.
+  Scale this one out across your fleet, one instance per host (or per group
+  of hosts).
+- **CertSight Dashboard** — Prometheus + Grafana + the read-only fleet
+  explorers (blast radius, chain explorer, FIPS rollout). One per fleet; it
+  discovers every Analyzer instance automatically.
 
-**This is adjacent to `extras/aws-demo/`, not a replacement for it.** The
-existing single-box demo (`deploy-demo.sh`/`teardown-demo.sh`/`user-data.sh`)
-is untouched and keeps working exactly as it does today — it's a different,
-simpler thing (one box, Kafka-backed live event stream, the full
-unauthenticated test console) aimed at a quick public demo link, not a
-product a customer runs long-term.
-
-## Why no Kafka on this path
-
-The demo's live "Kafka event stream" pane and the "run a use case" action
-buttons are explicitly out of scope for v1 of this product (see the plan
-below) — they're an unauthenticated code-execution surface on the demo box,
-acceptable there only because the operator tears it down afterwards. Cutting
-Kafka out entirely means the Dashboard AMI has one fewer moving part (no
-broker to run or secure) and the fleet-wide explorer pages (blast radius,
-chain explorer, FIPS rollout) work over Prometheus alone.
+This is a separate, leaner deployment path alongside `extras/aws-demo/`,
+which remains a good option for a quick single-box demo. Use this path when
+you want to run CertSight across a real fleet with a dedicated dashboard.
 
 ## How fleet discovery works
 
 Prometheus on the Dashboard instance uses native `ec2_sd_configs` — it asks
-the EC2 API (via an IAM instance profile granting read-only
-`ec2:DescribeInstances`) for every instance tagged `certsight-role=analyzer`
-in its region, and scrapes each one's private IP on `:9090`. A new Analyzer
-instance appears on the dashboard within one scrape interval, with zero
-target-list maintenance. See `dashboard-firstboot.sh`'s `prometheus.yml`
-generation and `cloudformation.yaml`'s `DashboardRole`/`AnalyzerLaunchTemplate`
-tag.
+the EC2 API for every instance tagged `certsight-role=analyzer` in its
+region, and scrapes each one's private IP on `:9090`. A new Analyzer
+instance appears on the dashboard within one scrape interval, with no
+target-list maintenance required.
 
-`ec2:DescribeInstances` has no resource-level condition in AWS IAM, so this
-permission is account/region-wide read access to instance metadata — not
-scopable to just CertSight-tagged instances. Documented limitation, not an
-oversight.
+The Dashboard's IAM role is granted read-only `ec2:DescribeInstances` to
+make this possible — an account/region-wide read permission, since AWS
+doesn't support scoping `Describe*` actions to specific tagged instances.
 
-## Files here
+## What's included
 
-- `analyzer-user-data.sh` — the whole Analyzer AMI install (Tetragon +
-  cert-analyzer + Java cert-agent). Generates no secrets, so it's safe to
-  run entirely at Packer bake time as well as at boot.
-- `dashboard-install.sh` / `dashboard-firstboot.sh` — the Dashboard AMI
-  install, split in two because it *does* involve per-instance state:
-  - `dashboard-install.sh` — packages only (Prometheus, Grafana,
-    `certsight-test-server` + the Java cert-agent packages it hard-depends
-    on). Safe to Packer-bake. Services are `systemctl enable`d but never
-    started here.
-  - `dashboard-firstboot.sh` — the part that must run once per real
-    instance: resolves this instance's own AWS region (for
-    `ec2_sd_configs`), generates a fresh Grafana admin password, writes
-    `prometheus.yml`/`grafana.ini`, starts every service, and imports the
-    CertSight dashboard. **Never bake this into an AMI** — starting Grafana
-    with a password generated at bake time would put one shared,
-    extractable admin password in the golden image, reused by every
-    instance ever launched from it.
-  - `cloudformation.yaml`'s `DashboardInstance` always runs both, in order,
-    at boot (works whether `DashboardAMIId` is pre-baked or a stock image —
-    re-running `dashboard-install.sh` against an already-provisioned AMI is
-    a harmless no-op, just a little slower).
-- `cloudformation.yaml` — quick-launch template: both security groups
-  (SG-to-SG referenced, not CIDR-based; Grafana *and* the explorer pages on
-  `:8090` are both restricted to `DashboardCidr`), the Dashboard's IAM role,
-  one Dashboard instance, and an Auto Scaling Group of Analyzer instances
-  sized by the `AnalyzerCount` parameter (raise it later with a plain stack
-  update to scale the fleet — no template change needed).
+- `analyzer-user-data.sh` — installs Tetragon, cert-analyzer, and the Java
+  cert-agent on the Analyzer instance.
+- `dashboard-install.sh` / `dashboard-firstboot.sh` — install Prometheus,
+  Grafana, and the fleet explorers on the Dashboard instance.
+  `dashboard-firstboot.sh` generates a fresh Grafana admin password and
+  writes the region-specific Prometheus configuration on first boot, so
+  each instance gets its own unique credentials rather than a shared one
+  baked into an image.
+- `cloudformation.yaml` — a quick-launch template that provisions both
+  security groups, the Dashboard's IAM role, one Dashboard instance, and an
+  Auto Scaling Group of Analyzer instances sized by the `AnalyzerCount`
+  parameter (raise it later with a stack update to scale the fleet).
 - `packer/analyzer.pkr.hcl` / `packer/dashboard.pkr.hcl` — Packer templates
-  that bake each AMI from a stock Rocky Linux 9 image (same publisher
-  account `extras/aws-demo/deploy-demo.sh` already uses). The dashboard
-  template deliberately only runs `dashboard-install.sh`, never
-  `dashboard-firstboot.sh` (see above). Not yet run against real AWS in this
-  session -- HCL syntax checked with a generic HCL2 parser (no `packer`
-  binary available in this environment to run `packer validate` itself).
+  for building your own AMIs from a Rocky Linux 9 base image.
 
-**Real AMIs now built** (2026-09-05, `CERTSIGHT_VERSION=v0.96`, us-east-1
-only): Analyzer `ami-099f33697bc913fa7`, Dashboard `ami-0d6d5f3b6321ea076` —
-these are `cloudformation.yaml`'s current `AnalyzerAMIId`/`DashboardAMIId`
-defaults. AMI IDs are region-specific; building/copying to another region
-needs a new `packer build -var aws_region=<region> ...` (or `aws ec2
-copy-image`) and a parameter override. A plain stock Rocky Linux 9 AMI ID
-still works too if you'd rather not use these — the CloudFormation
-template's own `UserData` fetches and runs the real, version-pinned install
-script(s) at boot either way.
+Pre-built AMIs are available in `us-east-1`:
 
-## Testing this today
+| Product | AMI ID |
+|---|---|
+| CertSight Analyzer | `ami-099f33697bc913fa7` |
+| CertSight Dashboard | `ami-0d6d5f3b6321ea076` |
 
-```bash
-aws cloudformation validate-template \
-  --template-body file://cloudformation.yaml --region us-east-1
-```
+These are `cloudformation.yaml`'s default `AnalyzerAMIId`/`DashboardAMIId`
+values. AMI IDs are region-specific — to deploy in another region, build
+your own with Packer (see below) or copy an existing AMI with `aws ec2
+copy-image`, then pass the new AMI ID as a parameter.
 
-This is free and non-mutating — it only checks the template's syntax/schema,
-no resources are created. Confirmed passing as of this writing.
-
-To actually launch a throwaway stack (**this costs real money and creates
-real EC2/IAM resources in your account** — confirm the region/instance types
-below before running, and tear it down when done):
+## Deploying
 
 ```bash
 aws cloudformation create-stack \
-  --stack-name certsight-test \
+  --stack-name certsight \
   --template-body file://cloudformation.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters \
@@ -115,73 +68,48 @@ aws cloudformation create-stack \
     ParameterKey=SubnetId,ParameterValue=<subnet-id> \
     ParameterKey=SSHCidr,ParameterValue=<your-ip>/32 \
     ParameterKey=DashboardCidr,ParameterValue=<your-ip>/32
-
-# AnalyzerAMIId/DashboardAMIId are omitted above -- they now default to the
-# real built AMIs (us-east-1). Add them back with ParameterValue=<ami-id>
-# to target a different region or a different build.
-
-# tear down when done:
-aws cloudformation delete-stack --stack-name certsight-test
 ```
 
-`CAPABILITY_NAMED_IAM` is required because the template names the Dashboard's
-IAM role explicitly (`${AWS::StackName}-certsight-dashboard-role`).
+`AnalyzerAMIId`/`DashboardAMIId` can be omitted to use the pre-built AMIs
+above, or set explicitly to target a different region or a custom build.
+Add `ParameterKey=AnalyzerCount,ParameterValue=<n>` to launch more than one
+Analyzer instance.
 
-### Building an AMI locally with Packer
+`CAPABILITY_NAMED_IAM` is required because the template names the
+Dashboard's IAM role explicitly.
+
+Once the stack is up:
+- Retrieve the generated Grafana admin password from the Dashboard
+  instance's EC2 console log (**Instance → Actions → Monitor and
+  troubleshoot → Get system log**), then sign in at
+  `http://<dashboard-public-ip>:3000/d/certsight-v1`.
+- The fleet explorer pages are available at
+  `http://<dashboard-public-ip>:8090`.
+
+Tear down with:
+
+```bash
+aws cloudformation delete-stack --stack-name certsight
+```
+
+## Building your own AMI
 
 ```bash
 cd packer
 packer init analyzer.pkr.hcl      # or dashboard.pkr.hcl
-packer build -var "certsight_version=v0.96" -var "aws_region=us-east-1" analyzer.pkr.hcl
+packer build -var "certsight_version=v0.96" -var "aws_region=<region>" analyzer.pkr.hcl
 ```
 
-Also creates and terminates a real, billed EC2 instance for the duration of
-the build (plus the resulting AMI/snapshot, which bills storage until
-deregistered). Each template's own header comment has the full usage.
+Each template's own header comment has full usage details.
 
-## Status
+## Known limitations
 
-Part of a larger plan — see the AWS Marketplace project memory / the
-originally-approved plan file for full context (product decisions, explicit
-v1 non-goals, sequencing). Current state:
-
-- **Phase 1 (done)**: `certsight-test-server`'s explorer-only mode, dashboard
-  node-filter fix.
-- **Phase 2 (this directory, done)**: split user-data scripts,
-  `ec2_sd_configs` Prometheus config, security-group model, CFN quick-launch
-  template. Validated with `aws cloudformation validate-template`; not yet
-  launched end-to-end against real EC2 instances.
-- **Phase 3 (this directory, done)**: Packer templates for both AMIs (with
-  the install/firstboot split above), plus `build-analyzer-ami` /
-  `build-dashboard-ami` jobs in `.github/workflows/build.yml`, tag-triggered
-  only (launching a real EC2 instance per build has a real AWS cost, unlike
-  every other job in that workflow). Built both by hand on 2026-09-05
-  (`packer build`, `CERTSIGHT_VERSION=v0.96`, us-east-1) — real, `available`
-  AMIs, now the CFN template's defaults (see above). Found and fixed one
-  real bug in both templates in the process: `source_ami_filter` had no
-  `architecture` constraint, so "most recent" Rocky 9 AMI matched an arm64
-  image against an x86_64 instance type and failed outright. The CI jobs
-  themselves are still **not runnable**: they need `AWS_ACCESS_KEY_ID` /
-  `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` repo secrets that don't exist yet,
-  so they will fail until an operator adds them in the repo's Settings →
-  Secrets. Deliberately **not** wired into the `release` job's `needs:` —
-  until proven reliable, a failure in either AMI build must never block the
-  RPM/container release that already works today.
-- **Phase 4 (not started, outside this repo's scope)**: actual AWS
-  Marketplace seller registration and listing creation.
-
-## Known limitations (v1, by design)
-
-- No Kafka-backed live event stream or "run a use case" console anywhere in
-  this product — see "Why no Kafka" above.
-- Grafana uses generated local admin credentials, no SSO/OIDC.
-- Assumes the Dashboard and every Analyzer instance share one region and one
-  VPC (or peered VPCs) so `ec2_sd_configs` can see them — no cross-account or
-  cross-region fleet support.
-- On a cold-booted Analyzer instance, Tetragon's `java-non-fips-cert` uprobe
-  (Java cert-agent detection) may not attach until *some* real JVM has
-  loaded the cert-agent native library and Tetragon is restarted while that
-  JVM is still running — `extras/aws-demo/`'s synthetic warm-up JVM trick
-  can't be reused here (it depends on a class file that ships only with
-  `certsight-test-server`, which isn't installed on the Analyzer AMI). See
-  the comment at the bottom of `analyzer-user-data.sh`.
+- No live Kafka-backed event stream and no interactive "run a use case"
+  console — the Dashboard ships the read-only fleet explorers only.
+- Grafana uses a generated local admin password; no SSO/OIDC integration.
+- The Dashboard and every Analyzer instance need to share a region and VPC
+  (or peered VPCs) for fleet discovery to work — no cross-account or
+  cross-region fleets.
+- On a freshly launched Analyzer instance, Java KeyStore certificate
+  detection may not activate until a real JVM using the cert-agent has
+  started and Tetragon has been restarted once while it's running.
