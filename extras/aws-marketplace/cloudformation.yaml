@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CertSight -- one Dashboard instance + a scalable fleet of Analyzer
+  instances, pre-wired so Prometheus on the Dashboard discovers Analyzer
+  instances automatically via EC2 tags (no manual target list). This is the
+  Marketplace "quick launch" template for the two-AMI product split
+  documented in extras/aws-marketplace/README.md -- it does not touch or
+  replace extras/aws-demo/, which remains a separate, single-box demo.
+
+Parameters:
+  CertSightVersion:
+    Type: String
+    Description: >-
+      Tagged CertSight release to install (must have RPM/Tetragon-policy
+      release assets, e.g. v0.96). Also selects which tagged copy of
+      analyzer-user-data.sh / dashboard-user-data.sh gets fetched at boot.
+    Default: v0.96
+  AnalyzerAMIId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      CertSight Analyzer AMI ID for this region. On a real AWS Marketplace
+      subscription this is populated automatically from the listing. Before
+      that pipeline exists, a plain stock Rocky Linux 9 AMI ID also works
+      here -- this stack's own UserData fetches and runs the real,
+      version-pinned analyzer-user-data.sh at boot regardless of whether the
+      AMI was pre-baked by Packer or not (pre-baking is a boot-speed/offline
+      optimization for the eventual Marketplace listing, not something this
+      template depends on).
+  DashboardAMIId:
+    Type: AWS::EC2::Image::Id
+    Description: CertSight Dashboard AMI ID for this region (see AnalyzerAMIId above).
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: SSH key pair for both instance types.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch into. Must contain SubnetId below.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      Subnet for the Dashboard and all Analyzer instances. A single subnet
+      keeps this first version simple; Analyzer instances only need to reach
+      the Dashboard's security group, not each other.
+  SSHCidr:
+    Type: String
+    Description: CIDR allowed to SSH into any instance (e.g. 203.0.113.7/32). No default -- unlike extras/aws-demo/, this template never opens SSH to 0.0.0.0/0.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+  DashboardCidr:
+    Type: String
+    Description: CIDR allowed to reach the Grafana dashboard on :3000 (e.g. your office/VPN CIDR, or 10.0.0.0/8 for VPC-internal only). No default -- this is a customer-facing product, not a public demo link.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+  AnalyzerCount:
+    Type: Number
+    Description: Number of Analyzer instances to launch (can be changed later by updating the stack).
+    Default: 1
+    MinValue: 1
+    MaxValue: 100
+  AnalyzerInstanceType:
+    Type: String
+    Default: t3.small
+  DashboardInstanceType:
+    Type: String
+    Default: t3.medium
+
+Resources:
+  # ── Security groups (SG-to-SG references, not CIDRs, so this works across
+  #    subnets in the VPC without hand-maintained IP lists) ─────────────────
+  DashboardSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CertSight Dashboard -- Grafana and the explorer pages restricted to DashboardCidr, SSH restricted to SSHCidr
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Ref DashboardCidr
+          Description: Grafana dashboard
+        - IpProtocol: tcp
+          FromPort: 8090
+          ToPort: 8090
+          CidrIp: !Ref DashboardCidr
+          Description: certsight-test-server explorer pages (blast radius, chain explorer, FIPS rollout) -- same trust boundary as Grafana
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHCidr
+          Description: SSH
+      Tags:
+        - Key: Name
+          Value: certsight-dashboard-sg
+
+  AnalyzerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CertSight Analyzer -- Prometheus metrics reachable only from the Dashboard SG, SSH restricted to SSHCidr
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHCidr
+          Description: SSH
+      Tags:
+        - Key: Name
+          Value: certsight-analyzer-sg
+
+  # Separate from AnalyzerSecurityGroup's own SecurityGroupIngress list
+  # because it references DashboardSecurityGroup's ID -- inlining it there
+  # would create a circular Fn::GetAtt dependency between the two groups.
+  AnalyzerIngressFromDashboard:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AnalyzerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9090
+      ToPort: 9090
+      SourceSecurityGroupId: !Ref DashboardSecurityGroup
+      Description: cert-analyzer Prometheus metrics, scraped by the Dashboard instance only
+
+  # ── IAM: Dashboard needs read-only ec2:DescribeInstances for Prometheus's
+  #    ec2_sd_configs fleet discovery. This is an account/region-wide read
+  #    permission -- EC2's Describe* actions have no resource-level
+  #    condition to scope it down further to just CertSight-tagged
+  #    instances (documented limitation, not a bug in this template). ──────
+  DashboardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-certsight-dashboard-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: certsight-ec2-describe-instances
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: '*'
+
+  DashboardInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref DashboardRole
+
+  # ── Dashboard: exactly one instance ─────────────────────────────────────
+  DashboardInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref DashboardAMIId
+      InstanceType: !Ref DashboardInstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref DashboardSecurityGroup
+      IamInstanceProfile: !Ref DashboardInstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: certsight-dashboard
+      # This AMI is expected to be pre-baked (Packer, see this directory's
+      # build pipeline) with dashboard-user-data.sh already run -- this
+      # UserData only fetches and re-runs the *same, version-pinned* script
+      # on boot, which is idempotent-ish (see that script's own header), so
+      # it also works unmodified against a stock Rocky 9 AMI for manual
+      # testing before the Packer pipeline exists.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          export CERTSIGHT_VERSION="${CertSightVersion}"
+          curl -fsSL -o /tmp/dashboard-user-data.sh \
+            "https://raw.githubusercontent.com/bensanmorris/security_observability/${CertSightVersion}/extras/aws-marketplace/dashboard-user-data.sh"
+          bash /tmp/dashboard-user-data.sh
+
+  # ── Analyzer fleet: an Auto Scaling Group rather than N fixed resources or
+  #    a Fn::ForEach loop -- lets AnalyzerCount be raised later (customer
+  #    scaling their fleet) by a plain stack update instead of a template
+  #    change, and needs no CloudFormation transform. ────────────────────────
+  AnalyzerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-certsight-analyzer'
+      LaunchTemplateData:
+        ImageId: !Ref AnalyzerAMIId
+        InstanceType: !Ref AnalyzerInstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref AnalyzerSecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: certsight-analyzer
+              # This is the tag Prometheus's ec2_sd_configs filters on (see
+              # dashboard-user-data.sh) -- it's what makes fleet discovery
+              # automatic. Do not rename without updating that script too.
+              - Key: certsight-role
+                Value: analyzer
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            export CERTSIGHT_VERSION="${CertSightVersion}"
+            curl -fsSL -o /tmp/analyzer-user-data.sh \
+              "https://raw.githubusercontent.com/bensanmorris/security_observability/${CertSightVersion}/extras/aws-marketplace/analyzer-user-data.sh"
+            bash /tmp/analyzer-user-data.sh
+
+  AnalyzerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${AWS::StackName}-certsight-analyzers'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AnalyzerLaunchTemplate
+        Version: !GetAtt AnalyzerLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref AnalyzerCount
+      MaxSize: !Ref AnalyzerCount
+      DesiredCapacity: !Ref AnalyzerCount
+      VPCZoneIdentifier:
+        - !Ref SubnetId
+
+Outputs:
+  DashboardPrivateIp:
+    Value: !GetAtt DashboardInstance.PrivateIp
+  DashboardURL:
+    Description: Grafana dashboard (reachable from DashboardCidr only) -- see the instance's console log for the generated admin password.
+    Value: !Sub 'http://${DashboardInstance.PublicIp}:3000/d/certsight-v1'
+  ExplorersURL:
+    Description: certsight-test-server explorer pages (blast radius, chain explorer, FIPS rollout) -- also restricted to DashboardCidr.
+    Value: !Sub 'http://${DashboardInstance.PublicIp}:8090'
+  DashboardConsoleLogHint:
+    Value: !Sub 'aws ec2 get-console-output --instance-id ${DashboardInstance} --output text | grep -A2 "Grafana admin credentials"'
+  AnalyzerAutoScalingGroupName:
+    Description: Update this stack (or the ASG directly) with a new AnalyzerCount to scale the fleet.
+    Value: !Ref AnalyzerAutoScalingGroup
