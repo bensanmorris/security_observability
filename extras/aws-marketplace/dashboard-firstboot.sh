@@ -118,10 +118,21 @@ echo "=================================================================="
 unset GRAFANA_ADMIN_PASSWORD
 set -x
 systemctl start grafana-server
+# systemctl is-active alone isn't enough here: it reports "active" as soon as
+# the process starts (Type=simple), not once Grafana has actually finished
+# initializing and bound its HTTP listener -- polling the real API instead
+# is what the step below genuinely needs. Confirmed live: without this,
+# the datasource/dashboard-import step below hit a bare "Connection refused"
+# and crashed (urllib raises URLError, not the HTTPError subclass _post()
+# catches, for a refused connection -- it propagated out uncaught) even
+# though systemctl already considered the unit active.
 for i in $(seq 1 30); do
-    systemctl is-active --quiet grafana-server && break
+    if curl -fsS -o /dev/null "http://127.0.0.1:3000/api/health"; then
+        break
+    fi
     sleep 2
 done
+curl -fsS -o /dev/null "http://127.0.0.1:3000/api/health" || echo "WARNING: grafana-server did not answer /api/health in time -- the datasource/dashboard import below will likely fail"
 
 echo "=== [4/4] Prometheus datasource + CertSight dashboard import, certsight-test-server start ==="
 # GRAFANA_ADMIN_PASSWORD was unset above once 'set -x' resumed (so it never
