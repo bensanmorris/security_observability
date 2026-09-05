@@ -881,10 +881,137 @@ jobs:
         echo "- \`${{ steps.rpms.outputs.jni_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- \`${{ steps.rpms.outputs.dep_name }}\`" >> $GITHUB_STEP_SUMMARY
 
+  build-analyzer-ami:
+    name: Build CertSight Analyzer AMI
+    runs-on: ubuntu-latest
+    # Tag-only, unlike every other build-* job here -- this launches a real,
+    # billed EC2 instance via Packer to bake the AMI. Running it on every PR
+    # or branch push (like the RPM/container jobs above, which cost nothing
+    # extra) would mean an AWS cost on every commit; a tagged release is the
+    # only event where publishing a new AMI is actually intended.
+    #
+    # Requires repo secrets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+    # AWS_REGION with permission to launch/terminate EC2 instances and
+    # register AMIs -- not configured yet as of this job's addition, so this
+    # will fail until an operator adds them in the repo's Settings > Secrets.
+    if: github.ref_type == 'tag'
+    needs: changes
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+    - uses: hashicorp/setup-packer@v3
+
+    - name: packer init
+      working-directory: extras/aws-marketplace/packer
+      run: packer init analyzer.pkr.hcl
+
+    - name: packer build
+      working-directory: extras/aws-marketplace/packer
+      run: |
+        packer build \
+          -var "certsight_version=${{ github.ref_name }}" \
+          -var "aws_region=${{ secrets.AWS_REGION || 'us-east-1' }}" \
+          analyzer.pkr.hcl
+
+    - name: Read resulting AMI ID
+      id: ami
+      working-directory: extras/aws-marketplace/packer
+      run: |
+        AMI_ID=$(python3 -c "import json; print(json.load(open('analyzer-manifest.json'))['builds'][-1]['artifact_id'].split(':')[1])")
+        echo "ami_id=${AMI_ID}" >> $GITHUB_OUTPUT
+
+    - name: Upload manifest as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: analyzer-ami-manifest-${{ github.ref_name }}
+        path: extras/aws-marketplace/packer/analyzer-manifest.json
+        retention-days: 90
+
+    - name: Build summary
+      run: |
+        echo "## CertSight Analyzer AMI" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Region:** \`${{ secrets.AWS_REGION || 'us-east-1' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**AMI ID:** \`${{ steps.ami.outputs.ami_id }}\`" >> $GITHUB_STEP_SUMMARY
+
+  build-dashboard-ami:
+    name: Build CertSight Dashboard AMI
+    runs-on: ubuntu-latest
+    # Same tag-only/cost rationale as build-analyzer-ami above.
+    if: github.ref_type == 'tag'
+    needs: changes
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+    - uses: hashicorp/setup-packer@v3
+
+    - name: packer init
+      working-directory: extras/aws-marketplace/packer
+      run: packer init dashboard.pkr.hcl
+
+    - name: packer build
+      working-directory: extras/aws-marketplace/packer
+      run: |
+        packer build \
+          -var "certsight_version=${{ github.ref_name }}" \
+          -var "aws_region=${{ secrets.AWS_REGION || 'us-east-1' }}" \
+          dashboard.pkr.hcl
+
+    - name: Read resulting AMI ID
+      id: ami
+      working-directory: extras/aws-marketplace/packer
+      run: |
+        AMI_ID=$(python3 -c "import json; print(json.load(open('dashboard-manifest.json'))['builds'][-1]['artifact_id'].split(':')[1])")
+        echo "ami_id=${AMI_ID}" >> $GITHUB_OUTPUT
+
+    - name: Upload manifest as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: dashboard-ami-manifest-${{ github.ref_name }}
+        path: extras/aws-marketplace/packer/dashboard-manifest.json
+        retention-days: 90
+
+    - name: Build summary
+      run: |
+        echo "## CertSight Dashboard AMI" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Region:** \`${{ secrets.AWS_REGION || 'us-east-1' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**AMI ID:** \`${{ steps.ami.outputs.ami_id }}\`" >> $GITHUB_STEP_SUMMARY
+
   release:
     name: Publish Release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
+    # Deliberately does NOT depend on build-analyzer-ami/build-dashboard-ami
+    # above: those need AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY repo secrets
+    # that don't exist yet (see their own comments), so they're expected to
+    # fail on every tag until an operator adds them. Gating this job on them
+    # would silently block the RPM/container release that already works
+    # today. Once the secrets exist and both AMI jobs are proven reliable,
+    # add them to this needs: list and wire their ami_id outputs into the
+    # release body below.
     needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms, build-test-server-rpm, build-test-server-container ]
     permissions:
       contents: write

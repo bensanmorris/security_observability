@@ -170,20 +170,26 @@ Resources:
       Tags:
         - Key: Name
           Value: certsight-dashboard
-      # This AMI is expected to be pre-baked (Packer, see this directory's
-      # build pipeline) with dashboard-user-data.sh already run -- this
-      # UserData only fetches and re-runs the *same, version-pinned* script
-      # on boot, which is idempotent-ish (see that script's own header), so
-      # it also works unmodified against a stock Rocky 9 AMI for manual
-      # testing before the Packer pipeline exists.
+      # dashboard-install.sh (packages, safe to Packer-bake) and
+      # dashboard-firstboot.sh (secrets + this instance's own region,
+      # deliberately NEVER baked -- see that script's header) always run
+      # here in sequence at boot, regardless of whether DashboardAMIId is a
+      # pre-baked CertSight AMI or a stock Rocky 9 one: on a pre-baked AMI,
+      # dashboard-install.sh's package-install steps are harmless no-ops
+      # (packages already present) and this just costs a little boot time;
+      # on a stock AMI it does the real install. Either way,
+      # dashboard-firstboot.sh is the part that must run per-instance no
+      # matter what.
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -euo pipefail
           export CERTSIGHT_VERSION="${CertSightVersion}"
-          curl -fsSL -o /tmp/dashboard-user-data.sh \
-            "https://raw.githubusercontent.com/bensanmorris/security_observability/${CertSightVersion}/extras/aws-marketplace/dashboard-user-data.sh"
-          bash /tmp/dashboard-user-data.sh
+          for script in dashboard-install.sh dashboard-firstboot.sh; do
+            curl -fsSL -o "/tmp/${!script}" \
+              "https://raw.githubusercontent.com/bensanmorris/security_observability/${CertSightVersion}/extras/aws-marketplace/${!script}"
+            bash "/tmp/${!script}"
+          done
 
   # ── Analyzer fleet: an Auto Scaling Group rather than N fixed resources or
   #    a Fn::ForEach loop -- lets AnalyzerCount be raised later (customer
