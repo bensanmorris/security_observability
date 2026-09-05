@@ -35,6 +35,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 try:
@@ -123,7 +124,7 @@ def _consume_kafka(broadcaster: EventBroadcaster, host: str, port: int, topic: s
             time.sleep(5)
 
 
-def make_handler(broadcaster: EventBroadcaster, prometheus_url: str):
+def make_handler(broadcaster: Optional[EventBroadcaster], prometheus_url: str, mode: str):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             logger.info("%s - %s", self.address_string(), fmt % args)
@@ -137,7 +138,10 @@ def make_handler(broadcaster: EventBroadcaster, prometheus_url: str):
             elif path == "/api/use-cases":
                 self._serve_use_cases()
             elif path == "/api/events":
-                self._serve_events()
+                if mode != "full":
+                    self.send_error(404)
+                else:
+                    self._serve_events()
             elif path == "/blast-radius":
                 self._serve_generated_page(blast_radius, "blast radius")
             elif path == "/fleet-blast-radius":
@@ -154,7 +158,10 @@ def make_handler(broadcaster: EventBroadcaster, prometheus_url: str):
         def do_POST(self):
             path = urlparse(self.path).path
             if path.startswith("/api/run/"):
-                self._run_use_case(path[len("/api/run/"):])
+                if mode != "full":
+                    self.send_error(404)
+                else:
+                    self._run_use_case(path[len("/api/run/"):])
             else:
                 self.send_error(404)
 
@@ -318,15 +325,32 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mode",
+        choices=("full", "explorer"),
+        default=os.environ.get("TEST_SERVER_MODE", "full"),
+        help=(
+            "'full' (default, env: TEST_SERVER_MODE) is today's test console: "
+            "live Kafka event stream + the /api/run/* use-case actions, which "
+            "execute real side effects (spawn a JVM, generate certs, bind "
+            "ports) with no authentication. 'explorer' drops all of that and "
+            "serves only the read-only fleet explorer pages (blast radius, "
+            "chain explorer, FIPS rollout) against Prometheus -- no Kafka "
+            "connection is attempted and --kafka-host/--kafka-port are not "
+            "required. Intended for a shared/production dashboard host where "
+            "the action endpoints would be an unauthenticated code-execution "
+            "surface."
+        ),
+    )
+    parser.add_argument(
         "--kafka-host",
         default=os.environ.get("TEST_SERVER_KAFKA_HOST"),
-        help="Kafka broker hostname/IP cert-analyzer is publishing to (env: TEST_SERVER_KAFKA_HOST)",
+        help="Kafka broker hostname/IP cert-analyzer is publishing to (env: TEST_SERVER_KAFKA_HOST) -- required in --mode full only",
     )
     parser.add_argument(
         "--kafka-port",
         type=int,
         default=os.environ.get("TEST_SERVER_KAFKA_PORT"),
-        help="Kafka broker port (env: TEST_SERVER_KAFKA_PORT)",
+        help="Kafka broker port (env: TEST_SERVER_KAFKA_PORT) -- required in --mode full only",
     )
     parser.add_argument(
         "--topic",
@@ -347,10 +371,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
-    if args.kafka_host is None or args.kafka_port is None:
+    if args.mode not in ("full", "explorer"):
+        parser.error(f"invalid --mode {args.mode!r} (env TEST_SERVER_MODE) -- must be 'full' or 'explorer'")
+    if args.mode == "full" and (args.kafka_host is None or args.kafka_port is None):
         parser.error(
-            "--kafka-host/--kafka-port are required "
-            "(pass as flags, or set TEST_SERVER_KAFKA_HOST/TEST_SERVER_KAFKA_PORT)"
+            "--kafka-host/--kafka-port are required in --mode full "
+            "(pass as flags, or set TEST_SERVER_KAFKA_HOST/TEST_SERVER_KAFKA_PORT, "
+            "or pass --mode explorer to run without Kafka)"
         )
     return args
 
@@ -358,20 +385,28 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    broadcaster = EventBroadcaster()
-    consumer_thread = threading.Thread(
-        target=_consume_kafka,
-        args=(broadcaster, args.kafka_host, args.kafka_port, args.topic),
-        daemon=True,
-    )
-    consumer_thread.start()
+    broadcaster: Optional[EventBroadcaster] = None
+    if args.mode == "full":
+        broadcaster = EventBroadcaster()
+        consumer_thread = threading.Thread(
+            target=_consume_kafka,
+            args=(broadcaster, args.kafka_host, args.kafka_port, args.topic),
+            daemon=True,
+        )
+        consumer_thread.start()
 
-    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster, args.prometheus_url))
+    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster, args.prometheus_url, args.mode))
     server.daemon_threads = True
-    logger.info(
-        "serving on http://%s:%d (Kafka: %s:%d, topic '%s'; Prometheus: %s)",
-        args.bind, args.port, args.kafka_host, args.kafka_port, args.topic, args.prometheus_url,
-    )
+    if args.mode == "full":
+        logger.info(
+            "serving on http://%s:%d in 'full' mode (Kafka: %s:%d, topic '%s'; Prometheus: %s)",
+            args.bind, args.port, args.kafka_host, args.kafka_port, args.topic, args.prometheus_url,
+        )
+    else:
+        logger.info(
+            "serving on http://%s:%d in 'explorer' mode (no Kafka; Prometheus: %s)",
+            args.bind, args.port, args.prometheus_url,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

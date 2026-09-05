@@ -199,7 +199,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "cert_analyzer_healthy",
+              "expr": "cert_analyzer_healthy{node_name=~\"$node\"}",
               "instant": true,
               "format": "table",
               "refId": "A"
@@ -209,7 +209,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "tetragon_connected",
+              "expr": "tetragon_connected{node_name=~\"$node\"}",
               "instant": true,
               "format": "table",
               "refId": "B"
@@ -219,7 +219,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "tetragon_policies_total{state=\"enabled\"}",
+              "expr": "tetragon_policies_total{state=\"enabled\",node_name=~\"$node\"}",
               "instant": true,
               "format": "table",
               "refId": "D"
@@ -239,7 +239,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "rate(kafka_delivery_errors_total[5m])",
+              "expr": "rate(kafka_delivery_errors_total{node_name=~\"$node\"}[5m])",
               "instant": true,
               "format": "table",
               "refId": "F"
@@ -1039,7 +1039,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "time() - cert_analyzer_last_event_timestamp",
+              "expr": "time() - cert_analyzer_last_event_timestamp{node_name=~\"$node\"}",
               "instant": true,
               "format": "table",
               "refId": "G"
@@ -3485,7 +3485,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "tetragon_policy_info",
+              "expr": "tetragon_policy_info{node_name=~\"$node\"}",
               "instant": true,
               "format": "table",
               "refId": "A"
