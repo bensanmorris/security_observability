@@ -80,10 +80,15 @@ oversight.
   session -- HCL syntax checked with a generic HCL2 parser (no `packer`
   binary available in this environment to run `packer validate` itself).
 
-Until a Packer build has actually been published, `AnalyzerAMIId` and
-`DashboardAMIId` can simply be a stock Rocky Linux 9 AMI ID — the
-CloudFormation template's own `UserData` fetches and runs the real,
-version-pinned install script(s) at boot either way.
+**Real AMIs now built** (2026-09-05, `CERTSIGHT_VERSION=v0.96`, us-east-1
+only): Analyzer `ami-099f33697bc913fa7`, Dashboard `ami-0d6d5f3b6321ea076` —
+these are `cloudformation.yaml`'s current `AnalyzerAMIId`/`DashboardAMIId`
+defaults. AMI IDs are region-specific; building/copying to another region
+needs a new `packer build -var aws_region=<region> ...` (or `aws ec2
+copy-image`) and a parameter override. A plain stock Rocky Linux 9 AMI ID
+still works too if you'd rather not use these — the CloudFormation
+template's own `UserData` fetches and runs the real, version-pinned install
+script(s) at boot either way.
 
 ## Testing this today
 
@@ -105,13 +110,15 @@ aws cloudformation create-stack \
   --template-body file://cloudformation.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters \
-    ParameterKey=AnalyzerAMIId,ParameterValue=<rocky-9-ami-id> \
-    ParameterKey=DashboardAMIId,ParameterValue=<rocky-9-ami-id> \
     ParameterKey=KeyName,ParameterValue=<your-key-pair> \
     ParameterKey=VpcId,ParameterValue=<vpc-id> \
     ParameterKey=SubnetId,ParameterValue=<subnet-id> \
     ParameterKey=SSHCidr,ParameterValue=<your-ip>/32 \
     ParameterKey=DashboardCidr,ParameterValue=<your-ip>/32
+
+# AnalyzerAMIId/DashboardAMIId are omitted above -- they now default to the
+# real built AMIs (us-east-1). Add them back with ParameterValue=<ami-id>
+# to target a different region or a different build.
 
 # tear down when done:
 aws cloudformation delete-stack --stack-name certsight-test
@@ -148,12 +155,18 @@ v1 non-goals, sequencing). Current state:
   the install/firstboot split above), plus `build-analyzer-ami` /
   `build-dashboard-ami` jobs in `.github/workflows/build.yml`, tag-triggered
   only (launching a real EC2 instance per build has a real AWS cost, unlike
-  every other job in that workflow). **Not runnable yet**: those jobs need
-  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` repo secrets
-  that don't exist yet, so they will fail until an operator adds them in the
-  repo's Settings → Secrets. Deliberately **not** wired into the `release`
-  job's `needs:` — until proven reliable, a failure in either AMI build must
-  never block the RPM/container release that already works today.
+  every other job in that workflow). Built both by hand on 2026-09-05
+  (`packer build`, `CERTSIGHT_VERSION=v0.96`, us-east-1) — real, `available`
+  AMIs, now the CFN template's defaults (see above). Found and fixed one
+  real bug in both templates in the process: `source_ami_filter` had no
+  `architecture` constraint, so "most recent" Rocky 9 AMI matched an arm64
+  image against an x86_64 instance type and failed outright. The CI jobs
+  themselves are still **not runnable**: they need `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` repo secrets that don't exist yet,
+  so they will fail until an operator adds them in the repo's Settings →
+  Secrets. Deliberately **not** wired into the `release` job's `needs:` —
+  until proven reliable, a failure in either AMI build must never block the
+  RPM/container release that already works today.
 - **Phase 4 (not started, outside this repo's scope)**: actual AWS
   Marketplace seller registration and listing creation.
 

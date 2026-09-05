@@ -61,6 +61,7 @@ source "amazon-ebs" "analyzer" {
       name                = "Rocky-9-EC2-Base-9*"
       root-device-type    = "ebs"
       virtualization-type = "hvm"
+      architecture        = "x86_64"
     }
     owners      = ["792107900819"]
     most_recent = true

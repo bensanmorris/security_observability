@@ -17,18 +17,24 @@ Parameters:
     Default: v0.96
   AnalyzerAMIId:
     Type: AWS::EC2::Image::Id
+    Default: ami-099f33697bc913fa7
     Description: >-
-      CertSight Analyzer AMI ID for this region. On a real AWS Marketplace
-      subscription this is populated automatically from the listing. Before
-      that pipeline exists, a plain stock Rocky Linux 9 AMI ID also works
-      here -- this stack's own UserData fetches and runs the real,
+      CertSight Analyzer AMI ID for this region. Default is the
+      packer/analyzer.pkr.hcl build from CERTSIGHT_VERSION v0.96, us-east-1
+      only -- AMI IDs are region-specific, so override this for any other
+      region (either build one there with the same Packer template, or copy
+      this AMI across with `aws ec2 copy-image`). On a real AWS Marketplace
+      subscription this would instead be populated automatically from the
+      listing per-region. A plain stock Rocky Linux 9 AMI ID also still
+      works here -- this stack's own UserData fetches and runs the real,
       version-pinned analyzer-user-data.sh at boot regardless of whether the
-      AMI was pre-baked by Packer or not (pre-baking is a boot-speed/offline
-      optimization for the eventual Marketplace listing, not something this
-      template depends on).
+      AMI was pre-baked by Packer or not.
   DashboardAMIId:
     Type: AWS::EC2::Image::Id
-    Description: CertSight Dashboard AMI ID for this region (see AnalyzerAMIId above).
+    Default: ami-0d6d5f3b6321ea076
+    Description: >-
+      CertSight Dashboard AMI ID for this region (see AnalyzerAMIId above --
+      same caveats: us-east-1 only, override elsewhere).
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: SSH key pair for both instance types.
