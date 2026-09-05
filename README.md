@@ -11,6 +11,8 @@ CertSight provides real-time certificate observability for Linux via eBPF withou
 
 **Live AWS demo:** [Dashboard](http://certsight-demo.com:3000/d/certsight-v1) · [Test console (includes **fleet blast radius, fleet missing intermediate, and fleet FIPS rollout explorers**)](http://certsight-demo.com:8090)
 
+**Deploy your own AWS fleet:** [CertSight Analyzer + Dashboard AMIs](extras/aws-marketplace/README.md) — free, self-serve CloudFormation quick-launch, no AWS Marketplace listing required
+
 ---
 
 ## The problem
@@ -285,3 +287,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [Consuming Kafka events (Python)](extras/kafka/CONSUMER-README.md) - Client code examples for reading `certificate_discovered` and `certificate_accessed` events
 - [Detection test console](extras/test-server/TEST-SERVER-README.md) - Local web UI for triggering individual certificate detections and watching the resulting Kafka events live
 - [AWS deployment demo](extras/aws-demo/README.md) - Stand up the full CertSight stack on a single EC2 instance with public dashboard and test console URLs
+- [AWS Analyzer + Dashboard AMIs](extras/aws-marketplace/README.md) - Deploy CertSight as two separately provisionable products (fleet of Analyzer instances + one Dashboard instance) via a CloudFormation quick-launch template — free, no AWS Marketplace seller registration needed
