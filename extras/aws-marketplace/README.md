@@ -47,8 +47,8 @@ Pre-built AMIs are available in `us-east-1`:
 
 | Product | AMI ID |
 |---|---|
-| CertSight Analyzer | `ami-099f33697bc913fa7` |
-| CertSight Dashboard | `ami-0d6d5f3b6321ea076` |
+| CertSight Analyzer | `ami-0a13dd8bd71f5e2a4` |
+| CertSight Dashboard | `ami-051cc74348b46bf48` |
 
 These are `cloudformation.yaml`'s default `AnalyzerAMIId`/`DashboardAMIId`
 values. AMI IDs are region-specific — to deploy in another region, build
@@ -97,7 +97,7 @@ aws cloudformation delete-stack --stack-name certsight
 ```bash
 cd packer
 packer init analyzer.pkr.hcl      # or dashboard.pkr.hcl
-packer build -var "certsight_version=v0.96" -var "aws_region=<region>" analyzer.pkr.hcl
+packer build -var "certsight_version=v0.97" -var "aws_region=<region>" analyzer.pkr.hcl
 ```
 
 Each template's own header comment has full usage details.

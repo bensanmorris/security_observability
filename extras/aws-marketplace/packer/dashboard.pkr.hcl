@@ -17,7 +17,7 @@
 #   cd extras/aws-marketplace/packer
 #   packer init dashboard.pkr.hcl
 #   packer build \
-#     -var "certsight_version=v0.96" \
+#     -var "certsight_version=v0.97" \
 #     -var "aws_region=us-east-1" \
 #     dashboard.pkr.hcl
 #
@@ -35,7 +35,7 @@ packer {
 
 variable "certsight_version" {
   type        = string
-  default     = "v0.96"
+  default     = "v0.97"
   description = "Tagged CertSight release to bake in (must have RPM release assets)."
 }
 

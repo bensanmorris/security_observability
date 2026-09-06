@@ -12,26 +12,25 @@ Parameters:
     Type: String
     Description: >-
       Tagged CertSight release to install (must have RPM/Tetragon-policy
-      release assets, e.g. v0.96). Also selects which tagged copy of
-      analyzer-user-data.sh / dashboard-user-data.sh gets fetched at boot.
-    Default: v0.96
+      release assets, e.g. v0.97). Also selects which tagged copy of
+      analyzer-user-data.sh / dashboard-user-data.sh / dashboard-firstboot.sh
+      gets fetched at boot.
+    Default: v0.97
   AnalyzerAMIId:
     Type: AWS::EC2::Image::Id
-    Default: ami-099f33697bc913fa7
+    Default: ami-0a13dd8bd71f5e2a4
     Description: >-
       CertSight Analyzer AMI ID for this region. Default is the
-      packer/analyzer.pkr.hcl build from CERTSIGHT_VERSION v0.96, us-east-1
+      packer/analyzer.pkr.hcl build from CERTSIGHT_VERSION v0.97, us-east-1
       only -- AMI IDs are region-specific, so override this for any other
       region (either build one there with the same Packer template, or copy
-      this AMI across with `aws ec2 copy-image`). On a real AWS Marketplace
-      subscription this would instead be populated automatically from the
-      listing per-region. A plain stock Rocky Linux 9 AMI ID also still
-      works here -- this stack's own UserData fetches and runs the real,
-      version-pinned analyzer-user-data.sh at boot regardless of whether the
-      AMI was pre-baked by Packer or not.
+      this AMI across with `aws ec2 copy-image`). A plain stock Rocky Linux 9
+      AMI ID also still works here -- this stack's own UserData fetches and
+      runs the real, version-pinned analyzer-user-data.sh at boot regardless
+      of whether the AMI was pre-baked by Packer or not.
   DashboardAMIId:
     Type: AWS::EC2::Image::Id
-    Default: ami-0d6d5f3b6321ea076
+    Default: ami-051cc74348b46bf48
     Description: >-
       CertSight Dashboard AMI ID for this region (see AnalyzerAMIId above --
       same caveats: us-east-1 only, override elsewhere).
