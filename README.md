@@ -7,7 +7,6 @@
 ![Tests](https://github.com/bensanmorris/security_observability/actions/workflows/test.yml/badge.svg)
 ![CI Pipeline](https://github.com/bensanmorris/security_observability/actions/workflows/ci.yml/badge.svg)
 ![Build](https://github.com/bensanmorris/security_observability/actions/workflows/build.yml/badge.svg)
-![Quick Test](https://github.com/bensanmorris/security_observability/actions/workflows/quick-test.yml/badge.svg)
 [![codecov](https://codecov.io/gh/bensanmorris/security_observability/branch/main/graph/badge.svg)](https://codecov.io/gh/bensanmorris/security_observability)
 
 CertSight provides real-time certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes in **cloud native, bare metal and openshift / k8s environments.**
