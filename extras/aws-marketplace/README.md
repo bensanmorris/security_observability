@@ -78,13 +78,39 @@ Analyzer instance.
 `CAPABILITY_NAMED_IAM` is required because the template names the
 Dashboard's IAM role explicitly.
 
-Once the stack is up:
-- Retrieve the generated Grafana admin password from the Dashboard
-  instance's EC2 console log (**Instance → Actions → Monitor and
-  troubleshoot → Get system log**), then sign in at
-  `http://<dashboard-public-ip>:3000/d/certsight-v1`.
-- The fleet explorer pages are available at
-  `http://<dashboard-public-ip>:8090`.
+### What you get
+
+- One or more **CertSight Analyzer** instances, each already running
+  Tetragon and cert-analyzer, reporting metrics on `:9090`.
+- One **CertSight Dashboard** instance running:
+  - Grafana, at `http://<dashboard-public-ip>:3000/d/certsight-v1` —
+    retrieve the generated admin password from its EC2 console log
+    (**Instance → Actions → Monitor and troubleshoot → Get system log**).
+  - The read-only fleet explorers, at `http://<dashboard-public-ip>:8090`
+    (blast radius, fleet blast radius, chain explorer, fleet chain
+    explorer, FIPS rollout). There's no interactive test console or action
+    buttons here — see "Known limitations" below.
+
+### Verifying it works
+
+The Dashboard starts empty until an Analyzer instance actually observes
+some certificate activity. To see it working end to end, SSH into an
+Analyzer instance and generate a bit of real traffic:
+
+```bash
+ssh -i <your-key>.pem rocky@<analyzer-public-ip>
+
+# read the system CA trust bundle, and make a couple of outbound TLS connections
+sudo cat /etc/pki/tls/certs/ca-bundle.crt > /dev/null
+curl -s -o /dev/null https://example.com
+curl -s -o /dev/null https://github.com
+```
+
+Within about a minute (Prometheus's scrape interval), you should see:
+- Certificate data appear on the Grafana dashboard.
+- The explorer pages at `:8090` populate with real chains and hosts
+  (`/blast-radius`, `/chain-explorer`, `/fleet-fips-rollout`, etc.)
+  instead of showing no data.
 
 Tear down with:
 
