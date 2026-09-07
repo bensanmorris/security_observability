@@ -90,6 +90,12 @@ echo "=== [6/6] cert-analyzer chart (analyzer DaemonSet + test-console pod + Tra
 # kafka.bootstrapServers/demo.testServer.kafka.host point at the MAIN demo
 # instance's Kafka, which install-kafka.sh there only advertises on its
 # private IP when WITH_K8S_NODE=true was set for that instance.
+# demo.testServer.prometheusUrl points at that same instance's real
+# Prometheus (:9091) rather than the chart's own unreachable in-cluster
+# demo-prometheus default -- needed for the test console's fleet
+# blast-radius/chain-explorer/FIPS-rollout panels specifically (everything
+# else works without it). Also needs deploy-k8s-node.sh's SG rule + a
+# firewalld port opened on the main instance -- see its comments.
 IMAGE_TAG_ARGS=()
 if [[ -n "${K8S_ANALYZER_IMAGE_TAG}" ]]; then
     IMAGE_TAG_ARGS=(--set "image.tag=${K8S_ANALYZER_IMAGE_TAG}" --set "demo.testServer.image.tag=${K8S_ANALYZER_IMAGE_TAG}")
@@ -103,7 +109,8 @@ helm install cert-analyzer "${WORKDIR}/certsight-src/extras/helm/cert-analyzer" 
     --set monitoring.prometheusRule.enabled=false \
     --set kafka.bootstrapServers="${MAIN_PRIVATE_IP}:9092" \
     --set demo.testServer.enabled=true \
-    --set demo.testServer.kafka.host="${MAIN_PRIVATE_IP}"
+    --set demo.testServer.kafka.host="${MAIN_PRIVATE_IP}" \
+    --set demo.testServer.prometheusUrl="http://${MAIN_PRIVATE_IP}:9091"
 
 for i in $(seq 1 30); do
     kubectl get pods -n certsight 2>/dev/null | grep -q "cert-test-server.*Running" && break

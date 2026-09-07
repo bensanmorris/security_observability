@@ -104,7 +104,7 @@ else
     echo "    Using existing security group ${K8S_SG_ID}"
 fi
 
-echo "==> Cross-instance rules (Kafka producer -> main box, metrics scrape -> this box)..."
+echo "==> Cross-instance rules (Kafka producer -> main box, metrics scrape -> this box, Prometheus query API -> main box)..."
 # Kafka: this node pushes to the main instance's broker. No-op (AWS ignores
 # duplicate rule errors here via || true) if already added by a prior run.
 aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${SG_ID}" \
@@ -113,6 +113,14 @@ aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${
 # Metrics: the main box's Prometheus pulls from this node's cert-analyzer :9090.
 aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${K8S_SG_ID}" \
     --ip-permissions "IpProtocol=tcp,FromPort=9090,ToPort=9090,UserIdGroupPairs=[{GroupId=${SG_ID},Description='Prometheus scrape from main box'}]" \
+    2>/dev/null || true
+# Prometheus query API: this node's test-server queries it directly for the
+# fleet blast-radius/chain-explorer/FIPS-rollout panels (demo.testServer.
+# prometheusUrl below) -- found missing in testing (those panels errored
+# with a DNS lookup failure against the chart's unreachable in-cluster
+# demo-prometheus default before this was wired up).
+aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${SG_ID}" \
+    --ip-permissions "IpProtocol=tcp,FromPort=9091,ToPort=9091,UserIdGroupPairs=[{GroupId=${K8S_SG_ID},Description='Prometheus query API from k8s node'}]" \
     2>/dev/null || true
 
 echo "==> Key pair (reusing the main instance's ${KEY_NAME})..."
@@ -225,6 +233,19 @@ fi
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SCRIPT_DIR}/${KEY_NAME}.pem" "rocky@${PUBLIC_IP}" "
     sudo sed -i \"s|^\(\\\\s*- targets:\).*|\\\\1 ['localhost:9090', '${K8S_NODE_PRIVATE_IP}:9090']|\" /etc/prometheus/prometheus.yml
     sudo systemctl restart prometheus
+    # Belt-and-suspenders local-firewall opens -- covers both the fresh-deploy
+    # path (WITH_K8S_NODE=true, where install-kafka.sh already opens 9092
+    # itself) and the bolt-on-to-an-existing-main-box path this script is
+    # actually for, where nothing else ever opens either port. Found the
+    # hard way: the security group alone wasn't enough for either 9092
+    # (Kafka) or 9091 (Prometheus query API, needed for the test-server's
+    # fleet blast-radius/chain-explorer/FIPS-rollout panels) -- firewalld
+    # rejected both with 'No route to host' until opened explicitly.
+    if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet firewalld; then
+        sudo firewall-cmd --permanent --add-port=9091/tcp
+        sudo firewall-cmd --permanent --add-port=9092/tcp
+        sudo firewall-cmd --reload
+    fi
 " || echo "    WARNING: could not wire Prometheus automatically -- see extras/aws-demo/README.md to do it by hand."
 
 echo ""
