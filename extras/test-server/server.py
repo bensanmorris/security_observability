@@ -124,7 +124,7 @@ def _consume_kafka(broadcaster: EventBroadcaster, host: str, port: int, topic: s
             time.sleep(5)
 
 
-def make_handler(broadcaster: Optional[EventBroadcaster], prometheus_url: str, mode: str):
+def make_handler(broadcaster: Optional[EventBroadcaster], prometheus_url: str, mode: str, disabled_use_cases: frozenset = frozenset()):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             logger.info("%s - %s", self.address_string(), fmt % args)
@@ -206,6 +206,7 @@ def make_handler(broadcaster: Optional[EventBroadcaster], prometheus_url: str, m
                     ],
                 }
                 for uc in USE_CASES
+                if uc.id not in disabled_use_cases
             ]
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
@@ -216,7 +217,7 @@ def make_handler(broadcaster: Optional[EventBroadcaster], prometheus_url: str, m
 
         def _run_use_case(self, use_case_id):
             use_case = USE_CASES_BY_ID.get(use_case_id)
-            if use_case is None:
+            if use_case is None or use_case_id in disabled_use_cases:
                 self.send_error(404, f"unknown use case '{use_case_id}'")
                 return
 
@@ -370,6 +371,17 @@ def parse_args() -> argparse.Namespace:
             "fallback is attempted"
         ),
     )
+    parser.add_argument(
+        "--disable-use-cases",
+        default=os.environ.get("TEST_SERVER_DISABLE_USE_CASES", ""),
+        help=(
+            "comma-separated use case ids to hide from the console and refuse "
+            "to run (default: none, env: TEST_SERVER_DISABLE_USE_CASES) -- for "
+            "deployments where a use case's underlying detection is known not "
+            "to work, e.g. the containerized k8s node's uprobe-dependent cases "
+            "(see extras/test-server/TEST-SERVER-README.md)"
+        ),
+    )
     args = parser.parse_args()
     if args.mode not in ("full", "explorer"):
         parser.error(f"invalid --mode {args.mode!r} (env TEST_SERVER_MODE) -- must be 'full' or 'explorer'")
@@ -385,6 +397,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    disabled_use_cases = frozenset(
+        uc_id.strip() for uc_id in args.disable_use_cases.split(",") if uc_id.strip()
+    )
+    unknown = disabled_use_cases - USE_CASES_BY_ID.keys()
+    if unknown:
+        logger.warning("--disable-use-cases / TEST_SERVER_DISABLE_USE_CASES named unknown use case id(s), ignoring: %s", ", ".join(sorted(unknown)))
+        disabled_use_cases -= unknown
+    if disabled_use_cases:
+        logger.info("use cases disabled for this deployment: %s", ", ".join(sorted(disabled_use_cases)))
+
     broadcaster: Optional[EventBroadcaster] = None
     if args.mode == "full":
         broadcaster = EventBroadcaster()
@@ -395,7 +417,7 @@ def main() -> None:
         )
         consumer_thread.start()
 
-    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster, args.prometheus_url, args.mode))
+    server = ThreadingHTTPServer((args.bind, args.port), make_handler(broadcaster, args.prometheus_url, args.mode, disabled_use_cases))
     server.daemon_threads = True
     if args.mode == "full":
         logger.info(

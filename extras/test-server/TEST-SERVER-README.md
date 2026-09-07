@@ -54,7 +54,17 @@ streamed live via Server-Sent Events as it arrives.
   the `openssl3-cert-load.yaml` (or `openssl3-cert-load-rhel8.yaml` on
   RHEL8) TracingPolicy loaded, and `/usr/lib64/libssl.so.3` present on
   this host -- that's the literal path both policies hook, and the one
-  this use case loads via `ctypes`
+  this use case loads via `ctypes`. **On k8s/OpenShift this use case
+  doesn't work and is disabled by default** (`demo.testServer.disabledUseCases`)
+  -- the container variant of the policy hooks the *node's* libssl via
+  `/procRoot/1/root/...`, but this pod's own container image ships a
+  separate copy of `libssl.so.3`, so the uprobe never sees its calls; see
+  `extras/PRESENTATION-QA.md`'s Kubernetes Deployment section
+- The "load a certificate into a Java KeyStore (JCA)" use case is also
+  disabled by default on k8s/OpenShift, for a different reason: its
+  `java-non-fips-cert.yaml` TracingPolicy has never been ported to the
+  Helm chart, so nothing is loaded to catch the event even though the
+  `jattach` step itself would likely still work in-cluster
 - For the "Certificate blast radius explorer" link specifically: a
   reachable Prometheus scraping cert-analyzer's `/metrics` endpoint (see
   `--prometheus-url` / `TEST_SERVER_PROMETHEUS_URL` below) -- not required

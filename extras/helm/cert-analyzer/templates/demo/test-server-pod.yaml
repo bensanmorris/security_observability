@@ -83,6 +83,8 @@ spec:
       # this needs a real Prometheus query endpoint for blast_radius.py/chain_explorer.py,
       # e.g. demo.prometheus below.
       value: {{ .Values.demo.testServer.prometheusUrl | default (printf "http://demo-prometheus.%s.svc:9090" .Release.Namespace) | quote }}
+    - name: TEST_SERVER_DISABLE_USE_CASES
+      value: {{ .Values.demo.testServer.disabledUseCases | join "," | quote }}
     - name: TEST_SERVER_CERT_DIR
       # Overrides use_cases.py's /dev/shm default -- /dev/shm is a private per-container
       # tmpfs here, invisible to cert-analyzer's /host bind mount no matter what's written

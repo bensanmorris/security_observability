@@ -65,6 +65,22 @@ class TestParseArgsMode:
         with pytest.raises(SystemExit):
             ts.parse_args()
 
+    def test_disable_use_cases_default_empty(self, monkeypatch):
+        monkeypatch.delenv('TEST_SERVER_DISABLE_USE_CASES', raising=False)
+        monkeypatch.setattr(sys, 'argv', [
+            'server.py', '--kafka-host', 'localhost', '--kafka-port', '9092',
+        ])
+        args = ts.parse_args()
+        assert args.disable_use_cases == ''
+
+    def test_disable_use_cases_via_env_var(self, monkeypatch):
+        monkeypatch.setenv('TEST_SERVER_DISABLE_USE_CASES', 'in-memory-asn1-cert,java-jca-keystore')
+        monkeypatch.setattr(sys, 'argv', [
+            'server.py', '--kafka-host', 'localhost', '--kafka-port', '9092',
+        ])
+        args = ts.parse_args()
+        assert args.disable_use_cases == 'in-memory-asn1-cert,java-jca-keystore'
+
 
 # ── make_handler() routing in each mode ─────────────────────────────────────
 
@@ -72,9 +88,9 @@ class _RunningServer:
     """Starts make_handler(...) on an ephemeral localhost port for the
     duration of a `with` block, on its own daemon thread."""
 
-    def __init__(self, broadcaster, prometheus_url, mode):
+    def __init__(self, broadcaster, prometheus_url, mode, disabled_use_cases=frozenset()):
         self._httpd = ThreadingHTTPServer(
-            ('127.0.0.1', 0), ts.make_handler(broadcaster, prometheus_url, mode)
+            ('127.0.0.1', 0), ts.make_handler(broadcaster, prometheus_url, mode, disabled_use_cases)
         )
         self.port = self._httpd.server_address[1]
 
@@ -151,3 +167,45 @@ class TestFullModeRoutingUnchanged:
             assert resp.status == 404
             assert b'unknown use case' in body
             conn.close()
+
+
+class TestDisabledUseCases:
+    """--disable-use-cases / TEST_SERVER_DISABLE_USE_CASES -- for
+    deployments (e.g. the k8s node) where a use case's underlying detection
+    is known not to work, see extras/test-server/TEST-SERVER-README.md."""
+
+    def test_disabled_use_case_hidden_from_metadata(self):
+        broadcaster = ts.EventBroadcaster()
+        with _RunningServer(broadcaster, _UNREACHABLE_PROMETHEUS_URL, 'full', frozenset({'in-memory-asn1-cert'})) as s:
+            conn = http.client.HTTPConnection('127.0.0.1', s.port, timeout=2)
+            conn.request('GET', '/api/use-cases')
+            resp = conn.getresponse()
+            body = resp.read()
+            conn.close()
+            assert resp.status == 200
+            assert b'in-memory-asn1-cert' not in body
+            assert b'tls-bind-probe' in body
+
+    def test_disabled_use_case_run_endpoint_404(self):
+        """Refuses to run even if called directly, same 'unknown use case'
+        response as an id that doesn't exist -- doesn't reveal it's disabled
+        rather than nonexistent."""
+        broadcaster = ts.EventBroadcaster()
+        with _RunningServer(broadcaster, _UNREACHABLE_PROMETHEUS_URL, 'full', frozenset({'in-memory-asn1-cert'})) as s:
+            conn = http.client.HTTPConnection('127.0.0.1', s.port, timeout=2)
+            conn.request('POST', '/api/run/in-memory-asn1-cert')
+            resp = conn.getresponse()
+            body = resp.read()
+            conn.close()
+            assert resp.status == 404
+            assert b'unknown use case' in body
+
+    def test_other_use_cases_unaffected(self):
+        broadcaster = ts.EventBroadcaster()
+        with _RunningServer(broadcaster, _UNREACHABLE_PROMETHEUS_URL, 'full', frozenset({'in-memory-asn1-cert'})) as s:
+            conn = http.client.HTTPConnection('127.0.0.1', s.port, timeout=2)
+            conn.request('POST', '/api/run/does-not-exist')
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            assert resp.status == 404  # still the normal unknown-id path, not somehow gated

@@ -224,6 +224,18 @@ demo:
     # demo-prometheus Service in this release's own namespace (see templates/demo/
     # test-server-pod.yaml); override only if pointing at a Prometheus outside this chart.
     prometheusUrl: ""
+    # Use case ids to hide from the console and refuse to run -- for deployments where a
+    # use case's underlying detection is known not to work. In particular, openssl3-cert-load's
+    # uprobes are pinned to the *host's* libssl.so.3 (see policies/openssl3-cert-load.yaml's
+    # /procRoot/1/root/ path) -- a containerized workload with its own libssl copy baked into
+    # its image (different inode/build, e.g. this test-server's own UBI9 image) never executes
+    # code from that patched file, so the uprobe silently never fires for it. java-jca-keystore
+    # has no k8s TracingPolicy at all yet (java-non-fips-cert.yaml only exists for bare metal
+    # under tetragon-policies/experimental/, never ported to this chart). Both confirmed broken
+    # in-cluster 2026-09-07 -- see extras/test-server/TEST-SERVER-README.md.
+    disabledUseCases:
+    - in-memory-asn1-cert
+    - java-jca-keystore
     resources:
       limits:
         memory: 256Mi
