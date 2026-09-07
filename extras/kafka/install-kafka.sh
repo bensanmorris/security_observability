@@ -176,6 +176,18 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable --now kafka
 
+    # The security group (or equivalent) is the real access control -- this
+    # is just the host's own local firewall, which the listener bind change
+    # above needs too. Confirmed the hard way: the SG allowed it, Kafka
+    # listened on 0.0.0.0, but a remote client still got "No route to host"
+    # because firewalld's public zone only had whatever ports the caller
+    # (e.g. user-data.sh) had explicitly opened for other services -- 9092
+    # was never one of them until a real client actually needed it.
+    if [ -n "${KAFKA_ADVERTISED_HOST}" ] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        sudo firewall-cmd --permanent --add-port="${KAFKA_PORT}/tcp"
+        sudo firewall-cmd --reload
+    fi
+
     # ── Verify ────────────────────────────────────────────────────────────────
     echo "[6/6] Verifying Kafka..."
     if ! systemctl is-active --quiet kafka; then
