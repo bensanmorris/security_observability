@@ -11,6 +11,12 @@ SERVICE_FILE="/etc/systemd/system/prometheus.service"
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-admin}"
+# Comma-separated extra host:port targets to scrape alongside the local
+# cert-analyzer, e.g. a second, k8s-hosted analyzer node's private IP:9090 --
+# see extras/aws-demo/deploy-k8s-node.sh. Same node_name/namespace labels
+# from Tetragon already flow through, so the existing Grafana dashboard's
+# $node/$namespace filters just work without any dashboard changes.
+EXTRA_SCRAPE_TARGETS="${EXTRA_SCRAPE_TARGETS:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DASHBOARD_JSON="${SCRIPT_DIR}/examples/grafana-dashboard.json"
@@ -52,6 +58,13 @@ if [ "${PROMETHEUS_ALREADY_RUNNING}" = false ]; then
     sudo mkdir -p "${CONFIG_DIR}"
 
     if [ ! -f "${CONFIG_DIR}/prometheus.yml" ]; then
+        TARGETS_LIST="'localhost:${CERT_ANALYZER_PORT}'"
+        if [ -n "${EXTRA_SCRAPE_TARGETS}" ]; then
+            IFS=',' read -ra _extra_targets <<< "${EXTRA_SCRAPE_TARGETS}"
+            for _t in "${_extra_targets[@]}"; do
+                TARGETS_LIST="${TARGETS_LIST}, '${_t}'"
+            done
+        fi
         sudo tee "${CONFIG_DIR}/prometheus.yml" > /dev/null <<EOF
 global:
   scrape_interval: 15s
@@ -64,7 +77,7 @@ scrape_configs:
     # as a staircase in Grafana instead of a smooth line.
     scrape_interval: 60s
     static_configs:
-      - targets: ['localhost:${CERT_ANALYZER_PORT}']
+      - targets: [${TARGETS_LIST}]
 EOF
         echo "    Written ${CONFIG_DIR}/prometheus.yml"
     else

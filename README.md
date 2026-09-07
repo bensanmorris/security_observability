@@ -11,7 +11,13 @@
 
 CertSight provides real-time certificate observability for Linux via eBPF without private keys, CA impersonation, or application changes in **cloud native, bare metal and openshift / k8s environments.**
 
-**Live AWS demo:** [Dashboard](http://certsight-demo.com:3000/d/certsight-v1) · [Test console (includes **fleet blast radius, fleet missing intermediate, and fleet FIPS rollout explorers**)](http://certsight-demo.com:8090)
+**Live AWS demo:**
+
+| Demo | URL | Shows |
+|---|---|---|
+| Dashboard (Grafana) | [certsight-demo.com:3000](http://certsight-demo.com:3000/d/certsight-v1) | Fleet-wide view across both nodes below |
+| Bare-metal test console | [certsight-demo.com:8090](http://certsight-demo.com:8090) | Fleet blast radius, missing intermediate, and FIPS rollout explorers |
+| K8s test console | [k8s.certsight-demo.com:30090](http://k8s.certsight-demo.com:30090) | Trigger cert activity inside a real pod — real Kubernetes pod/namespace attribution |
 
 **Deploy your own AWS fleet:** [CertSight Analyzer + Dashboard](extras/aws-marketplace/README.md) — a CloudFormation quick-launch template with pre-built AMIs
 

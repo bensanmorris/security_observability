@@ -134,6 +134,32 @@ Useful overrides (env vars):
 | `TETRAGON_VERSION` | `1.7.0` | Any [Tetragon release](https://github.com/cilium/tetragon/releases) with a `tetragon-vX.Y.Z-amd64.tar.gz` asset |
 | `KEY_NAME` | `certsight-demo` | Reused across runs if it already exists in AWS |
 | `SSH_CIDR` | auto-detected | Set to `x.x.x.x/32` to override |
+| `WITH_K8S_NODE` | `false` | Also launch the optional k8s pod-attribution node once the main instance is up -- see below |
+
+### Optional: k8s pod-attribution node
+
+`WITH_K8S_NODE=true ./deploy-demo.sh` launches a **second** EC2 instance
+(k3s + upstream Tetragon + the `cert-analyzer` Helm chart + its own test
+console pod) once the main instance is up, publishing into the same
+Kafka/Prometheus/Grafana -- nothing new to look at in the dashboard itself,
+it just shows up as a second node. What it demonstrates that the main
+instance can't: **real Kubernetes pod/namespace attribution** (Tetragon's
+`process.pod` field only populates when it's watching a real k8s control
+plane). Roughly doubles instance-hour cost while it's running. Already
+have a main instance up? Run `./deploy-k8s-node.sh` directly instead of
+redeploying.
+
+It gets its own Elastic IP and, when the main instance itself has DNS
+configured, a subdomain under the same hosted zone (`K8S_SUBDOMAIN`,
+default `k8s` -- e.g. `k8s.certsight-demo.com`). Unlike the main instance's
+test console, its NodePort has **no nginx/rate limiting in front of it**
+yet -- keep that in mind before leaving it up and public for long.
+
+| Demo | URL | Shows |
+|---|---|---|
+| Dashboard (Grafana) | `http://certsight-demo.com:3000/d/certsight-v1` | Both nodes side by side -- filter `$node`/`$namespace` |
+| Bare-metal test console | `http://certsight-demo.com:8090` | Trigger cert activity on the main host |
+| K8s test console *(optional, `WITH_K8S_NODE=true`)* | `http://k8s.certsight-demo.com:30090` | Trigger cert activity inside a real pod -- pod/namespace attribution |
 
 Install progress/errors on the instance itself:
 
@@ -161,6 +187,10 @@ wrong IP. Fix it any time:
 ./teardown-demo.sh --delete-key # also deletes the SSH key pair (local .pem + AWS)
 ```
 
+Also tears down the k8s node (instance, security group, Elastic IP, DNS
+record) if one was added, whether via `WITH_K8S_NODE=true` or a later
+`./deploy-k8s-node.sh` run.
+
 ---
 
 ## How it works
@@ -172,10 +202,11 @@ install, following the same steps as the main [README](../../README.md) and
 [DASHBOARDS.md](../DASHBOARDS.md) -- nothing here is a special "demo-only"
 install path.
 
-State from a deploy (instance ID, security group ID, region, key name) is
-kept in `.certsight-demo-state` (gitignored) so `teardown-demo.sh` knows
-what to remove. Only one demo stack can be tracked at a time this way -- run
-`teardown-demo.sh` before starting another.
+State from a deploy (instance ID, security group ID, region, key name, and
+the k8s node's own equivalents if added) is kept in `.certsight-demo-state`
+(gitignored) so `teardown-demo.sh` knows what to remove. Only one demo
+stack can be tracked at a time this way -- run `teardown-demo.sh` before
+starting another.
 
 ## Troubleshooting
 

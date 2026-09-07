@@ -13,7 +13,20 @@ exec > >(tee -a /var/log/certsight-demo-install.log) 2>&1
 set -x
 
 CERTSIGHT_VERSION="${CERTSIGHT_VERSION:-v0.73}"
+# Separate from CERTSIGHT_VERSION above: that one names a real GitHub Release
+# (RPMs + the tetragon-policies tarball, via RELEASE_BASE below, must exist
+# at that tag). This one is just the git ref cloned for *scripts*
+# (apply-policies.sh, install-prometheus.sh, install-kafka.sh, dashboard
+# json) -- defaults to the same tag, but deploy-demo.sh overrides it
+# separately to a branch when WITH_K8S_NODE=true, for a script fix
+# (install-kafka.sh's KAFKA_ADVERTISED_HOST) that isn't in any release yet.
+CERTSIGHT_GIT_REF="${CERTSIGHT_GIT_REF:-${CERTSIGHT_VERSION}}"
 TETRAGON_VERSION="${TETRAGON_VERSION:-1.7.0}"
+# Set (uncommented, to "true") by deploy-demo.sh when WITH_K8S_NODE=true --
+# makes Kafka advertise this box's own private IP instead of localhost-only,
+# so the optional second, k8s-hosted analyzer node can reach it. See
+# extras/aws-demo/deploy-k8s-node.sh.
+WITH_K8S_NODE="${WITH_K8S_NODE:-false}"
 REPO_URL="https://github.com/bensanmorris/security_observability.git"
 RELEASE_BASE="https://github.com/bensanmorris/security_observability/releases/download/${CERTSIGHT_VERSION}"
 WORKDIR="/opt/certsight-install"
@@ -44,7 +57,7 @@ done
 systemctl is-active --quiet tetragon || echo "WARNING: tetragon.service did not become active in time"
 
 echo "=== [4/9] CertSight source (for scripts: apply-policies.sh, install-prometheus.sh, dashboard json) ==="
-git clone --depth 1 --branch "${CERTSIGHT_VERSION}" "${REPO_URL}" certsight-src
+git clone --depth 1 --branch "${CERTSIGHT_GIT_REF}" "${REPO_URL}" certsight-src
 
 echo "=== [5/9] Tetragon policies ==="
 curl -fsSL -o tetragon-policies.tar.gz "${RELEASE_BASE}/tetragon-policies-${CERTSIGHT_VERSION}.tar.gz"
@@ -76,7 +89,18 @@ sed -i \
 
 echo "=== [8/9] Kafka (single-node, throwaway, KRaft mode) ==="
 dnf -y install java-11-openjdk-headless || true
-"${WORKDIR}/certsight-src/extras/kafka/install-kafka.sh"
+if [[ "${WITH_K8S_NODE}" == "true" ]]; then
+    # IMDSv2 -- deploy-demo.sh launches with HttpTokens=required, so a plain
+    # metadata GET without a token is refused.
+    IMDS_TOKEN="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60")"
+    OWN_PRIVATE_IP="$(curl -fsS -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+        http://169.254.169.254/latest/meta-data/local-ipv4)"
+    echo "    WITH_K8S_NODE=true -- advertising Kafka on ${OWN_PRIVATE_IP} instead of localhost-only"
+    KAFKA_ADVERTISED_HOST="${OWN_PRIVATE_IP}" "${WORKDIR}/certsight-src/extras/kafka/install-kafka.sh"
+else
+    "${WORKDIR}/certsight-src/extras/kafka/install-kafka.sh"
+fi
 
 systemctl enable --now cert-analyzer
 

@@ -27,7 +27,20 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-t3.medium}"
 KEY_NAME="${KEY_NAME:-certsight-demo}"
 SG_NAME="${SG_NAME:-certsight-demo-sg}"
 VOLUME_SIZE_GB="${VOLUME_SIZE_GB:-20}"
+# WITH_K8S_NODE=true also launches a second, k8s-hosted analyzer node once
+# this instance is up (see deploy-k8s-node.sh) -- optional, off by default,
+# roughly doubles instance-hour cost while the demo is running. Not yet
+# released: install-kafka.sh's KAFKA_ADVERTISED_HOST support (needed for the
+# k8s node to reach this instance's Kafka) isn't in any CERTSIGHT_VERSION
+# tag yet, so this forces CERTSIGHT_GIT_REF (script source only -- NOT the
+# RPM/release tag) to this branch. Once merged and tagged, this special-case
+# default should go away.
+WITH_K8S_NODE="${WITH_K8S_NODE:-false}"
+if [[ "${WITH_K8S_NODE}" == "true" && -z "${CERTSIGHT_GIT_REF:-}" ]]; then
+    CERTSIGHT_GIT_REF="k8s-pod-attribution-demo"
+fi
 CERTSIGHT_VERSION="${CERTSIGHT_VERSION:-v0.73}"
+CERTSIGHT_GIT_REF="${CERTSIGHT_GIT_REF:-${CERTSIGHT_VERSION}}"
 TETRAGON_VERSION="${TETRAGON_VERSION:-1.7.0}"
 # Route 53 domain to point at the instance's Elastic IP -- set empty to skip
 # DNS entirely and just use the raw IP. Requires a hosted zone for this
@@ -116,13 +129,27 @@ fi
 
 echo "==> Launching instance..."
 USER_DATA_FILE="${SCRIPT_DIR}/user-data.sh"
+# EC2 user-data is a fresh cloud-init execution, not a shell inheriting this
+# script's environment -- WITH_K8S_NODE and CERTSIGHT_GIT_REF have to be
+# baked into the content itself, right after the shebang, for user-data.sh
+# to see them. CERTSIGHT_VERSION (the RPM/release tag) is deliberately left
+# alone here -- it stays at user-data.sh's own default unless the caller
+# also exports it themselves, since this templating only exists to carry
+# the WITH_K8S_NODE path's script-source override, not to fix the general
+# (pre-existing, separate) gap where CERTSIGHT_VERSION never reached the
+# instance either.
+if [[ "${WITH_K8S_NODE}" == "true" ]]; then
+    USER_DATA_CONTENT="$(printf '#!/bin/bash\nWITH_K8S_NODE=true\nCERTSIGHT_GIT_REF=%q\n%s' "${CERTSIGHT_GIT_REF}" "$(tail -n +2 "${USER_DATA_FILE}")")"
+else
+    USER_DATA_CONTENT="$(cat "${USER_DATA_FILE}")"
+fi
 INSTANCE_ID="$(aws ec2 run-instances --region "${AWS_REGION}" \
     --image-id "${AMI_ID}" \
     --instance-type "${INSTANCE_TYPE}" \
     --key-name "${KEY_NAME}" \
     --security-group-ids "${SG_ID}" \
     --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${VOLUME_SIZE_GB},\"VolumeType\":\"gp3\"}}]" \
-    --user-data "file://${USER_DATA_FILE}" \
+    --user-data "${USER_DATA_CONTENT}" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=certsight-demo}]" \
     --metadata-options "HttpTokens=required" \
     --credit-specification "CpuCredits=standard" \
@@ -237,3 +264,16 @@ echo ""
 echo " Both are open to the internet with no authentication."
 echo " Tear down when done:  ./teardown-demo.sh"
 echo "============================================================"
+
+if [[ "${WITH_K8S_NODE}" == "true" ]]; then
+    if [[ "${GRAFANA_UP}" == true && "${CONSOLE_UP}" == true ]]; then
+        echo ""
+        echo "==> WITH_K8S_NODE=true -- launching the second, k8s-hosted analyzer node..."
+        "${SCRIPT_DIR}/deploy-k8s-node.sh"
+    else
+        echo ""
+        echo "==> WITH_K8S_NODE=true, but the main instance didn't come up cleanly -- skipping"
+        echo "    the k8s node for now. Fix the main instance first, then run manually:"
+        echo "      ./deploy-k8s-node.sh"
+    fi
+fi
