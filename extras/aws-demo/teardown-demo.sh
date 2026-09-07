@@ -19,6 +19,13 @@ fi
 # shellcheck disable=SC1090
 source "${STATE_FILE}"
 
+if [[ -n "${K8S_NODE_INSTANCE_ID:-}" ]]; then
+    echo "==> Terminating k8s node instance ${K8S_NODE_INSTANCE_ID}..."
+    aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids "${K8S_NODE_INSTANCE_ID}" >/dev/null
+    aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids "${K8S_NODE_INSTANCE_ID}"
+    echo "    Terminated."
+fi
+
 echo "==> Terminating instance ${INSTANCE_ID} in ${AWS_REGION}..."
 aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids "${INSTANCE_ID}" >/dev/null
 aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids "${INSTANCE_ID}"
@@ -39,6 +46,17 @@ if [[ -n "${ALLOCATION_ID:-}" ]]; then
     # Termination auto-disassociates the EIP but doesn't release it -- an
     # unattached EIP keeps billing hourly until explicitly released.
     aws ec2 release-address --region "${AWS_REGION}" --allocation-id "${ALLOCATION_ID}" || true
+fi
+
+if [[ -n "${K8S_NODE_SG_ID:-}" ]]; then
+    echo "==> Deleting k8s node security group ${K8S_NODE_SG_ID}..."
+    for i in $(seq 1 12); do
+        if aws ec2 delete-security-group --region "${AWS_REGION}" --group-id "${K8S_NODE_SG_ID}" 2>/dev/null; then
+            echo "    Deleted."
+            break
+        fi
+        sleep 5
+    done
 fi
 
 echo "==> Deleting security group ${SG_ID}..."

@@ -6,11 +6,20 @@ set -euo pipefail
 # publishing (KAFKA_ENABLED=true). Not hardened for production use: no
 # TLS, no SASL, no dedicated system user -- matches cert-analyzer's own
 # PLAINTEXT default and this repo's install-prometheus.sh conventions.
+#
+# By default the broker only listens on localhost -- fine for a single-box
+# demo where cert-analyzer and Kafka are on the same host, but unreachable
+# from anywhere else. Set KAFKA_ADVERTISED_HOST (e.g. to this box's private
+# IP) to let a remote producer/consumer connect instead -- this switches the
+# listener to 0.0.0.0 so a remote client can reach it. Since there's still no
+# auth/TLS, only do this behind a security-group rule scoped to the specific
+# remote host/SG that needs it, never opened broadly.
 
 KAFKA_VERSION="3.9.0"
 SCALA_VERSION="2.13"
 KAFKA_PORT="9092"
 CONTROLLER_PORT="9093"
+KAFKA_ADVERTISED_HOST="${KAFKA_ADVERTISED_HOST:-}"
 INSTALL_ROOT="/opt"
 INSTALL_DIR="${INSTALL_ROOT}/kafka"
 CONFIG_DIR="/etc/kafka"
@@ -101,14 +110,24 @@ if [ "${KAFKA_ALREADY_RUNNING}" = false ]; then
     sudo mkdir -p "${CONFIG_DIR}"
 
     if [ ! -f "${CONFIG_DIR}/server.properties" ]; then
+        # Controller listener always stays localhost-only -- single-node, so
+        # there's never a reason for anything off-box to reach it, regardless
+        # of whether the client (PLAINTEXT) listener is exposed below.
+        if [ -n "${KAFKA_ADVERTISED_HOST}" ]; then
+            LISTEN_ADDR="0.0.0.0"
+            ADVERTISED_ADDR="${KAFKA_ADVERTISED_HOST}"
+        else
+            LISTEN_ADDR="localhost"
+            ADVERTISED_ADDR="localhost"
+        fi
         sudo tee "${CONFIG_DIR}/server.properties" > /dev/null <<EOF
 # Single-node combined broker+controller KRaft config -- testing only.
 process.roles=broker,controller
 node.id=1
 controller.quorum.voters=1@localhost:${CONTROLLER_PORT}
 
-listeners=PLAINTEXT://localhost:${KAFKA_PORT},CONTROLLER://localhost:${CONTROLLER_PORT}
-advertised.listeners=PLAINTEXT://localhost:${KAFKA_PORT}
+listeners=PLAINTEXT://${LISTEN_ADDR}:${KAFKA_PORT},CONTROLLER://localhost:${CONTROLLER_PORT}
+advertised.listeners=PLAINTEXT://${ADVERTISED_ADDR}:${KAFKA_PORT}
 inter.broker.listener.name=PLAINTEXT
 controller.listener.names=CONTROLLER
 listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
@@ -220,15 +239,22 @@ echo "Ensuring topic '${CERT_ANALYZER_ACCESS_CONNECT_TOPIC}' exists..."
     --partitions 1 --replication-factor 1 > /dev/null
 echo "    Topic ready."
 
+BOOTSTRAP_DISPLAY_HOST="${KAFKA_ADVERTISED_HOST:-localhost}"
+
 echo ""
 echo "============================================"
-echo " Kafka is running on localhost:${KAFKA_PORT}"
+if [ -n "${KAFKA_ADVERTISED_HOST}" ]; then
+    echo " Kafka is running on ${KAFKA_ADVERTISED_HOST}:${KAFKA_PORT} (reachable remotely -- make sure a"
+    echo " security-group/firewall rule scopes this to only the hosts that need it)"
+else
+    echo " Kafka is running on localhost:${KAFKA_PORT} (local only -- set KAFKA_ADVERTISED_HOST to expose it)"
+fi
 echo " Topics: ${CERT_ANALYZER_TOPIC}, ${CERT_ANALYZER_ACCESS_TOPIC}, ${CERT_ANALYZER_CONNECT_TOPIC}, ${CERT_ANALYZER_ACCESS_CONNECT_TOPIC}"
 echo ""
 echo " Point cert-analyzer at it:"
 echo "   [kafka]"
 echo "   enabled = true"
-echo "   bootstrap_servers = localhost:${KAFKA_PORT}"
+echo "   bootstrap_servers = ${BOOTSTRAP_DISPLAY_HOST}:${KAFKA_PORT}"
 echo "   topic = ${CERT_ANALYZER_TOPIC}"
 echo "   access_enabled = true   # optional -- off by default"
 echo "   access_topic = ${CERT_ANALYZER_ACCESS_TOPIC}"
