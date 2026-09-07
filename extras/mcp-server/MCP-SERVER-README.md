@@ -23,9 +23,11 @@ read-only query API.
 
 ## Setup
 
+Requires Python 3.10+ (the `mcp` SDK's minimum):
+
 ```bash
 cd extras/mcp-server
-python3 -m venv .venv && source .venv/bin/activate
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 

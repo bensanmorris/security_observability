@@ -30,11 +30,11 @@ import fleet_blast_radius  # noqa: E402
 import chain_explorer      # noqa: E402
 import fleet_fips_rollout  # noqa: E402
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 PROMETHEUS_URL = os.environ.get("CERTSIGHT_PROMETHEUS_URL", "http://127.0.0.1:9090")
 
-mcp = FastMCP("certsight")
+mcp = MCPServer("certsight")
 
 
 def _load_fleet_certs():
