@@ -4,10 +4,11 @@
 # and this repo's cert-analyzer Helm chart (with the demo test-console pod),
 # wired to publish into the main demo instance's existing Kafka/Prometheus.
 #
-# Runs as root via cloud-init on first boot. Requires two placeholders to be
-# substituted by deploy-k8s-node.sh before this is passed as --user-data:
-#   __MAIN_PRIVATE_IP__   -- the main demo instance's private IP (Kafka target)
-#   __CERTSIGHT_GIT_REF__ -- git ref to clone this repo at (branch or tag)
+# Runs as root via cloud-init on first boot. Requires three placeholders to
+# be substituted by deploy-k8s-node.sh before this is passed as --user-data:
+#   __MAIN_PRIVATE_IP__      -- the main demo instance's private IP (Kafka target)
+#   __CERTSIGHT_GIT_REF__    -- git ref to clone this repo at (branch or tag)
+#   __K8S_ANALYZER_IMAGE_TAG__ -- image tag for cert-analyzer/cert-test-server
 #
 # Progress/errors: /var/log/certsight-k8s-node-install.log
 
@@ -17,6 +18,14 @@ set -x
 
 MAIN_PRIVATE_IP="__MAIN_PRIVATE_IP__"
 CERTSIGHT_GIT_REF="__CERTSIGHT_GIT_REF__"
+# No vX.Y-ubi9 tag is ever actually published on GHCR (known gap -- see
+# project_ghcr_version_tags_never_published memory) -- the chart's own
+# default (latest-ubi9) floats with whatever's newest on main, which is
+# fine for throwaway test instances but not for a live deployment that
+# should stay pinned. Pass the immutable sha-<commit>-ubi9 for the release
+# you actually want (e.g. sha-f5c492d-ubi9 for v0.97 -- confirm via
+# `git rev-parse vX.Y` which commit a version tag maps to).
+K8S_ANALYZER_IMAGE_TAG="__K8S_ANALYZER_IMAGE_TAG__"
 REPO_URL="https://github.com/bensanmorris/security_observability.git"
 WORKDIR="/opt/certsight-k8s-install"
 mkdir -p "${WORKDIR}"
@@ -81,8 +90,13 @@ echo "=== [6/6] cert-analyzer chart (analyzer DaemonSet + test-console pod + Tra
 # kafka.bootstrapServers/demo.testServer.kafka.host point at the MAIN demo
 # instance's Kafka, which install-kafka.sh there only advertises on its
 # private IP when WITH_K8S_NODE=true was set for that instance.
+IMAGE_TAG_ARGS=()
+if [[ -n "${K8S_ANALYZER_IMAGE_TAG}" ]]; then
+    IMAGE_TAG_ARGS=(--set "image.tag=${K8S_ANALYZER_IMAGE_TAG}" --set "demo.testServer.image.tag=${K8S_ANALYZER_IMAGE_TAG}")
+fi
 helm install cert-analyzer "${WORKDIR}/certsight-src/extras/helm/cert-analyzer" \
     -n certsight --create-namespace \
+    "${IMAGE_TAG_ARGS[@]}" \
     --set scc.hostaccess.enabled=false \
     --set route.enabled=false \
     --set monitoring.serviceMonitor.enabled=false \
