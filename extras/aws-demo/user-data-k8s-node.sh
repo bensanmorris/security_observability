@@ -54,12 +54,13 @@ cat <<'EOF' > /tmp/tetragon-values.yaml
 extraHostPathMounts:
   - name: host-usr-lib64
     mountPath: /usr/lib64
-tetragon:
-  extraVolumeMounts:
-    - name: host-usr-lib64
-      mountPath: /usr/lib64
-      readOnly: true
 EOF
+# Only extraHostPathMounts -- it creates BOTH the volume and its mount on
+# its own. Adding a matching tetragon.extraVolumeMounts entry too (as an
+# earlier version of this script did, based on a spike that used `helm
+# upgrade` rather than a first `helm install`) produces a duplicate
+# mountPath and Kubernetes rejects the DaemonSet outright: "must be
+# unique" -- confirmed via `helm template` against the live chart.
 helm install tetragon cilium/tetragon -n kube-system -f /tmp/tetragon-values.yaml
 
 for i in $(seq 1 30); do
@@ -68,17 +69,18 @@ for i in $(seq 1 30); do
 done
 kubectl get pods -n kube-system -l app.kubernetes.io/name=tetragon
 
-echo "=== Applying TracingPolicies ==="
-kubectl apply -f "${WORKDIR}/certsight-src/tetragon-policies/certificate-file-access.yaml"
-kubectl apply -f "${WORKDIR}/certsight-src/tetragon-policies/experimental/tls-service-tracking.yaml"
-kubectl apply -f "${WORKDIR}/certsight-src/tetragon-policies/experimental/openssl3-cert-load.yaml"
-kubectl get tracingpolicies
-
-echo "=== [6/6] cert-analyzer chart (analyzer DaemonSet + test-console pod) ==="
-# scc/route/monitoring.* are all OpenShift-specific -- disabled here for
-# plain k8s. kafka.bootstrapServers/demo.testServer.kafka.host point at the
-# MAIN demo instance's Kafka, which install-kafka.sh there only advertises
-# on its private IP when WITH_K8S_NODE=true was set for that instance.
+echo "=== [6/6] cert-analyzer chart (analyzer DaemonSet + test-console pod + TracingPolicies) ==="
+# TracingPolicies are NOT applied separately here -- the chart's own
+# templates/policies/*.yaml already create them (policies.*.enabled
+# defaults to true for all three we need). Applying the raw files too, as
+# an earlier version of this script did, creates them without Helm's
+# ownership annotations first; the chart install then fails outright
+# ("exists and cannot be imported ... missing key
+# app.kubernetes.io/managed-by") -- confirmed in testing. scc/route/
+# monitoring.* are all OpenShift-specific -- disabled here for plain k8s.
+# kafka.bootstrapServers/demo.testServer.kafka.host point at the MAIN demo
+# instance's Kafka, which install-kafka.sh there only advertises on its
+# private IP when WITH_K8S_NODE=true was set for that instance.
 helm install cert-analyzer "${WORKDIR}/certsight-src/extras/helm/cert-analyzer" \
     -n certsight --create-namespace \
     --set scc.hostaccess.enabled=false \
@@ -94,6 +96,7 @@ for i in $(seq 1 30); do
     sleep 5
 done
 kubectl get pods -n certsight -o wide
+kubectl get tracingpolicies
 
 echo "=== Exposing the test console (NodePort -- not part of the Helm release) ==="
 # The chart's test-server Pod has no Service (upstream OpenShift usage is

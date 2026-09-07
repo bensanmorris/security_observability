@@ -176,11 +176,13 @@ if [[ -n "${CURRENT_IP}" ]]; then
 fi
 # Surgical edit rather than re-running install-prometheus.sh (which no-ops
 # once prometheus.yml already exists) -- adds this node's target and
-# reloads. Idempotent: sed only matches the single-target line, so re-running
-# this script against an already-wired main box is a harmless no-op.
+# restarts (not reload -- the systemd unit has no ExecReload=, `systemctl
+# reload` always fails with "Job type reload is not applicable", confirmed
+# in testing). Idempotent: sed only matches the single-target line, so
+# re-running this script against an already-wired main box is a no-op.
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SCRIPT_DIR}/${KEY_NAME}.pem" "rocky@${PUBLIC_IP}" "
     sudo sed -i \"s|targets: \['localhost:9090'\]|targets: ['localhost:9090', '${K8S_NODE_PRIVATE_IP}:9090']|\" /etc/prometheus/prometheus.yml
-    sudo systemctl reload prometheus
+    sudo systemctl restart prometheus
 " || echo "    WARNING: could not wire Prometheus automatically -- see extras/aws-demo/README.md to do it by hand."
 
 echo ""
