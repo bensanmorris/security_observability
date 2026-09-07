@@ -178,10 +178,14 @@ fi
 # once prometheus.yml already exists) -- adds this node's target and
 # restarts (not reload -- the systemd unit has no ExecReload=, `systemctl
 # reload` always fails with "Job type reload is not applicable", confirmed
-# in testing). Idempotent: sed only matches the single-target line, so
-# re-running this script against an already-wired main box is a no-op.
+# in testing). Matches the whole "- targets:" line and replaces it wholesale
+# (not just the pristine single-target form) so this is safe to re-run even
+# if the main box was already wired to a *different* k8s node's IP by an
+# earlier run -- confirmed necessary in testing (a stale IP from a replaced
+# node otherwise silently survives, since a narrower pattern just fails to
+# match and leaves the old content untouched).
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SCRIPT_DIR}/${KEY_NAME}.pem" "rocky@${PUBLIC_IP}" "
-    sudo sed -i \"s|targets: \['localhost:9090'\]|targets: ['localhost:9090', '${K8S_NODE_PRIVATE_IP}:9090']|\" /etc/prometheus/prometheus.yml
+    sudo sed -i \"s|^\(\\\\s*- targets:\).*|\\\\1 ['localhost:9090', '${K8S_NODE_PRIVATE_IP}:9090']|\" /etc/prometheus/prometheus.yml
     sudo systemctl restart prometheus
 " || echo "    WARNING: could not wire Prometheus automatically -- see extras/aws-demo/README.md to do it by hand."
 
