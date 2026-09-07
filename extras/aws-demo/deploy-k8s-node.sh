@@ -150,13 +150,42 @@ echo "==> Waiting for instance to enter 'running' state..."
 aws ec2 wait instance-running --region "${AWS_REGION}" --instance-ids "${K8S_NODE_INSTANCE_ID}"
 K8S_NODE_PRIVATE_IP="$(aws ec2 describe-instances --region "${AWS_REGION}" --instance-ids "${K8S_NODE_INSTANCE_ID}" \
     --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
-K8S_NODE_PUBLIC_IP="$(aws ec2 describe-instances --region "${AWS_REGION}" --instance-ids "${K8S_NODE_INSTANCE_ID}" \
-    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"
-echo "    Private IP: ${K8S_NODE_PRIVATE_IP}  Public IP: ${K8S_NODE_PUBLIC_IP}"
+
+echo "==> Allocating Elastic IP (so the k8s test console link is stable across replacements)..."
+K8S_NODE_ALLOCATION_ID="$(aws ec2 allocate-address --region "${AWS_REGION}" --domain vpc \
+    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=certsight-demo-k8s-node}]" \
+    --query 'AllocationId' --output text)"
+aws ec2 associate-address --region "${AWS_REGION}" \
+    --instance-id "${K8S_NODE_INSTANCE_ID}" --allocation-id "${K8S_NODE_ALLOCATION_ID}" >/dev/null
+K8S_NODE_PUBLIC_IP="$(aws ec2 describe-addresses --region "${AWS_REGION}" --allocation-ids "${K8S_NODE_ALLOCATION_ID}" \
+    --query 'Addresses[0].PublicIp' --output text)"
+echo "    Private IP: ${K8S_NODE_PRIVATE_IP}  Elastic IP: ${K8S_NODE_PUBLIC_IP} (allocation ${K8S_NODE_ALLOCATION_ID})"
+
+# Reuses the main instance's own hosted zone (from the sourced state file) --
+# a subdomain under the same domain, not a second domain. Skips cleanly if
+# the main instance itself was deployed without DNS (DOMAIN_NAME/
+# HOSTED_ZONE_ID empty, e.g. a throwaway test run).
+K8S_NODE_DOMAIN_NAME=""
+K8S_LINK_HOST="${K8S_NODE_PUBLIC_IP}"
+if [[ -n "${DOMAIN_NAME:-}" && -n "${HOSTED_ZONE_ID:-}" ]]; then
+    K8S_SUBDOMAIN="${K8S_SUBDOMAIN:-k8s}"
+    K8S_NODE_DOMAIN_NAME="${K8S_SUBDOMAIN}.${DOMAIN_NAME}"
+    echo "==> Pointing ${K8S_NODE_DOMAIN_NAME} at ${K8S_NODE_PUBLIC_IP}..."
+    CHANGE_ID="$(aws route53 change-resource-record-sets --hosted-zone-id "${HOSTED_ZONE_ID}" \
+        --change-batch "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"${K8S_NODE_DOMAIN_NAME}\",\"Type\":\"A\",\"TTL\":300,\"ResourceRecords\":[{\"Value\":\"${K8S_NODE_PUBLIC_IP}\"}]}}]}" \
+        --query 'ChangeInfo.Id' --output text)"
+    aws route53 wait resource-record-sets-changed --id "${CHANGE_ID}"
+    echo "    ${K8S_NODE_DOMAIN_NAME} -> ${K8S_NODE_PUBLIC_IP} (DNS change in sync)"
+    K8S_LINK_HOST="${K8S_NODE_DOMAIN_NAME}"
+else
+    echo "==> No DOMAIN_NAME/HOSTED_ZONE_ID on the main instance -- skipping DNS, using the raw IP."
+fi
 
 cat >> "${STATE_FILE}" <<EOF
 K8S_NODE_PRIVATE_IP=${K8S_NODE_PRIVATE_IP}
 K8S_NODE_PUBLIC_IP=${K8S_NODE_PUBLIC_IP}
+K8S_NODE_ALLOCATION_ID=${K8S_NODE_ALLOCATION_ID}
+K8S_NODE_DOMAIN_NAME=${K8S_NODE_DOMAIN_NAME}
 EOF
 
 echo ""
@@ -201,7 +230,7 @@ ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SCRIPT_DIR}/${KEY_NAM
 echo ""
 echo "============================================================"
 echo " k8s node: ${K8S_NODE_PUBLIC_IP}"
-echo " k8s test console (once install completes): http://${K8S_NODE_PUBLIC_IP}:30090"
+echo " k8s test console (once install completes): http://${K8S_LINK_HOST}:30090"
 echo " Same Grafana dashboard as the main demo -- filter \$node to this node's"
 echo " name, or \$namespace=certsight, to see real pod/namespace attribution."
 echo "============================================================"

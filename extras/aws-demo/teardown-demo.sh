@@ -41,11 +41,23 @@ if [[ -n "${HOSTED_ZONE_ID:-}" && -n "${DOMAIN_NAME:-}" && -n "${PUBLIC_IP:-}" ]
         >/dev/null 2>&1 || echo "    (record already gone or didn't match -- skipping)"
 fi
 
+if [[ -n "${HOSTED_ZONE_ID:-}" && -n "${K8S_NODE_DOMAIN_NAME:-}" && -n "${K8S_NODE_PUBLIC_IP:-}" ]]; then
+    echo "==> Removing DNS record ${K8S_NODE_DOMAIN_NAME} -> ${K8S_NODE_PUBLIC_IP}..."
+    aws route53 change-resource-record-sets --hosted-zone-id "${HOSTED_ZONE_ID}" \
+        --change-batch "{\"Changes\":[{\"Action\":\"DELETE\",\"ResourceRecordSet\":{\"Name\":\"${K8S_NODE_DOMAIN_NAME}\",\"Type\":\"A\",\"TTL\":300,\"ResourceRecords\":[{\"Value\":\"${K8S_NODE_PUBLIC_IP}\"}]}}]}" \
+        >/dev/null 2>&1 || echo "    (record already gone or didn't match -- skipping)"
+fi
+
 if [[ -n "${ALLOCATION_ID:-}" ]]; then
     echo "==> Releasing Elastic IP (allocation ${ALLOCATION_ID})..."
     # Termination auto-disassociates the EIP but doesn't release it -- an
     # unattached EIP keeps billing hourly until explicitly released.
     aws ec2 release-address --region "${AWS_REGION}" --allocation-id "${ALLOCATION_ID}" || true
+fi
+
+if [[ -n "${K8S_NODE_ALLOCATION_ID:-}" ]]; then
+    echo "==> Releasing k8s node Elastic IP (allocation ${K8S_NODE_ALLOCATION_ID})..."
+    aws ec2 release-address --region "${AWS_REGION}" --allocation-id "${K8S_NODE_ALLOCATION_ID}" || true
 fi
 
 if [[ -n "${K8S_NODE_SG_ID:-}" ]]; then
