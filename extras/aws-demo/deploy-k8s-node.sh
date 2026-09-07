@@ -162,11 +162,23 @@ echo "============================================================"
 echo ""
 
 echo "==> Wiring the main box's Prometheus to also scrape this node..."
+# The main instance's SG only allows SSH from whatever IP was current when
+# deploy-demo.sh ran -- on a NAT'd/rotating egress this script's own SSH
+# connection a few minutes later can already be a different IP and get
+# refused (confirmed happening in testing). Re-detect and authorize fresh
+# rather than trust the earlier SSH_CIDR value: idempotent (duplicate-rule
+# errors are expected and harmless on a re-run against the same main box).
+CURRENT_IP="$(curl -fsSL --max-time 5 https://checkip.amazonaws.com | tr -d '[:space:]')"
+if [[ -n "${CURRENT_IP}" ]]; then
+    aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${SG_ID}" \
+        --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${CURRENT_IP}/32,Description='SSH (k8s-node wiring IP)'}]" \
+        2>/dev/null || true
+fi
 # Surgical edit rather than re-running install-prometheus.sh (which no-ops
 # once prometheus.yml already exists) -- adds this node's target and
 # reloads. Idempotent: sed only matches the single-target line, so re-running
 # this script against an already-wired main box is a harmless no-op.
-ssh -o StrictHostKeyChecking=no -i "${SCRIPT_DIR}/${KEY_NAME}.pem" "rocky@${PUBLIC_IP}" "
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SCRIPT_DIR}/${KEY_NAME}.pem" "rocky@${PUBLIC_IP}" "
     sudo sed -i \"s|targets: \['localhost:9090'\]|targets: ['localhost:9090', '${K8S_NODE_PRIVATE_IP}:9090']|\" /etc/prometheus/prometheus.yml
     sudo systemctl reload prometheus
 " || echo "    WARNING: could not wire Prometheus automatically -- see extras/aws-demo/README.md to do it by hand."
