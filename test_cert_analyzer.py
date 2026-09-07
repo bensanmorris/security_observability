@@ -10391,3 +10391,239 @@ class TestConfigNumericValidation:
             result = cfg_float(self._empty_cp(), 'port_probe', 'timeout_seconds', 'SOME_FLOAT', '5')
         assert result == 5.0
         assert 'Invalid float' in caplog.text
+
+
+class TestSetupLogging:
+    """setup_logging() maps a level string onto a logging module constant.
+    Patches logging.basicConfig itself rather than asserting against real
+    root-logger state, since basicConfig() is a no-op once the root logger
+    already has handlers (as it typically does under pytest)."""
+
+    def test_valid_level_maps_to_logging_constant(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import agent.config as config_module
+        from agent.config import setup_logging
+
+        mock_basic_config = MagicMock()
+        monkeypatch.setattr(config_module.logging, 'basicConfig', mock_basic_config)
+
+        setup_logging('DEBUG')
+
+        assert mock_basic_config.call_args.kwargs['level'] == logging.DEBUG
+
+    def test_lowercase_level_is_normalized(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import agent.config as config_module
+        from agent.config import setup_logging
+
+        mock_basic_config = MagicMock()
+        monkeypatch.setattr(config_module.logging, 'basicConfig', mock_basic_config)
+
+        setup_logging('warning')
+
+        assert mock_basic_config.call_args.kwargs['level'] == logging.WARNING
+
+    def test_unknown_level_falls_back_to_info(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import agent.config as config_module
+        from agent.config import setup_logging
+
+        mock_basic_config = MagicMock()
+        monkeypatch.setattr(config_module.logging, 'basicConfig', mock_basic_config)
+
+        setup_logging('NOT_A_REAL_LEVEL')
+
+        assert mock_basic_config.call_args.kwargs['level'] == logging.INFO
+
+    def test_default_level_is_info(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import agent.config as config_module
+        from agent.config import setup_logging
+
+        mock_basic_config = MagicMock()
+        monkeypatch.setattr(config_module.logging, 'basicConfig', mock_basic_config)
+
+        setup_logging()
+
+        assert mock_basic_config.call_args.kwargs['level'] == logging.INFO
+
+
+class TestLoadConfig:
+    """load_config() -- file-present/absent/unreadable/malformed branches,
+    plus the CERT_ANALYZER_CONFIG env var override that lets tests and
+    non-standard deployments point at a different path than the caller
+    requested."""
+
+    def test_missing_file_returns_empty_config(self, tmp_path, monkeypatch):
+        from agent.config import load_config
+        monkeypatch.setenv('CERT_ANALYZER_CONFIG', str(tmp_path / 'does-not-exist.conf'))
+        cp = load_config()
+        assert cp.sections() == []
+
+    def test_existing_file_is_parsed(self, tmp_path, monkeypatch):
+        from agent.config import load_config
+        config_path = tmp_path / 'cert-analyzer.conf'
+        config_path.write_text('[metrics]\nport = 1234\n')
+        monkeypatch.setenv('CERT_ANALYZER_CONFIG', str(config_path))
+        cp = load_config()
+        assert cp.get('metrics', 'port') == '1234'
+
+    def test_env_var_overrides_default_path_argument(self, tmp_path, monkeypatch):
+        from agent.config import load_config
+        config_path = tmp_path / 'override.conf'
+        config_path.write_text('[health]\nport = 9999\n')
+        monkeypatch.setenv('CERT_ANALYZER_CONFIG', str(config_path))
+        cp = load_config(path='/should/be/ignored.conf')
+        assert cp.get('health', 'port') == '9999'
+
+    def test_unreadable_file_falls_back_to_empty_config(self, tmp_path, monkeypatch, caplog):
+        from agent.config import load_config
+        config_path = tmp_path / 'locked.conf'
+        config_path.write_text('[metrics]\nport = 1234\n')
+        monkeypatch.setenv('CERT_ANALYZER_CONFIG', str(config_path))
+        monkeypatch.setattr(os, 'access', lambda path, mode: False)
+
+        with caplog.at_level('ERROR'):
+            cp = load_config()
+
+        assert cp.sections() == []
+        assert 'not readable' in caplog.text
+
+    def test_malformed_file_falls_back_gracefully(self, tmp_path, monkeypatch, caplog):
+        from agent.config import load_config
+        config_path = tmp_path / 'broken.conf'
+        config_path.write_text('this is not valid ini syntax\nno section header\n')
+        monkeypatch.setenv('CERT_ANALYZER_CONFIG', str(config_path))
+
+        with caplog.at_level('WARNING'):
+            cp = load_config()
+
+        assert 'Could not parse' in caplog.text
+
+
+class TestMainEntryPoint:
+    """
+    main() resolves config, wires it into the real server/analyzer objects,
+    and drives startup/shutdown. Every long-lived dependency (metrics
+    server, health server, Kafka publisher, CertificateAnalyzer, background
+    scanner thread) is mocked so main() runs to completion synchronously
+    instead of blocking on a real event loop -- the analyzer's mocked
+    start() raises to simulate the point where a real deployment would
+    receive SIGINT/SIGTERM.
+    """
+
+    @pytest.fixture
+    def mocks(self, monkeypatch, tmp_path):
+        from unittest.mock import MagicMock
+        import agent.config as config_module
+
+        for var in ('KAFKA_ENABLED', 'CERT_SCAN_PATHS', 'METRICS_PORT', 'HEALTH_PORT'):
+            monkeypatch.delenv(var, raising=False)
+
+        monkeypatch.setenv('CERT_ANALYZER_CONFIG', str(tmp_path / 'missing.conf'))
+        monkeypatch.setattr(config_module.signal, 'signal', MagicMock())
+
+        metrics_mock = MagicMock()
+        monkeypatch.setattr(config_module, 'start_metrics_server', metrics_mock)
+
+        health_instance = MagicMock()
+        health_cls = MagicMock(return_value=health_instance)
+        monkeypatch.setattr(config_module, 'HealthServer', health_cls)
+
+        kafka_instance = MagicMock()
+        kafka_cls = MagicMock(return_value=kafka_instance)
+        monkeypatch.setattr(config_module, 'KafkaPublisher', kafka_cls)
+
+        analyzer_instance = MagicMock()
+        analyzer_cls = MagicMock(return_value=analyzer_instance)
+        monkeypatch.setattr(config_module, 'CertificateAnalyzer', analyzer_cls)
+
+        thread_instance = MagicMock()
+        thread_cls = MagicMock(return_value=thread_instance)
+        monkeypatch.setattr(config_module.threading, 'Thread', thread_cls)
+
+        return {
+            'metrics': metrics_mock,
+            'health_cls': health_cls,
+            'health': health_instance,
+            'kafka_cls': kafka_cls,
+            'kafka': kafka_instance,
+            'analyzer_cls': analyzer_cls,
+            'analyzer': analyzer_instance,
+            'thread_cls': thread_cls,
+            'thread': thread_instance,
+        }
+
+    def test_keyboard_interrupt_triggers_clean_shutdown(self, monkeypatch, mocks):
+        from agent.config import main
+        mocks['analyzer'].start.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 0
+        mocks['health'].stop.assert_called_once()
+        mocks['kafka_cls'].assert_not_called()
+
+    def test_kafka_enabled_publisher_closed_on_shutdown(self, monkeypatch, mocks):
+        from agent.config import main
+        monkeypatch.setenv('KAFKA_ENABLED', 'true')
+        monkeypatch.setenv('KAFKA_BOOTSTRAP_SERVERS', 'broker:9092')
+        mocks['analyzer'].start.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 0
+        mocks['kafka_cls'].assert_called_once()
+        assert mocks['kafka_cls'].call_args.kwargs['bootstrap_servers'] == 'broker:9092'
+        mocks['kafka'].close.assert_called_once()
+        mocks['health'].stop.assert_called_once()
+
+    def test_unhandled_exception_exits_nonzero_and_still_cleans_up(self, monkeypatch, mocks, caplog):
+        from agent.config import main
+        monkeypatch.setenv('KAFKA_ENABLED', 'true')
+        mocks['analyzer'].start.side_effect = RuntimeError('boom')
+
+        with caplog.at_level('ERROR'):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 1
+        assert 'Fatal error' in caplog.text
+        mocks['kafka'].close.assert_called_once()
+        mocks['health'].stop.assert_called_once()
+
+    def test_metrics_port_bind_failure_exits_before_kafka_or_analyzer(self, monkeypatch, mocks):
+        from agent.config import main
+        monkeypatch.setenv('KAFKA_ENABLED', 'true')
+        mocks['metrics'].side_effect = OSError('address already in use')
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        mocks['kafka_cls'].assert_not_called()
+        mocks['analyzer_cls'].assert_not_called()
+        mocks['health_cls'].assert_not_called()
+
+    def test_periodic_scanner_thread_started_for_default_scan_paths(self, monkeypatch, mocks):
+        from agent.config import main
+        mocks['analyzer'].start.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(SystemExit):
+            main()
+
+        mocks['thread_cls'].assert_called_once()
+        assert mocks['thread_cls'].call_args.kwargs['daemon'] is True
+        mocks['thread'].start.assert_called_once()
+
+    def test_periodic_scanner_skipped_when_scan_paths_empty(self, monkeypatch, mocks):
+        from agent.config import main
+        monkeypatch.setenv('CERT_SCAN_PATHS', '')
+        mocks['analyzer'].start.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(SystemExit):
+            main()
+
+        mocks['thread_cls'].assert_not_called()
