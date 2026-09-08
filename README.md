@@ -18,7 +18,7 @@ CertSight provides real-time certificate observability for Linux via eBPF withou
 | Dashboard (Grafana) | [certsight-demo.com:3000](http://certsight-demo.com:3000/d/certsight-v1) | Fleet-wide view across both nodes below |
 | Bare-metal test console | [certsight-demo.com:8090](http://certsight-demo.com:8090) | Trigger cert activity on a bare metal Linux host - also includes Fleet blast radius, missing intermediate, and FIPS rollout explorers |
 | K8s test console | [k8s.certsight-demo.com:30090](http://k8s.certsight-demo.com:30090) | Trigger cert activity inside a real pod - real Kubernetes pod/namespace attribution |
-| MCP server (read-only) | `certsight-demo.com:8092/mcp` | Query fleet cert/FIPS/chain data live from Claude Desktop or Claude Code - no auth needed, just `claude mcp add --transport http` (not a browser link) - try *"which nodes haven't finished the FIPS migration?"*; see [setup instructions](extras/mcp-server/MCP-SERVER-README.md#running-over-the-network-streamable-http) |
+| MCP server (read-only) | `claude mcp add --transport http certsight http://certsight-demo.com:8092/mcp` | Query fleet cert/FIPS/chain data live from Claude Desktop or Claude Code - no auth needed (not a browser link) - try *"which nodes haven't finished the FIPS migration?"*; see [setup instructions](extras/mcp-server/MCP-SERVER-README.md#running-over-the-network-streamable-http) |
 
 **Deploy your own AWS fleet:** [CertSight Analyzer + Dashboard](extras/aws-marketplace/README.md) — a CloudFormation quick-launch template with pre-built AMIs
 
