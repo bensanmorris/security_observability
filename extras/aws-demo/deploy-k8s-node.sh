@@ -92,12 +92,12 @@ K8S_SG_ID="$(aws ec2 describe-security-groups --region "${AWS_REGION}" \
     --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)"
 if [[ -z "${K8S_SG_ID}" || "${K8S_SG_ID}" == "None" ]]; then
     K8S_SG_ID="$(aws ec2 create-security-group --region "${AWS_REGION}" \
-        --group-name "${K8S_SG_NAME}" --description "CertSight demo k8s node (SSH restricted, test console via NodePort)" \
+        --group-name "${K8S_SG_NAME}" --description "CertSight demo k8s node (SSH restricted, test console via nginx-fronted NodePort)" \
         --vpc-id "${VPC_ID}" --query 'GroupId' --output text)"
     aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${K8S_SG_ID}" \
         --ip-permissions \
         "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${SSH_CIDR},Description='SSH (deploy-time IP)'}]" \
-        "IpProtocol=tcp,FromPort=30090,ToPort=30090,IpRanges=[{CidrIp=0.0.0.0/0,Description='k8s test console (NodePort)'}]" \
+        "IpProtocol=tcp,FromPort=30090,ToPort=30090,IpRanges=[{CidrIp=0.0.0.0/0,Description='k8s test console (nginx rate-limited, proxies to NodePort 30091)'}]" \
         >/dev/null
     echo "    Created security group ${K8S_SG_ID}"
 else

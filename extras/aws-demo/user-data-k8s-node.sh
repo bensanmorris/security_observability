@@ -35,7 +35,7 @@ export PATH="${PATH}:/usr/local/bin"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 echo "=== [1/6] Base packages ==="
-dnf -y install git curl tar || true
+dnf -y install git curl tar policycoreutils-python-utils nginx || true
 
 echo "=== [2/6] k3s (single-node) ==="
 curl -sfL https://get.k3s.io | sh -
@@ -122,9 +122,14 @@ kubectl get tracingpolicies
 echo "=== Exposing the test console (NodePort -- not part of the Helm release) ==="
 # The chart's test-server Pod has no Service (upstream OpenShift usage is
 # `oc port-forward`) -- a plain NodePort here is the simplest way to give
-# this a public URL for the demo, matching the main instance's own
-# nginx-fronted :8090 in spirit if not in hardening (no rate limiting here
-# yet -- see extras/aws-demo/README.md's k8s-node section for the caveat).
+# this a public URL for the demo. The NodePort itself is bound to 30091,
+# *not* the public 30090 the security group opens (see deploy-k8s-node.sh)
+# -- nginx below sits in front on 30090, same division of labor as the main
+# instance's 127.0.0.1:8091-internal / 0.0.0.0:8090-public split, so
+# requests get rate-limited before they ever reach this unauthenticated,
+# action-executing server. kube-proxy's NodePort DNAT applies to any local
+# address, so nginx reaching 127.0.0.1:30091 works the same as it would
+# reaching any other node IP -- confirmed live.
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -138,8 +143,70 @@ spec:
   ports:
   - port: 8090
     targetPort: 8090
-    nodePort: 30090
+    nodePort: 30091
 EOF
+
+echo "=== nginx reverse proxy in front of the test console (rate limiting) ==="
+# Same config as the main instance's certsight-test-console.conf (see
+# user-data.sh) -- this pod is the same cert-test-server app, so it exposes
+# the same /api/run/* (expensive: spawns a JVM, generates certs, binds
+# ports) and /api/events (long-lived SSE stream) paths.
+cat <<'EOF' > /etc/nginx/conf.d/certsight-test-console.conf
+limit_req_zone $binary_remote_addr zone=tc_general:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=tc_actions:10m rate=12r/m;
+limit_conn_zone $binary_remote_addr zone=tc_conn_actions:10m;
+limit_conn_zone $binary_remote_addr zone=tc_conn_events:10m;
+limit_req_status 429;
+limit_conn_status 429;
+
+server {
+    listen 30090 default_server;
+    server_name _;
+
+    location /api/run/ {
+        limit_req zone=tc_actions burst=6 nodelay;
+        limit_conn tc_conn_actions 3;
+        proxy_pass http://127.0.0.1:30091;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /api/events {
+        limit_conn tc_conn_events 5;
+        proxy_pass http://127.0.0.1:30091;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_set_header Connection '';
+    }
+
+    location / {
+        limit_req zone=tc_general burst=20 nodelay;
+        proxy_pass http://127.0.0.1:30091;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+EOF
+restorecon -v /etc/nginx/conf.d/certsight-test-console.conf || true
+setsebool -P httpd_can_network_connect on || true
+# SELinux only pre-labels standard ports as httpd-bindable; 30090 (k8s's
+# NodePort range) needs an explicit label or nginx's bind() fails with EACCES.
+semanage port -l | grep -qw 30090 || semanage port -a -t http_port_t -p tcp 30090 || true
+# Belt-and-suspenders, matching deploy-k8s-node.sh's own firewalld handling
+# for this box: the security group is the primary control (already open on
+# 30090, unchanged), but if firewalld is active locally it must also allow
+# nginx's own listen port. 30091 (the actual NodePort) is deliberately left
+# closed here -- nginx reaches it over loopback, which firewalld doesn't
+# filter by default, so it stays unreachable from outside even though it's
+# not in the security group either.
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --add-port=30090/tcp
+    firewall-cmd --reload
+fi
+systemctl enable --now nginx
+nginx -t && systemctl reload nginx
 
 touch /var/lib/certsight-k8s-node-install-complete
 echo "=== CertSight k8s node install complete ==="

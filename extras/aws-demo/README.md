@@ -177,9 +177,11 @@ redeploying.
 
 It gets its own Elastic IP and, when the main instance itself has DNS
 configured, a subdomain under the same hosted zone (`K8S_SUBDOMAIN`,
-default `k8s` -- e.g. `k8s.certsight-demo.com`). Unlike the main instance's
-test console, its NodePort has **no nginx/rate limiting in front of it**
-yet -- keep that in mind before leaving it up and public for long.
+default `k8s` -- e.g. `k8s.certsight-demo.com`). Its test console sits
+behind the same nginx rate-limiting as the main instance's (see
+[Rate limiting](#rate-limiting) above) -- the actual NodePort is bound to
+127.0.0.1-reachable `30091`, not the public `30090`, so the security group
+only ever reaches nginx.
 
 | Demo | URL | Shows |
 |---|---|---|
