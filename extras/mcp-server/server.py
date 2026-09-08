@@ -18,12 +18,17 @@ Run (stdio transport, for a local Claude Desktop/Code config):
     CERTSIGHT_PROMETHEUS_URL=http://127.0.0.1:9091 python3 server.py
 
 Run (streamable-http transport, for a network-reachable deployment):
-    CERTSIGHT_MCP_TRANSPORT=streamable-http CERTSIGHT_MCP_TOKEN=<secret> \
+    CERTSIGHT_MCP_TRANSPORT=streamable-http \
         CERTSIGHT_MCP_HOST=0.0.0.0 CERTSIGHT_MCP_PORT=8092 python3 server.py
+
+No auth of any kind gates the streamable-http transport -- same
+open-by-design posture as the Grafana dashboard and test console elsewhere
+in this demo. Put a rate-limiting reverse proxy in front of it before
+exposing it publicly (see extras/aws-demo/user-data.sh's nginx config for
+the pattern this repo uses); nothing in this file throttles clients itself.
 
 See MCP-SERVER-README.md for the Claude Desktop config snippet and setup.
 """
-import hmac
 import json
 import os
 import sys
@@ -35,16 +40,13 @@ import fleet_blast_radius  # noqa: E402
 import chain_explorer      # noqa: E402
 import fleet_fips_rollout  # noqa: E402
 
-from mcp.server.auth.provider import AccessToken, TokenVerifier  # noqa: E402
-from mcp.server.auth.settings import AuthSettings                # noqa: E402
-from mcp.server.mcpserver import MCPServer                       # noqa: E402
+from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 PROMETHEUS_URL = os.environ.get("CERTSIGHT_PROMETHEUS_URL", "http://127.0.0.1:9090")
 
 TRANSPORT = os.environ.get("CERTSIGHT_MCP_TRANSPORT", "stdio")
 MCP_HOST = os.environ.get("CERTSIGHT_MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("CERTSIGHT_MCP_PORT", "8092"))
-MCP_TOKEN = os.environ.get("CERTSIGHT_MCP_TOKEN", "")
 
 # The one PromQL escape-hatch tool (below) is the only unbounded-query surface
 # in this file -- everything else replays fixed queries the test-console's
@@ -52,48 +54,7 @@ MCP_TOKEN = os.environ.get("CERTSIGHT_MCP_TOKEN", "")
 # on a deployment nobody but the operator can reach.
 ENABLE_RAW_QUERY = os.environ.get("CERTSIGHT_ENABLE_RAW_QUERY") == "1"
 
-
-class StaticTokenVerifier(TokenVerifier):
-    """Single shared-secret bearer check, not a real OAuth authorization
-    server: no client registration, no token issuance, no expiry. Verifies
-    via hmac.compare_digest so the comparison itself doesn't leak the token
-    through timing. Exists only to gate the streamable-http transport before
-    it's reachable from outside localhost."""
-
-    def __init__(self, token: str):
-        self._token = token
-
-    async def verify_token(self, token: str) -> AccessToken | None:
-        if not self._token or not hmac.compare_digest(token, self._token):
-            return None
-        return AccessToken(token=token, client_id="certsight-mcp-client", scopes=[])
-
-
-def _mcp_server_kwargs() -> dict:
-    if TRANSPORT == "stdio":
-        return {}
-    if not MCP_TOKEN:
-        raise RuntimeError(
-            "CERTSIGHT_MCP_TOKEN must be set when CERTSIGHT_MCP_TRANSPORT is not "
-            "'stdio' -- refusing to start an unauthenticated MCP server on a "
-            "network-reachable port."
-        )
-    resource_url = f"http://{MCP_HOST}:{MCP_PORT}"
-    return {
-        "token_verifier": StaticTokenVerifier(MCP_TOKEN),
-        # No real authorization server exists here, so issuer_url just names
-        # this server itself. validate_token_resource=False because
-        # StaticTokenVerifier doesn't stamp a resource indicator on the token
-        # to check -- the bearer secret itself is what's being validated.
-        "auth": AuthSettings(
-            issuer_url=resource_url,
-            resource_server_url=resource_url,
-            validate_token_resource=False,
-        ),
-    }
-
-
-mcp = MCPServer("certsight", **_mcp_server_kwargs())
+mcp = MCPServer("certsight")
 
 
 def _load_fleet_certs():

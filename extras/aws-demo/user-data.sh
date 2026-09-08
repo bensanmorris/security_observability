@@ -41,7 +41,7 @@ echo "=== [2/9] Local firewall (security group is the primary control, but firew
 if systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-port=3000/tcp   # Grafana dashboard
     firewall-cmd --permanent --add-port=8090/tcp   # test console
-    firewall-cmd --permanent --add-port=8092/tcp   # MCP server (bearer-token gated)
+    firewall-cmd --permanent --add-port=8092/tcp   # MCP server (rate-limited by nginx)
     firewall-cmd --reload
 fi
 
@@ -236,7 +236,7 @@ semanage port -l | grep -qw 8090 || semanage port -a -t http_port_t -p tcp 8090 
 systemctl enable --now nginx
 nginx -t && systemctl reload nginx
 
-echo "=== MCP server (read-only fleet queries, bearer-token gated) ==="
+echo "=== MCP server (read-only fleet queries, no auth -- nginx rate-limits it) ==="
 # Runs straight out of the certsight-src checkout cloned in step [4/9] above --
 # extras/mcp-server/server.py imports its query functions from the sibling
 # extras/test-server/ directory, so this only works when run from inside
@@ -251,35 +251,66 @@ python3.11 -m venv /opt/certsight-mcp/venv
 /opt/certsight-mcp/venv/bin/pip install --quiet -r "${MCP_SRC_DIR}/requirements.txt"
 chown -R certsight-mcp:certsight-mcp /opt/certsight-mcp
 
-# Generated fresh per-instance, same rationale as the Grafana admin password
-# above: this token is the only thing standing between an anonymous request
-# and Prometheus fleet data once port 8092 is open to 0.0.0.0/0.
-set +x
-MCP_TOKEN=$(openssl rand -base64 32 | tr -d '=+/')
+# No auth -- open like the dashboard/test console. Bound to localhost only
+# (127.0.0.1:8093); nginx below is the public-facing side on 8092, same
+# division of labor as the test console (8091 internal / 8090 public).
 mkdir -p /etc/certsight-mcp
-cat <<EOF > /etc/certsight-mcp/mcp.conf
+cat <<'EOF' > /etc/certsight-mcp/mcp.conf
 CERTSIGHT_MCP_TRANSPORT=streamable-http
-CERTSIGHT_MCP_HOST=0.0.0.0
-CERTSIGHT_MCP_PORT=8092
+CERTSIGHT_MCP_HOST=127.0.0.1
+CERTSIGHT_MCP_PORT=8093
 CERTSIGHT_PROMETHEUS_URL=http://127.0.0.1:9091
-CERTSIGHT_MCP_TOKEN=${MCP_TOKEN}
 EOF
-chmod 600 /etc/certsight-mcp/mcp.conf
-CREDFILE=/root/.certsight-mcp-credentials
-cat <<EOF > "${CREDFILE}"
-# CertSight MCP bearer token, generated at provisioning time by user-data.sh.
-# Use with: claude mcp add --transport http certsight http://<host>:8092/mcp \\
-#   --header "Authorization: Bearer <token>"
-token: ${MCP_TOKEN}
-EOF
-chmod 600 "${CREDFILE}"
-unset MCP_TOKEN
-set -x
-echo "    MCP bearer token generated -- see ${CREDFILE} (root-only) on this instance"
+chmod 644 /etc/certsight-mcp/mcp.conf
 
 cp "${WORKDIR}/certsight-src/extras/systemd/certsight-mcp.service" /etc/systemd/system/certsight-mcp.service
 systemctl daemon-reload
 systemctl enable --now certsight-mcp
+
+echo "=== nginx reverse proxy in front of the MCP server (rate limiting) ==="
+# Same rationale as the test-console proxy above: no auth means anyone who
+# can reach port 8092 can call these tools, so this bounds how hard any one
+# client can hit it. MCP has no cheap/expensive split like the test console
+# does (every tool here is one bounded Prometheus query) -- one zone covers
+# request rate, a separate one bounds concurrent connections so a client
+# holding several sessions open (or the streamable-http SSE stream) can't
+# alone exhaust a shared budget, the same failure mode the test console's
+# /api/events split was fixed for.
+cat <<'EOF' > /etc/nginx/conf.d/certsight-mcp.conf
+limit_req_zone $binary_remote_addr zone=mcp_general:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=mcp_conn:10m;
+# limit_req_status/limit_conn_status are already set (429) http-wide by
+# certsight-test-console.conf -- nginx merges all conf.d/*.conf into one
+# http context, so redeclaring them here is a duplicate-directive error,
+# not a harmless override.
+
+server {
+    listen 8092 default_server;
+    server_name _;
+
+    location / {
+        limit_req zone=mcp_general burst=40 nodelay;
+        limit_conn mcp_conn 10;
+        proxy_pass http://127.0.0.1:8093;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        # No "proxy_set_header Host $host" here, unlike the test-console proxy
+        # above -- the mcp SDK auto-enables DNS-rebinding protection whenever
+        # the app is bound to 127.0.0.1 (see server.py's CERTSIGHT_MCP_HOST),
+        # restricting the Host header it accepts to 127.0.0.1:*. Leaving Host
+        # unset here falls back to nginx's default ($proxy_host, i.e.
+        # "127.0.0.1:8093"), which satisfies that check; forwarding the
+        # original public Host would get every request rejected 421.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Connection '';
+    }
+}
+EOF
+restorecon -v /etc/nginx/conf.d/certsight-mcp.conf || true
+# 8092 needs the same explicit SELinux port label 8090 needed above.
+semanage port -l | grep -qw 8092 || semanage port -a -t http_port_t -p tcp 8092 || true
+nginx -t && systemctl reload nginx
 
 echo "=== Java JCA warm-up (fixes policy-load-timing issue on the java-non-fips-cert uprobe) ==="
 # Tetragon only attaches the java-non-fips-cert uprobe to libcert_agent_stub.so

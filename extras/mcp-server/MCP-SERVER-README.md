@@ -67,25 +67,24 @@ run it as a standalone service reachable over the network instead:
 
 ```bash
 export CERTSIGHT_MCP_TRANSPORT=streamable-http
-export CERTSIGHT_MCP_TOKEN=<a long random shared secret>
 export CERTSIGHT_MCP_HOST=0.0.0.0   # or 127.0.0.1 to keep it local-only
 export CERTSIGHT_MCP_PORT=8092  # 8091 is already the test-console's internal port
 python3 server.py
 ```
 
-`CERTSIGHT_MCP_TOKEN` is required for any transport other than `stdio` —
-the server refuses to start without one rather than come up unauthenticated
-on a network-reachable port. Every request must carry
-`Authorization: Bearer <token>`; a missing or wrong token gets a 401. This
-is a single shared secret, not real OAuth — no client registration, no
-issuance, no expiry, just a constant-time comparison
-(`hmac.compare_digest`) gating the endpoint.
+**No auth of any kind** — same open-by-design posture as the Grafana
+dashboard and test console elsewhere in this demo. Anyone who can reach the
+port can query it. `server.py` itself does no rate limiting either, so
+don't expose `CERTSIGHT_MCP_HOST=0.0.0.0` directly on a shared or public
+box without a rate-limiting reverse proxy in front of it — see
+`extras/aws-demo/user-data.sh`'s nginx config for the pattern this repo
+uses on the live AWS demo (per-IP request-rate and connection limits, the
+server itself only ever bound to `127.0.0.1`).
 
 Point an MCP client at it with:
 
 ```bash
-claude mcp add --transport http certsight http://<host>:8092/mcp \
-  --header "Authorization: Bearer <token>"
+claude mcp add --transport http certsight http://<host>:8092/mcp
 ```
 
 `query_prometheus` (raw PromQL) is left out of the tool list entirely
