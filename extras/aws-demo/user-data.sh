@@ -41,6 +41,7 @@ echo "=== [2/9] Local firewall (security group is the primary control, but firew
 if systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-port=3000/tcp   # Grafana dashboard
     firewall-cmd --permanent --add-port=8090/tcp   # test console
+    firewall-cmd --permanent --add-port=8092/tcp   # MCP server (rate-limited by nginx)
     firewall-cmd --reload
 fi
 
@@ -233,6 +234,82 @@ setsebool -P httpd_can_network_connect on || true
 # 8090 needs an explicit label or nginx's bind() fails with EACCES.
 semanage port -l | grep -qw 8090 || semanage port -a -t http_port_t -p tcp 8090 || true
 systemctl enable --now nginx
+nginx -t && systemctl reload nginx
+
+echo "=== MCP server (read-only fleet queries, no auth -- nginx rate-limits it) ==="
+# Runs straight out of the certsight-src checkout cloned in step [4/9] above --
+# extras/mcp-server/server.py imports its query functions from the sibling
+# extras/test-server/ directory, so this only works when run from inside
+# that checkout, not copied out on its own. Only the venv is private to this
+# service; the source is shared read-only with everything else that came
+# from that same clone.
+id certsight-mcp &>/dev/null || useradd --system --no-create-home --shell /sbin/nologin certsight-mcp
+
+MCP_SRC_DIR="${WORKDIR}/certsight-src/extras/mcp-server"
+dnf -y install python3.11 || true
+python3.11 -m venv /opt/certsight-mcp/venv
+/opt/certsight-mcp/venv/bin/pip install --quiet -r "${MCP_SRC_DIR}/requirements.txt"
+chown -R certsight-mcp:certsight-mcp /opt/certsight-mcp
+
+# No auth -- open like the dashboard/test console. Bound to localhost only
+# (127.0.0.1:8093); nginx below is the public-facing side on 8092, same
+# division of labor as the test console (8091 internal / 8090 public).
+mkdir -p /etc/certsight-mcp
+cat <<'EOF' > /etc/certsight-mcp/mcp.conf
+CERTSIGHT_MCP_TRANSPORT=streamable-http
+CERTSIGHT_MCP_HOST=127.0.0.1
+CERTSIGHT_MCP_PORT=8093
+CERTSIGHT_PROMETHEUS_URL=http://127.0.0.1:9091
+EOF
+chmod 644 /etc/certsight-mcp/mcp.conf
+
+cp "${WORKDIR}/certsight-src/extras/systemd/certsight-mcp.service" /etc/systemd/system/certsight-mcp.service
+systemctl daemon-reload
+systemctl enable --now certsight-mcp
+
+echo "=== nginx reverse proxy in front of the MCP server (rate limiting) ==="
+# Same rationale as the test-console proxy above: no auth means anyone who
+# can reach port 8092 can call these tools, so this bounds how hard any one
+# client can hit it. MCP has no cheap/expensive split like the test console
+# does (every tool here is one bounded Prometheus query) -- one zone covers
+# request rate, a separate one bounds concurrent connections so a client
+# holding several sessions open (or the streamable-http SSE stream) can't
+# alone exhaust a shared budget, the same failure mode the test console's
+# /api/events split was fixed for.
+cat <<'EOF' > /etc/nginx/conf.d/certsight-mcp.conf
+limit_req_zone $binary_remote_addr zone=mcp_general:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=mcp_conn:10m;
+# limit_req_status/limit_conn_status are already set (429) http-wide by
+# certsight-test-console.conf -- nginx merges all conf.d/*.conf into one
+# http context, so redeclaring them here is a duplicate-directive error,
+# not a harmless override.
+
+server {
+    listen 8092 default_server;
+    server_name _;
+
+    location / {
+        limit_req zone=mcp_general burst=40 nodelay;
+        limit_conn mcp_conn 10;
+        proxy_pass http://127.0.0.1:8093;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        # No "proxy_set_header Host $host" here, unlike the test-console proxy
+        # above -- the mcp SDK auto-enables DNS-rebinding protection whenever
+        # the app is bound to 127.0.0.1 (see server.py's CERTSIGHT_MCP_HOST),
+        # restricting the Host header it accepts to 127.0.0.1:*. Leaving Host
+        # unset here falls back to nginx's default ($proxy_host, i.e.
+        # "127.0.0.1:8093"), which satisfies that check; forwarding the
+        # original public Host would get every request rejected 421.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Connection '';
+    }
+}
+EOF
+restorecon -v /etc/nginx/conf.d/certsight-mcp.conf || true
+# 8092 needs the same explicit SELinux port label 8090 needed above.
+semanage port -l | grep -qw 8092 || semanage port -a -t http_port_t -p tcp 8092 || true
 nginx -t && systemctl reload nginx
 
 echo "=== Java JCA warm-up (fixes policy-load-timing issue on the java-non-fips-cert uprobe) ==="

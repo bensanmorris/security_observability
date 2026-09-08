@@ -16,14 +16,19 @@ What gets installed on the instance:
 - `certsight-test-server` (the test console), bound to `127.0.0.1:8091`
   behind an nginx reverse proxy on `0.0.0.0:8090` that rate-limits requests
   (see [Rate limiting](#rate-limiting) below)
+- The [read-only fleet MCP server](../mcp-server/MCP-SERVER-README.md), bound
+  to `127.0.0.1:8093` behind an nginx reverse proxy on `0.0.0.0:8092` that
+  rate-limits requests (see [Rate limiting](#rate-limiting) below), so any
+  MCP-capable assistant (e.g. Claude Desktop) can query fleet cert/FIPS/chain
+  state live during a demo
 
 ---
 
 ## Before you run this
 
-**The dashboard and test console are opened to the entire internet with no
-authentication**, by design, so you can share a link. Be aware of what that
-means:
+**The dashboard, test console, and MCP server are all opened to the entire
+internet with no authentication**, by design, so you can share a link (or a
+`claude mcp add` command). Be aware of what that means:
 
 - Grafana is in anonymous-Viewer mode -- read-only, fine to expose.
 - The test console has **no authentication and executes real actions on the
@@ -32,6 +37,11 @@ means:
   explicit that this should normally stay on `localhost` or a trusted lab
   network. Here it's deliberately public for demo purposes -- don't leave it
   running longer than you need it, and tear it down afterwards.
+- The MCP server has no authentication either, but it is read-only by
+  construction (see [its README](../mcp-server/MCP-SERVER-README.md)) --
+  every tool is a bounded Prometheus query, so the exposure here is cost/load
+  from anyone (or any bot) hitting it, not data mutation. nginx rate-limits
+  it the same way it does the test console.
 - SSH (port 22) is restricted to your current public IP at deploy time, not
   opened to the internet.
 
@@ -61,9 +71,19 @@ simultaneously (e.g. a link going viral) -- combined with `CpuCredits=standard`
 (see [Cost](#cost)) that degrades to "the demo gets slow" rather than
 "surprise bill," which is the actual goal here.
 
-If you'd rather restrict the dashboard/console to specific IPs instead of
-the whole internet, edit the `authorize-security-group-ingress` call in
-`deploy-demo.sh` before running it (swap `0.0.0.0/0` for your CIDR(s)).
+The MCP server (port 8092, proxied to `127.0.0.1:8093`) gets a simpler
+split, since every tool call there is roughly the same cost (one bounded
+Prometheus query, no subprocess/JVM work like the test console's actions):
+
+| Limit | Value | Why |
+|---|---|---|
+| Request rate | 20 req/s, burst 40, per IP | Generous headroom for a normal multi-tool-call chat session while still bounding a scripted loop |
+| Concurrent connections | 10 per IP | Also covers the streamable-http SSE stream held open per session, so a client with several sessions open can't alone exhaust the budget |
+
+If you'd rather restrict the dashboard/console/MCP server to specific IPs
+instead of the whole internet, edit the `authorize-security-group-ingress`
+call in `deploy-demo.sh` before running it (swap `0.0.0.0/0` for your
+CIDR(s)).
 
 ---
 
@@ -112,6 +132,12 @@ Grafana, test console) to finish via cloud-init. On success it prints:
 ```
 Dashboard:     http://certsight-demo.com:3000/d/certsight-v1
 Test console:  http://certsight-demo.com:8090
+```
+
+The MCP server needs no separate credential -- point a client at it directly:
+
+```bash
+claude mcp add --transport http certsight http://certsight-demo.com:8092/mcp
 ```
 
 The instance gets an Elastic IP (stays fixed for the life of the instance,

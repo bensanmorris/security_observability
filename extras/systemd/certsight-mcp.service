@@ -1,0 +1,49 @@
+[Unit]
+Description=CertSight read-only fleet MCP server
+Documentation=https://github.com/your-org/cert-analyzer
+After=network.target cert-analyzer.service
+Wants=cert-analyzer.service
+
+[Service]
+Type=simple
+User=certsight-mcp
+Group=certsight-mcp
+
+# _TRANSPORT, _HOST, _PORT, _PROMETHEUS_URL and _ENABLE_RAW_QUERY all come
+# from this file -- see extras/mcp-server/MCP-SERVER-README.md. _HOST should
+# stay 127.0.0.1 -- there's no auth or rate limiting at this layer, so a
+# reverse proxy (nginx, on the AWS demo) is what actually gates the public
+# port; see extras/aws-demo/user-data.sh.
+EnvironmentFile=/etc/certsight-mcp/mcp.conf
+
+# Runs straight out of the certsight-src checkout user-data.sh already keeps
+# around for its own scripts (apply-policies.sh etc.) -- only the venv is
+# private to this service.
+WorkingDirectory=/opt/certsight-install/certsight-src/extras/mcp-server
+ExecStart=/opt/certsight-mcp/venv/bin/python3 server.py
+
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=certsight-mcp
+
+# Security hardening, matching certsight-test-server.service: this process
+# has no auth of its own and is only ever bound to 127.0.0.1 -- nginx is
+# what's actually reachable from the internet, per the same rate-limiting
+# rationale as the test console.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+LimitNOFILE=65536
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
