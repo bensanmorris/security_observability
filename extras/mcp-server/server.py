@@ -17,8 +17,13 @@ what cert-analyzer has already published to Prometheus.
 Run (stdio transport, for a local Claude Desktop/Code config):
     CERTSIGHT_PROMETHEUS_URL=http://127.0.0.1:9091 python3 server.py
 
+Run (streamable-http transport, for a network-reachable deployment):
+    CERTSIGHT_MCP_TRANSPORT=streamable-http CERTSIGHT_MCP_TOKEN=<secret> \
+        CERTSIGHT_MCP_HOST=0.0.0.0 CERTSIGHT_MCP_PORT=8091 python3 server.py
+
 See MCP-SERVER-README.md for the Claude Desktop config snippet and setup.
 """
+import hmac
 import json
 import os
 import sys
@@ -30,11 +35,65 @@ import fleet_blast_radius  # noqa: E402
 import chain_explorer      # noqa: E402
 import fleet_fips_rollout  # noqa: E402
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.auth.provider import AccessToken, TokenVerifier  # noqa: E402
+from mcp.server.auth.settings import AuthSettings                # noqa: E402
+from mcp.server.mcpserver import MCPServer                       # noqa: E402
 
 PROMETHEUS_URL = os.environ.get("CERTSIGHT_PROMETHEUS_URL", "http://127.0.0.1:9090")
 
-mcp = MCPServer("certsight")
+TRANSPORT = os.environ.get("CERTSIGHT_MCP_TRANSPORT", "stdio")
+MCP_HOST = os.environ.get("CERTSIGHT_MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("CERTSIGHT_MCP_PORT", "8091"))
+MCP_TOKEN = os.environ.get("CERTSIGHT_MCP_TOKEN", "")
+
+# The one PromQL escape-hatch tool (below) is the only unbounded-query surface
+# in this file -- everything else replays fixed queries the test-console's
+# fleet views already run publicly. Left off by default; only worth enabling
+# on a deployment nobody but the operator can reach.
+ENABLE_RAW_QUERY = os.environ.get("CERTSIGHT_ENABLE_RAW_QUERY") == "1"
+
+
+class StaticTokenVerifier(TokenVerifier):
+    """Single shared-secret bearer check, not a real OAuth authorization
+    server: no client registration, no token issuance, no expiry. Verifies
+    via hmac.compare_digest so the comparison itself doesn't leak the token
+    through timing. Exists only to gate the streamable-http transport before
+    it's reachable from outside localhost."""
+
+    def __init__(self, token: str):
+        self._token = token
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not self._token or not hmac.compare_digest(token, self._token):
+            return None
+        return AccessToken(token=token, client_id="certsight-mcp-client", scopes=[])
+
+
+def _mcp_server_kwargs() -> dict:
+    if TRANSPORT == "stdio":
+        return {}
+    if not MCP_TOKEN:
+        raise RuntimeError(
+            "CERTSIGHT_MCP_TOKEN must be set when CERTSIGHT_MCP_TRANSPORT is not "
+            "'stdio' -- refusing to start an unauthenticated MCP server on a "
+            "network-reachable port."
+        )
+    resource_url = f"http://{MCP_HOST}:{MCP_PORT}"
+    return {
+        "token_verifier": StaticTokenVerifier(MCP_TOKEN),
+        # No real authorization server exists here, so issuer_url just names
+        # this server itself. validate_token_resource=False because
+        # StaticTokenVerifier doesn't stamp a resource indicator on the token
+        # to check -- the bearer secret itself is what's being validated.
+        "auth": AuthSettings(
+            issuer_url=resource_url,
+            resource_server_url=resource_url,
+            validate_token_resource=False,
+        ),
+    }
+
+
+mcp = MCPServer("certsight", **_mcp_server_kwargs())
 
 
 def _load_fleet_certs():
@@ -197,15 +256,21 @@ def explain_chain(query: str) -> str:
     return json.dumps(out, indent=2)
 
 
-@mcp.tool()
-def query_prometheus(promql: str) -> str:
-    """Escape hatch: run an arbitrary PromQL instant query against
-    cert-analyzer's Prometheus and return the raw result. Prometheus's
-    query API is inherently read-only -- there is no write path to reach
-    through it."""
-    result = blast_radius._prom_query(PROMETHEUS_URL, promql)
-    return json.dumps(result, indent=2)
+if ENABLE_RAW_QUERY:
+    @mcp.tool()
+    def query_prometheus(promql: str) -> str:
+        """Escape hatch: run an arbitrary PromQL instant query against
+        cert-analyzer's Prometheus and return the raw result. Prometheus's
+        query API is inherently read-only -- there is no write path to reach
+        through it."""
+        result = blast_radius._prom_query(PROMETHEUS_URL, promql)
+        return json.dumps(result, indent=2)
 
 
 if __name__ == "__main__":
-    mcp.run()
+    if TRANSPORT == "stdio":
+        mcp.run()
+    elif TRANSPORT == "streamable-http":
+        mcp.run(transport="streamable-http", host=MCP_HOST, port=MCP_PORT)
+    else:
+        raise ValueError(f"Unknown CERTSIGHT_MCP_TRANSPORT: {TRANSPORT!r}")

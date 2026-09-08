@@ -57,8 +57,41 @@ Add to `claude_desktop_config.json` (Desktop) or your MCP config (Code):
 }
 ```
 
-Restart Claude Desktop (or reload the MCP config in Code) and the six tools
+Restart Claude Desktop (or reload the MCP config in Code) and the tools
 below become available.
+
+## Running over the network (streamable-http)
+
+By default the server speaks stdio, for a locally-launched MCP client. To
+run it as a standalone service reachable over the network instead:
+
+```bash
+export CERTSIGHT_MCP_TRANSPORT=streamable-http
+export CERTSIGHT_MCP_TOKEN=<a long random shared secret>
+export CERTSIGHT_MCP_HOST=0.0.0.0   # or 127.0.0.1 to keep it local-only
+export CERTSIGHT_MCP_PORT=8091
+python3 server.py
+```
+
+`CERTSIGHT_MCP_TOKEN` is required for any transport other than `stdio` —
+the server refuses to start without one rather than come up unauthenticated
+on a network-reachable port. Every request must carry
+`Authorization: Bearer <token>`; a missing or wrong token gets a 401. This
+is a single shared secret, not real OAuth — no client registration, no
+issuance, no expiry, just a constant-time comparison
+(`hmac.compare_digest`) gating the endpoint.
+
+Point an MCP client at it with:
+
+```bash
+claude mcp add --transport http certsight http://<host>:8091/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+`query_prometheus` (raw PromQL) is left out of the tool list entirely
+unless `CERTSIGHT_ENABLE_RAW_QUERY=1` is also set — it's the one unbounded
+query surface in this file, worth enabling only where the operator, not the
+public, controls who can reach the endpoint.
 
 ## Tools
 
