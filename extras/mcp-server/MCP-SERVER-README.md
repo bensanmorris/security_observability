@@ -69,7 +69,7 @@ run it as a standalone service reachable over the network instead:
 export CERTSIGHT_MCP_TRANSPORT=streamable-http
 export CERTSIGHT_MCP_TOKEN=<a long random shared secret>
 export CERTSIGHT_MCP_HOST=0.0.0.0   # or 127.0.0.1 to keep it local-only
-export CERTSIGHT_MCP_PORT=8091
+export CERTSIGHT_MCP_PORT=8092  # 8091 is already the test-console's internal port
 python3 server.py
 ```
 
@@ -84,7 +84,7 @@ issuance, no expiry, just a constant-time comparison
 Point an MCP client at it with:
 
 ```bash
-claude mcp add --transport http certsight http://<host>:8091/mcp \
+claude mcp add --transport http certsight http://<host>:8092/mcp \
   --header "Authorization: Bearer <token>"
 ```
 

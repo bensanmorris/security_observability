@@ -41,6 +41,7 @@ echo "=== [2/9] Local firewall (security group is the primary control, but firew
 if systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-port=3000/tcp   # Grafana dashboard
     firewall-cmd --permanent --add-port=8090/tcp   # test console
+    firewall-cmd --permanent --add-port=8092/tcp   # MCP server (bearer-token gated)
     firewall-cmd --reload
 fi
 
@@ -234,6 +235,51 @@ setsebool -P httpd_can_network_connect on || true
 semanage port -l | grep -qw 8090 || semanage port -a -t http_port_t -p tcp 8090 || true
 systemctl enable --now nginx
 nginx -t && systemctl reload nginx
+
+echo "=== MCP server (read-only fleet queries, bearer-token gated) ==="
+# Runs straight out of the certsight-src checkout cloned in step [4/9] above --
+# extras/mcp-server/server.py imports its query functions from the sibling
+# extras/test-server/ directory, so this only works when run from inside
+# that checkout, not copied out on its own. Only the venv is private to this
+# service; the source is shared read-only with everything else that came
+# from that same clone.
+id certsight-mcp &>/dev/null || useradd --system --no-create-home --shell /sbin/nologin certsight-mcp
+
+MCP_SRC_DIR="${WORKDIR}/certsight-src/extras/mcp-server"
+dnf -y install python3.11 || true
+python3.11 -m venv /opt/certsight-mcp/venv
+/opt/certsight-mcp/venv/bin/pip install --quiet -r "${MCP_SRC_DIR}/requirements.txt"
+chown -R certsight-mcp:certsight-mcp /opt/certsight-mcp
+
+# Generated fresh per-instance, same rationale as the Grafana admin password
+# above: this token is the only thing standing between an anonymous request
+# and Prometheus fleet data once port 8092 is open to 0.0.0.0/0.
+set +x
+MCP_TOKEN=$(openssl rand -base64 32 | tr -d '=+/')
+mkdir -p /etc/certsight-mcp
+cat <<EOF > /etc/certsight-mcp/mcp.conf
+CERTSIGHT_MCP_TRANSPORT=streamable-http
+CERTSIGHT_MCP_HOST=0.0.0.0
+CERTSIGHT_MCP_PORT=8092
+CERTSIGHT_PROMETHEUS_URL=http://127.0.0.1:9091
+CERTSIGHT_MCP_TOKEN=${MCP_TOKEN}
+EOF
+chmod 600 /etc/certsight-mcp/mcp.conf
+CREDFILE=/root/.certsight-mcp-credentials
+cat <<EOF > "${CREDFILE}"
+# CertSight MCP bearer token, generated at provisioning time by user-data.sh.
+# Use with: claude mcp add --transport http certsight http://<host>:8092/mcp \\
+#   --header "Authorization: Bearer <token>"
+token: ${MCP_TOKEN}
+EOF
+chmod 600 "${CREDFILE}"
+unset MCP_TOKEN
+set -x
+echo "    MCP bearer token generated -- see ${CREDFILE} (root-only) on this instance"
+
+cp "${WORKDIR}/certsight-src/extras/systemd/certsight-mcp.service" /etc/systemd/system/certsight-mcp.service
+systemctl daemon-reload
+systemctl enable --now certsight-mcp
 
 echo "=== Java JCA warm-up (fixes policy-load-timing issue on the java-non-fips-cert uprobe) ==="
 # Tetragon only attaches the java-non-fips-cert uprobe to libcert_agent_stub.so

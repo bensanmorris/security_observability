@@ -16,6 +16,11 @@ What gets installed on the instance:
 - `certsight-test-server` (the test console), bound to `127.0.0.1:8091`
   behind an nginx reverse proxy on `0.0.0.0:8090` that rate-limits requests
   (see [Rate limiting](#rate-limiting) below)
+- The [read-only fleet MCP server](../mcp-server/MCP-SERVER-README.md), on
+  `0.0.0.0:8092`, so any MCP-capable assistant (e.g. Claude Desktop) can
+  query fleet cert/FIPS/chain state live during a demo -- gated by a bearer
+  token generated at provisioning time (see below), unlike the dashboard and
+  test console
 
 ---
 
@@ -34,6 +39,14 @@ means:
   running longer than you need it, and tear it down afterwards.
 - SSH (port 22) is restricted to your current public IP at deploy time, not
   opened to the internet.
+- The MCP server's port is open to the internet too, but every request needs
+  `Authorization: Bearer <token>` -- a per-instance secret generated at
+  provisioning time, in `/root/.certsight-mcp-credentials` on the box, not
+  printed by this script (SSH in to fetch it: see [Deploy](#deploy) below).
+  There's no TLS anywhere on this box, so that token does travel over plain
+  HTTP -- treat it as sensitive but cheap to rotate (regenerate it and
+  restart `certsight-mcp` if it leaks), not as a secret worth real
+  incident response over.
 
 ### Rate limiting
 
@@ -112,6 +125,15 @@ Grafana, test console) to finish via cloud-init. On success it prints:
 ```
 Dashboard:     http://certsight-demo.com:3000/d/certsight-v1
 Test console:  http://certsight-demo.com:8090
+```
+
+The MCP server doesn't get a printed link since it needs a bearer token, not
+just a URL -- fetch it once over SSH:
+
+```bash
+ssh -i certsight-demo.pem rocky@certsight-demo.com sudo cat /root/.certsight-mcp-credentials
+claude mcp add --transport http certsight http://certsight-demo.com:8092/mcp \
+  --header "Authorization: Bearer <token>"
 ```
 
 The instance gets an Elastic IP (stays fixed for the life of the instance,

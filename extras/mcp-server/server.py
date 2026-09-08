@@ -19,7 +19,7 @@ Run (stdio transport, for a local Claude Desktop/Code config):
 
 Run (streamable-http transport, for a network-reachable deployment):
     CERTSIGHT_MCP_TRANSPORT=streamable-http CERTSIGHT_MCP_TOKEN=<secret> \
-        CERTSIGHT_MCP_HOST=0.0.0.0 CERTSIGHT_MCP_PORT=8091 python3 server.py
+        CERTSIGHT_MCP_HOST=0.0.0.0 CERTSIGHT_MCP_PORT=8092 python3 server.py
 
 See MCP-SERVER-README.md for the Claude Desktop config snippet and setup.
 """
@@ -43,7 +43,7 @@ PROMETHEUS_URL = os.environ.get("CERTSIGHT_PROMETHEUS_URL", "http://127.0.0.1:90
 
 TRANSPORT = os.environ.get("CERTSIGHT_MCP_TRANSPORT", "stdio")
 MCP_HOST = os.environ.get("CERTSIGHT_MCP_HOST", "127.0.0.1")
-MCP_PORT = int(os.environ.get("CERTSIGHT_MCP_PORT", "8091"))
+MCP_PORT = int(os.environ.get("CERTSIGHT_MCP_PORT", "8092"))
 MCP_TOKEN = os.environ.get("CERTSIGHT_MCP_TOKEN", "")
 
 # The one PromQL escape-hatch tool (below) is the only unbounded-query surface

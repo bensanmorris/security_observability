@@ -9,7 +9,10 @@
 #
 # The dashboard (Grafana, port 3000) and test console (port 8090) are opened
 # to the *entire internet*, unauthenticated, by design -- this is a demo box,
-# not a production deployment. See extras/aws-demo/README.md before running.
+# not a production deployment. The MCP server (port 8092) is also opened to
+# the internet, but gated by a bearer token -- see
+# extras/mcp-server/MCP-SERVER-README.md. See extras/aws-demo/README.md
+# before running.
 #
 # Usage:
 #   ./deploy-demo.sh
@@ -121,6 +124,7 @@ if [[ -z "${SG_ID}" || "${SG_ID}" == "None" ]]; then
         "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${SSH_CIDR},Description='SSH (deploy-time IP)'}]" \
         "IpProtocol=tcp,FromPort=3000,ToPort=3000,IpRanges=[{CidrIp=0.0.0.0/0,Description='Grafana dashboard'}]" \
         "IpProtocol=tcp,FromPort=8090,ToPort=8090,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight test console'}]" \
+        "IpProtocol=tcp,FromPort=8092,ToPort=8092,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight MCP server (bearer-token gated)'}]" \
         >/dev/null
     echo "    Created security group ${SG_ID}"
 else

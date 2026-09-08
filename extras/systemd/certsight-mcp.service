@@ -1,0 +1,49 @@
+[Unit]
+Description=CertSight read-only fleet MCP server
+Documentation=https://github.com/your-org/cert-analyzer
+After=network.target cert-analyzer.service
+Wants=cert-analyzer.service
+
+[Service]
+Type=simple
+User=certsight-mcp
+Group=certsight-mcp
+
+# CERTSIGHT_MCP_TOKEN, _TRANSPORT, _HOST, _PORT, _PROMETHEUS_URL and
+# _ENABLE_RAW_QUERY all come from this file -- see
+# extras/mcp-server/MCP-SERVER-README.md. Root-only (the token lives here),
+# read by systemd itself before it drops to User= above, so 600 root:root
+# is sufficient -- the service process never needs read access to the file.
+EnvironmentFile=/etc/certsight-mcp/mcp.conf
+
+# Runs straight out of the certsight-src checkout user-data.sh already keeps
+# around for its own scripts (apply-policies.sh etc.) -- only the venv is
+# private to this service.
+WorkingDirectory=/opt/certsight-install/certsight-src/extras/mcp-server
+ExecStart=/opt/certsight-mcp/venv/bin/python3 server.py
+
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=certsight-mcp
+
+# Security hardening, matching certsight-test-server.service: this process
+# is reachable from the whole internet once the security group rule for its
+# port is in place, and only a shared-secret bearer token (not a real OAuth
+# server) stands between an anonymous request and Prometheus query results.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+LimitNOFILE=65536
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
