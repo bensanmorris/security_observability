@@ -56,6 +56,8 @@ Instructions are below but if you prefer to watch video guides:
 - [CertSight - Installation & Operation](https://youtu.be/9QpfuU0TKec)
 - [CertSight - Dashboard demo](https://youtu.be/oe7yznJaDTM)
 
+![CertSight MCP server](extras/mcp-server/screenshot.png)
+
 ![CertSight Grafana dashboard](extras/dashboard.png)
 
 ---
