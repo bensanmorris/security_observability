@@ -13,12 +13,12 @@
 #   sudo podman push --tls-verify=false "$HOST/certsight/cert-test-server:latest"
 #
 # Deploy:
-#   bash extras/openshift/scripts/deploy-test-server.sh [--kafka-host <ip>]
+#   bash extras/openshift/scripts/deploy-test-server.sh [--kafka-host <ip>] [--kafka-port <port>] [--host-network]
 #
-#   TEST_SERVER_KAFKA_HOST below is a substitution placeholder -- the script
-#   fills it in (with --kafka-host if given, else the host's auto-detected
-#   default-route IP) before applying. Don't 'oc apply' this file directly;
-#   the raw placeholder would be taken as a literal, unreachable hostname.
+#   TEST_SERVER_KAFKA_HOST/TEST_SERVER_KAFKA_PORT/hostNetwork below are substitution
+#   placeholders -- the script fills them in (from --kafka-host/--kafka-port/--host-network,
+#   or the KAFKA_PORT/HOST_NETWORK env vars, or their defaults) before applying. Don't
+#   'oc apply' this file directly; the raw placeholders would be taken as literal values.
 #
 # Drive it:
 #   oc port-forward -n certsight pod/cert-test-server 8090:8090
@@ -68,6 +68,11 @@ metadata:
     app: cert-test-server
 spec:
   serviceAccountName: cert-test-server
+  # Off by default (false); substituted by the deploy scripts via --host-network/HOST_NETWORK
+  # for scenarios that need this Pod on the node's real network namespace instead of the pod
+  # network. Not required for Tetragon detection to work either way -- see the hostNetwork
+  # comment near the bottom of this file.
+  hostNetwork: __TEST_SERVER_HOST_NETWORK__
   # A bare Pod with no controller to recreate it -- if the scheduler preempts it (see the
   # priorityClassName comment on cert-expiry-monitor in daemonset.yaml for why that happens
   # on memory-constrained single-node CRC), it's just gone until someone notices and reruns
@@ -107,7 +112,9 @@ spec:
       # tracked by this repo).
       value: "__TEST_SERVER_KAFKA_HOST__"
     - name: TEST_SERVER_KAFKA_PORT
-      value: "9092"
+      # Substituted by the deploy scripts -- see the Deploy note above. Defaults to 9092
+      # unless overridden with --kafka-port/KAFKA_PORT.
+      value: "__TEST_SERVER_KAFKA_PORT__"
     - name: TEST_SERVER_PROMETHEUS_URL
       # server.py defaults to http://127.0.0.1:9090, correct only in the
       # standalone deployment where a real Prometheus and cert-analyzer share
@@ -160,11 +167,12 @@ spec:
     hostPath:
       path: /var/certsight-test-server
       type: DirectoryOrCreate
-  # hostNetwork/hostPID still aren't needed -- Tetragon's node-wide fd_install /
-  # tcp_connect kprobes (see tetragon-policies/certificate-file-access.yaml and
-  # tcp-connect-tls.yaml) have no path or namespace filter, so they fire for
-  # this Pod's real file/network activity same as they would for any other
-  # process on the node. hostPath above is only there so a file this Pod
+  # hostNetwork (spec.hostNetwork above, off by default) and hostPID aren't required for
+  # detection either way -- Tetragon's node-wide fd_install / tcp_connect kprobes (see
+  # tetragon-policies/certificate-file-access.yaml and tcp-connect-tls.yaml) have no path or
+  # namespace filter, so they fire for this Pod's real file/network activity same as they
+  # would for any other process on the node, whichever network namespace it's in. hostPath
+  # above is only there so a file this Pod
   # writes is resolvable through cert-analyzer's /host bind mount -- without
   # it, cert-analyzer would see the Tetragon event but the path would never
   # resolve to a readable file (logged as "Skipping non-regular-file cert
