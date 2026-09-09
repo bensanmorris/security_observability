@@ -300,3 +300,4 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [AWS deployment demo](extras/aws-demo/README.md) - Stand up the full CertSight stack on a single EC2 instance with public dashboard and test console URLs
 - [AWS Analyzer + Dashboard deployment](extras/aws-marketplace/README.md) - Deploy CertSight across an AWS fleet as two products (a fleet of Analyzer instances + one Dashboard instance) via a CloudFormation quick-launch template with pre-built AMIs
 - [MCP server](extras/mcp-server/MCP-SERVER-README.md) - Read-only MCP tools (fleet inventory, blast radius, FIPS rollout, chain explorer) for querying CertSight from Claude Desktop/Code
+- [Observe Inc integration guide](extras/OBSERVE-INTEGRATION.md) - Pointing an Observe-bound OpenTelemetry Collector's Prometheus receiver at cert-analyzer's metrics endpoint
