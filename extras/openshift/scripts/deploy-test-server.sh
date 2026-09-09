@@ -10,6 +10,8 @@ MANIFEST="$REPO_ROOT/extras/openshift/test-server-pod.yaml"
 step() { echo; echo "==> $*"; }
 
 KAFKA_HOST_ARG=""
+KAFKA_PORT="${KAFKA_PORT:-9092}"
+HOST_NETWORK="${HOST_NETWORK:-false}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --kafka-host)
@@ -20,9 +22,25 @@ while [[ $# -gt 0 ]]; do
             KAFKA_HOST_ARG="${1#*=}"
             shift
             ;;
+        --kafka-port)
+            KAFKA_PORT="$2"
+            shift 2
+            ;;
+        --kafka-port=*)
+            KAFKA_PORT="${1#*=}"
+            shift
+            ;;
+        --host-network)
+            HOST_NETWORK="true"
+            shift
+            ;;
+        --host-network=*)
+            HOST_NETWORK="${1#*=}"
+            shift
+            ;;
         *)
             echo "Unknown argument: $1" >&2
-            echo "Usage: $0 [--kafka-host <ip>]" >&2
+            echo "Usage: $0 [--kafka-host <ip>] [--kafka-port <port>] [--host-network]" >&2
             exit 1
             ;;
     esac
@@ -45,8 +63,15 @@ else
     echo "Auto-detected: $KAFKA_HOST (override with --kafka-host <ip>)"
 fi
 
+step "Resolving the Kafka port and hostNetwork"
+echo "Using Kafka port: $KAFKA_PORT (override with --kafka-port <port> or KAFKA_PORT)"
+echo "hostNetwork: $HOST_NETWORK (override with --host-network or HOST_NETWORK=true)"
+
 render_manifest() {
-    sed "s#__TEST_SERVER_KAFKA_HOST__#$KAFKA_HOST#g" "$MANIFEST"
+    sed -e "s#__TEST_SERVER_KAFKA_HOST__#$KAFKA_HOST#g" \
+        -e "s#__TEST_SERVER_KAFKA_PORT__#$KAFKA_PORT#g" \
+        -e "s#__TEST_SERVER_HOST_NETWORK__#$HOST_NETWORK#g" \
+        "$MANIFEST"
 }
 
 step "Checking cluster login"
