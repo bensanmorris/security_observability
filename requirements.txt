@@ -1,9 +1,9 @@
 psutil>=5.9.0
 grpcio==1.60.1
 grpcio-tools==1.60.1
-protobuf==4.25.3
+protobuf==5.29.6
 prometheus-client==0.19.0
-cryptography==50.0.1      # also provides PKCS12 (.p12/.pfx) support
+cryptography==50.0.0      # also provides PKCS12 (.p12/.pfx) support
 pyyaml==6.0.1
 kubernetes>=28.1.0
 pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
@@ -11,4 +11,4 @@ pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
 # Optional: Kafka event publishing
 # Enable by setting [kafka] enabled = true in cert-analyzer.conf or KAFKA_ENABLED=true.
 # The analyzer degrades gracefully to Prometheus-only if this package is absent.
-kafka-python==2.0.3
+kafka-python==2.3.2

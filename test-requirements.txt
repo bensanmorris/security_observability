@@ -5,9 +5,9 @@ pytest-cov>=4.1.0
 # Production dependencies (for the analyzer itself)
 grpcio==1.60.1
 grpcio-tools==1.60.1
-protobuf==4.25.3
+protobuf==5.29.6
 prometheus-client==0.19.0
-cryptography==41.0.7      # also provides PKCS12 (.p12/.pfx) support
+cryptography==50.0.0      # also provides PKCS12 (.p12/.pfx) support
 pyyaml==6.0.1
 kubernetes>=28.1.0
 pyjks==20.0.0             # JKS (.jks/.keystore/.truststore) support
@@ -16,4 +16,4 @@ psutil>=5.9.0
 # Optional: Kafka event publishing — included here so Kafka tests run in CI
 # without needing to install it separately. The analyzer itself degrades
 # gracefully if this package is absent at runtime.
-kafka-python==2.0.3
+kafka-python==2.3.2
