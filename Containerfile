@@ -13,6 +13,10 @@ ARG UBI_PYTHON_IMAGE=registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHO
 
 FROM ${UBI_PYTHON_IMAGE} AS proto-builder
 
+# Re-declared -- top-level ARGs (declared before the first FROM) only apply
+# to interpolating a FROM line's image reference itself; a stage's own RUN
+# steps need it redeclared here to see it at all.
+ARG PYTHON_VERSION=311
 ARG TETRAGON_VERSION=v1.7.0
 # Leave unset to use whatever index pip is already configured for in the
 # base image (e.g. a corporate mirror baked into /etc/pip.conf) instead of
@@ -21,6 +25,39 @@ ARG PIP_INDEX_URL=
 ARG PIP_TRUSTED_HOST=
 
 USER 0
+
+# Off by default -- the public UBI Python image (UBI_PYTHON_IMAGE's default)
+# already ships python/pip, so this is a no-op there. Set BOOTSTRAP_PYTHON=true
+# when UBI_PYTHON_IMAGE instead points at a bare RHEL 8/9 image with no Python
+# preinstalled (e.g. a corporate registry mirror of plain rhel8/rhel9, rather
+# than the ubi8/ubi9 "S2I Python" image flavor). BOOTSTRAP_PYTHON_DEVEL adds
+# python<ver>-devel/gcc -- confirmed necessary in practice against a bare
+# UBI9 image (no prior packages installed): grpcio/cryptography/etc. all had
+# prebuilt wheels on PyPI, but pyjks's own dependency `twofish` does not and
+# fails to build ("error: [Errno 2] No such file or directory: 'gcc'")
+# without it, so treat BOOTSTRAP_PYTHON_DEVEL=true as the default expectation
+# for a from-scratch RHEL base image, not just a fallback to try if something
+# else fails.
+# Honors PYTHON_VERSION (e.g. "311" -> "3.11") rather than hardcoding 3.11,
+# so it stays in sync with whatever version UBI_PYTHON_IMAGE's default is
+# built from -- a mismatch here would silently bootstrap the wrong Python
+# instead of erroring. RHEL 8's AppStream ships python3.x as an alternate
+# module stream (RHEL 9 has it as a plain package) -- the `dnf module enable`
+# below is a no-op/harmless on RHEL 9. Exact package/module names may need
+# adjusting for your specific corporate base image; verify with a throwaway
+# build first.
+ARG BOOTSTRAP_PYTHON=false
+ARG BOOTSTRAP_PYTHON_DEVEL=false
+RUN if [ "$BOOTSTRAP_PYTHON" = "true" ]; then \
+        PY_DOTTED=$(echo "$PYTHON_VERSION" | sed -E 's/^([0-9])(.*)$/\1.\2/') && \
+        PY="python${PY_DOTTED}" && \
+        (dnf module enable -y "$PY" || true) && \
+        dnf install -y "$PY" "${PY}-pip" \
+            $( [ "$BOOTSTRAP_PYTHON_DEVEL" = "true" ] && echo "${PY}-devel" gcc ) && \
+        alternatives --install /usr/bin/python python "/usr/bin/${PY}" 1 && \
+        alternatives --install /usr/bin/pip pip "/usr/bin/pip${PY_DOTTED}" 1 && \
+        dnf clean all ; \
+    fi
 
 WORKDIR /build
 
@@ -74,6 +111,12 @@ ARG PIP_TRUSTED_HOST=
 ARG TETRAGON_VERSION=v1.7.0
 # Version of the cert-analyzer itself — set from git tag or commit SHA by CI
 ARG VERSION=dev
+# Re-declared for the same reason as TETRAGON_VERSION above, plus the two
+# below -- see the proto-builder stage's BOOTSTRAP_PYTHON comment for what
+# these do and when to set them.
+ARG PYTHON_VERSION=311
+ARG BOOTSTRAP_PYTHON=false
+ARG BOOTSTRAP_PYTHON_DEVEL=false
 
 # Stamp both versions into the image as environment variables so cert_analyzer.py
 # can read them at runtime via os.getenv()
@@ -81,6 +124,17 @@ ENV TETRAGON_BUILD_VERSION=${TETRAGON_VERSION}
 ENV CERT_ANALYZER_VERSION=${VERSION}
 
 USER 0
+
+RUN if [ "$BOOTSTRAP_PYTHON" = "true" ]; then \
+        PY_DOTTED=$(echo "$PYTHON_VERSION" | sed -E 's/^([0-9])(.*)$/\1.\2/') && \
+        PY="python${PY_DOTTED}" && \
+        (dnf module enable -y "$PY" || true) && \
+        dnf install -y "$PY" "${PY}-pip" \
+            $( [ "$BOOTSTRAP_PYTHON_DEVEL" = "true" ] && echo "${PY}-devel" gcc ) && \
+        alternatives --install /usr/bin/python python "/usr/bin/${PY}" 1 && \
+        alternatives --install /usr/bin/pip pip "/usr/bin/pip${PY_DOTTED}" 1 && \
+        dnf clean all ; \
+    fi
 
 WORKDIR /app
 
