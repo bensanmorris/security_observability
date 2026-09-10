@@ -46,21 +46,34 @@ USER 0
 # Honors PYTHON_VERSION (e.g. "311" -> "3.11") rather than hardcoding 3.11,
 # so it stays in sync with whatever version UBI_PYTHON_IMAGE's default is
 # built from -- a mismatch here would silently bootstrap the wrong Python
-# instead of erroring. RHEL 8's AppStream ships python3.x as an alternate
-# module stream (RHEL 9 has it as a plain package) -- the `dnf module enable`
-# below is a no-op/harmless on RHEL 9. Exact package/module names may need
-# adjusting for your specific corporate base image; verify with a throwaway
-# build first.
+# instead of erroring.
+#
+# RHEL package naming is genuinely inconsistent across streams, confirmed
+# against a real bare ubi8 image: 3.11/3.12 (and everything on RHEL 9) are
+# plain packages named with the dot (python3.11), installable directly --
+# but the older 3.6/3.8/3.9 module streams on RHEL 8 are packaged *without*
+# the dot (python38, needs `dnf module enable python38` first) even though
+# the binaries they install are still dotted (/usr/bin/python3.8). `dnf list`
+# on the dotted package name first is how the two are told apart, since
+# hardcoding either convention breaks the other (recommend PYTHON_VERSION=311
+# for a UBI 8 build specifically to avoid this entirely -- it not only sits
+# on the newer, non-module-stream side of that split, but also has a longer
+# upstream EOL runway than 3.8/3.9). Exact package/module names may still
+# need adjusting for your specific corporate base image; verify with a
+# throwaway build first.
 ARG BOOTSTRAP_PYTHON=false
 ARG BOOTSTRAP_PYTHON_DEVEL=false
 RUN if [ "$BOOTSTRAP_PYTHON" = "true" ]; then \
         PY_DOTTED=$(echo "$PYTHON_VERSION" | sed -E 's/^([0-9])(.*)$/\1.\2/') && \
-        PY="python${PY_DOTTED}" && \
-        (dnf module enable -y "$PY" || true) && \
-        dnf install -y "$PY" "${PY}-pip" \
-            $( [ "$BOOTSTRAP_PYTHON_DEVEL" = "true" ] && echo "${PY}-devel" gcc ) && \
-        alternatives --install /usr/bin/python python "/usr/bin/${PY}" 1 && \
-        alternatives --install /usr/bin/pip pip "/usr/bin/pip${PY_DOTTED}" 1 && \
+        if dnf list "python${PY_DOTTED}" >/dev/null 2>&1; then \
+            PKG="python${PY_DOTTED}"; \
+        else \
+            PKG="python${PYTHON_VERSION}" && (dnf module enable -y "$PKG" || true); \
+        fi && \
+        dnf install -y "$PKG" "${PKG}-pip" \
+            $( [ "$BOOTSTRAP_PYTHON_DEVEL" = "true" ] && echo "${PKG}-devel" gcc ) && \
+        ln -sf "/usr/bin/python${PY_DOTTED}" /usr/bin/python && \
+        ln -sf "/usr/bin/pip${PY_DOTTED}" /usr/bin/pip && \
         dnf clean all ; \
     fi
 
@@ -132,12 +145,15 @@ USER 0
 
 RUN if [ "$BOOTSTRAP_PYTHON" = "true" ]; then \
         PY_DOTTED=$(echo "$PYTHON_VERSION" | sed -E 's/^([0-9])(.*)$/\1.\2/') && \
-        PY="python${PY_DOTTED}" && \
-        (dnf module enable -y "$PY" || true) && \
-        dnf install -y "$PY" "${PY}-pip" \
-            $( [ "$BOOTSTRAP_PYTHON_DEVEL" = "true" ] && echo "${PY}-devel" gcc ) && \
-        alternatives --install /usr/bin/python python "/usr/bin/${PY}" 1 && \
-        alternatives --install /usr/bin/pip pip "/usr/bin/pip${PY_DOTTED}" 1 && \
+        if dnf list "python${PY_DOTTED}" >/dev/null 2>&1; then \
+            PKG="python${PY_DOTTED}"; \
+        else \
+            PKG="python${PYTHON_VERSION}" && (dnf module enable -y "$PKG" || true); \
+        fi && \
+        dnf install -y "$PKG" "${PKG}-pip" \
+            $( [ "$BOOTSTRAP_PYTHON_DEVEL" = "true" ] && echo "${PKG}-devel" gcc ) && \
+        ln -sf "/usr/bin/python${PY_DOTTED}" /usr/bin/python && \
+        ln -sf "/usr/bin/pip${PY_DOTTED}" /usr/bin/pip && \
         dnf clean all ; \
     fi
 
