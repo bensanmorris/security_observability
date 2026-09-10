@@ -74,8 +74,8 @@ STATIC_FILES = {
 # GitHub link) so it keeps working on an RPM install with zero internet
 # access, which is a supported deployment mode for this tool.
 SOURCE_FILES = {
-    "tls_probe_helper.py", "tcp_connect_probe_helper.py", "tcp_connect_sni_probe_helper.py",
-    "use_cases.py", "CertAgentTest.java",
+    "tls_probe_helper.py", "tls_probe_helper_non_fips_cipher.py", "tcp_connect_probe_helper.py",
+    "tcp_connect_sni_probe_helper.py", "use_cases.py", "CertAgentTest.java",
 }
 
 
