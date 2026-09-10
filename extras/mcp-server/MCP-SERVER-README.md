@@ -23,6 +23,11 @@ read-only query API.
 
 ## Setup
 
+Two ways to get this running, depending on whether the target host has
+pip/internet access.
+
+### Option A: virtualenv (target host has pip/internet access)
+
 Requires Python 3.10+ (the `mcp` SDK's minimum):
 
 ```bash
@@ -30,6 +35,52 @@ cd extras/mcp-server
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Only `mcp` itself needs installing here -- `server.py` imports its query
+functions (`blast_radius.py`, `fleet_blast_radius.py`, `chain_explorer.py`,
+`fleet_fips_rollout.py`) straight from the sibling
+[`extras/test-server/`](../test-server/TEST-SERVER-README.md) directory, so
+this only works run from inside a full repo checkout, not copied out on its
+own.
+
+### Option B: RPM (target host has no pip/internet access)
+
+CI builds this RPM already, for both el8 and el9, with the `mcp` SDK bundled
+into a relocatable virtualenv at `/opt/certsight-mcp/venv` -- no need to
+build it yourself. Grab `certsight-mcp-*.el8*.rpm` / `*.el9*.rpm` from a
+tagged [Release](../../releases) page, or -- for an untagged branch/PR --
+from the `build-mcp-server-rpm` job's artifacts on its
+[Actions run](../../actions/workflows/build.yml) (also triggerable on-demand
+via `workflow_dispatch`). Copy it to the target host and install it there
+with zero pip/internet access required:
+
+```bash
+sudo dnf install ./certsight-mcp-<version>-<release>.el9.*.rpm
+```
+
+This also pulls in `certsight-test-server` (a declared `Requires` -- see the
+Option A note above on why) if it isn't already installed. Unlike a source
+checkout, the RPM install has no sibling directory relationship between the
+two packages, so `certsight-mcp.service` sets
+`CERTSIGHT_TEST_SERVER_DIR=/opt/certsight-test-server` explicitly; running
+the bare `certsight-mcp` binary outside systemd needs the same variable set
+by hand.
+
+Only build it locally (`./build-rpm.sh --version 0.1.0 --release 1`) if you
+need a change that hasn't been through CI yet. Run that on any machine with
+normal pip/PyPI access (it doesn't need to be the target host), and it
+produces the same RPM under
+`~/rpmbuild/RPMS/$(uname -m)/certsight-mcp-<version>-<release>.*.rpm`,
+following the same pattern as `certsight-test-server.spec` (see there for
+why the debuginfo/build-id suppression macros at the top of the spec are
+needed).
+
+This installs a `certsight-mcp` wrapper onto `$PATH` that runs `server.py`
+with the bundled venv's interpreter, plus a `certsight-mcp.service` systemd
+unit and a dedicated `certsight-mcp` system user -- see "Running over the
+network" below.
+
+### Prometheus URL
 
 Point it at your Prometheus (defaults to `http://127.0.0.1:9090` if unset —
 note the dev-box convention elsewhere in this repo puts Prometheus on
@@ -72,6 +123,14 @@ export CERTSIGHT_MCP_PORT=8092  # 8091 is already the test-console's internal po
 python3 server.py
 ```
 
+RPM install (Option B above) instead configures `/etc/certsight-mcp/mcp.conf`
+and lets systemd manage it:
+
+```bash
+sudo $EDITOR /etc/certsight-mcp/mcp.conf   # uncomment/set the CERTSIGHT_MCP_* vars above
+sudo systemctl enable --now certsight-mcp
+```
+
 **No auth of any kind** — same open-by-design posture as the Grafana
 dashboard and test console elsewhere in this demo. Anyone who can reach the
 port can query it. `server.py` itself does no rate limiting either, so
@@ -80,6 +139,15 @@ box without a rate-limiting reverse proxy in front of it — see
 `extras/aws-demo/user-data.sh`'s nginx config for the pattern this repo
 uses on the live AWS demo (per-IP request-rate and connection limits, the
 server itself only ever bound to `127.0.0.1`).
+
+`server.py` itself has no HTTPS support, deliberately — TLS is terminated
+at the reverse proxy instead, same division of labor as rate limiting
+above. On the AWS demo, `extras/aws-demo/enable-mcp-https.sh` gets a real
+Let's Encrypt certificate and adds a `listen 8092 ssl` block to nginx's
+config; note it's a separate script from `user-data.sh` rather than part
+of first-boot provisioning, since it needs DNS already pointed at the
+instance before Let's Encrypt's HTTP-01 challenge can succeed. Once run,
+point clients at `https://` instead of `http://`.
 
 Point an MCP client at it with:
 

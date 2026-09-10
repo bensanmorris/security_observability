@@ -33,7 +33,14 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test-server"))
+# Defaults to the sibling extras/test-server/ directory (a source checkout
+# layout); the certsight-mcp RPM has no such sibling -- its own
+# certsight-mcp.service sets CERTSIGHT_TEST_SERVER_DIR to wherever the
+# certsight-test-server RPM (a declared dependency) installed to instead.
+sys.path.insert(0, os.environ.get(
+    "CERTSIGHT_TEST_SERVER_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test-server"),
+))
 
 import blast_radius        # noqa: E402
 import fleet_blast_radius  # noqa: E402
