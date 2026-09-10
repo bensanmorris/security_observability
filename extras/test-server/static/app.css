@@ -20,6 +20,27 @@ header p {
   max-width: 60em;
 }
 
+.header-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.powered-by {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: inherit;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.powered-by:hover {
+  opacity: 1;
+}
+
 .tool-links {
   display: flex;
   gap: 0.6rem;

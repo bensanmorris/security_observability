@@ -75,7 +75,20 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Powered by CertSight",
+      "tooltip": "View the CertSight source on GitHub",
+      "type": "link",
+      "url": "https://github.com/bensanmorris/security_observability"
+    }
+  ],
   "refresh": "1m",
   "schemaVersion": 38,
   "tags": [
