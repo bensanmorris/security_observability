@@ -4,12 +4,17 @@
 # ./fetch-tetragon-src.sh) into Python bindings using grpcio-tools.
 # grpcio-tools is NOT carried forward into the runtime image.
 # =============================================================================
-ARG UBI_VERSION=9
+# PYTHON_VERSION also drives the optional Python bootstrap below (see
+# BOOTSTRAP_PYTHON), independent of where UBI_PYTHON_IMAGE points -- so it
+# stays a separate arg rather than being folded into UBI_PYTHON_IMAGE.
 ARG PYTHON_VERSION=311
-# Override to point at a corporate mirror/proxy of the UBI Python image
-# (e.g. registry.corp.example.com/ubi9/python-311:latest) instead of the
-# public Red Hat registry.
-ARG UBI_PYTHON_IMAGE=registry.access.redhat.com/ubi${UBI_VERSION}/python-${PYTHON_VERSION}:latest
+# Full image reference -- override to build against a specific UBI major
+# version (registry.access.redhat.com/ubi8/python-311:latest) or point at a
+# corporate mirror/proxy, possibly a bare RHEL 8/9 image with no Python
+# preinstalled (see BOOTSTRAP_PYTHON below) instead of the public Red Hat
+# registry's UBI "S2I Python" flavor. CI passes this explicitly per matrix
+# entry rather than relying on this default -- see build.yml's `build` job.
+ARG UBI_PYTHON_IMAGE=registry.access.redhat.com/ubi9/python-${PYTHON_VERSION}:latest
 
 FROM ${UBI_PYTHON_IMAGE} AS proto-builder
 

@@ -143,7 +143,7 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: |
-          UBI_VERSION=${{ matrix.ubi-version }}
+          UBI_PYTHON_IMAGE=registry.access.redhat.com/ubi${{ matrix.ubi-version }}/python-${{ matrix.python-version }}:latest
           PYTHON_VERSION=${{ matrix.python-version }}
           TETRAGON_VERSION=${{ env.TETRAGON_VERSION }}
           VERSION=${{ steps.version.outputs.value }}
