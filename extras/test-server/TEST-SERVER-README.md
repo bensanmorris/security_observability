@@ -523,6 +523,26 @@ endpoint may have no authentication (see the `--bind`/systemd warnings
 above), and unlike writing a file, this spins up a real process and a
 real listening socket per click.
 
+### bind a TLS service that negotiates a non-FIPS cipher
+
+Same bind-probe mechanics as above (own process for PID attribution, own
+`_MAX_CONCURRENT_NON_FIPS_CIPHER_PROBES` cap), served by
+`tls_probe_helper_non_fips_cipher.py` instead of `tls_probe_helper.py`. The
+only difference is the served cert is otherwise unremarkable and
+FIPS-compliant on its own (2048-bit RSA/SHA-256); the helper's `SSLContext`
+caps `maximum_version` at TLS 1.2 and calls `set_ciphers("ECDHE-RSA-CHACHA20-POLY1305")`
+-- a cipher NIST SP 800-52 Rev. 2 doesn't approve for TLS 1.2 regardless of
+the certificate's own strength.
+
+cert-analyzer connects back the same way as the plain bind-probe case
+(`ssl.create_default_context()`), and since the helper offers exactly one
+cipher on TLS 1.2, that's what gets negotiated. `agent/tls_probe.py` records
+the negotiated protocol/cipher as the `tls_certificate_negotiated_protocol`
+metric alongside the certificate's own (compliant) FIPS check -- see
+[Fleet FIPS rollout](#fleet-fips-rollout) below for where that combination
+shows up: a node flagged critical purely on cipher drift, with every
+certificate on it individually passing FIPS on its own.
+
 ### dial out to a TLS port and let CertSight discover it
 
 This exercises cert-analyzer's *outbound* detection path -- the mirror
