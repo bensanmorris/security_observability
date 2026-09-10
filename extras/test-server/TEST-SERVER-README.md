@@ -371,12 +371,12 @@ you've made to it.
 
 | Use case | Action | Detection exercised |
 |---|---|---|
-| generate + read a fresh test certificate | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
+| generate + read a fresh test certificate and let CertSight discover it | Generates a new self-signed cert at a unique path under `/dev/shm`, then `cat`s it | File-access detection via the `certificate-file-access.yaml` Tetragon policy (`fd_install` kprobe); pick an **RSA key size** below 2048 bits to also trigger a `fips_compliant=false` finding |
 | bind a TLS service and let CertSight discover it | Spawns `tls_probe_helper.py` as a separate process, which generates its own self-signed cert and binds a real TLS listener on `127.0.0.1:<random high port>` | Inbound bind detection via the `tls-service-tracking.yaml` Tetragon policy (`security_socket_bind` LSM hook) plus cert-analyzer's `[port_probe]` TLS handshake probe |
 | dial out to a TLS port and let CertSight discover it | Spawns `tcp_connect_probe_helper.py` as a separate process, which binds a real TLS listener on one of `tcp-connect-tls.yaml`'s TLS ports and then connects back to itself | Outbound connect detection via the `tcp-connect-tls.yaml` Tetragon policy (`tcp_connect` kprobe) plus cert-analyzer's `[port_probe]` TLS handshake probe |
-| dial out with a real SNI hostname behind a CDN-style edge | Spawns `tcp_connect_sni_probe_helper.py`, which binds a TLS listener that serves a different cert depending on the SNI it receives, then connects back to itself presenting a real hostname as SNI | The `SSL_ctrl` uprobe fix for connect-probe's CDN fallback-cert gap: compare the Kafka event's CN to see whether cert-analyzer's probe used the real hostname (`[port_probe] sni_capture_enabled = true`) or the raw destination IP (the default) |
-| load a certificate straight into memory (no file) | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
-| load a certificate into a Java KeyStore (JCA) | Spawns a JVM (`CertAgentTest`), jattaches CertSight's cert-agent Java instrumentation into it, then watches it call `KeyStore.setCertificateEntry()` on a fresh in-memory cert every few seconds | In-memory JCA cert detection via the `java-non-fips-cert.yaml` Tetragon policy (`java_cert_agent_write` uprobe); cert-analyzer builds a synthetic `uprobe://java_cert_agent_write/<pid>/<serial>` path since there's no real file |
+| dial out with a real SNI hostname behind a CDN-style edge and let CertSight discover it | Spawns `tcp_connect_sni_probe_helper.py`, which binds a TLS listener that serves a different cert depending on the SNI it receives, then connects back to itself presenting a real hostname as SNI | The `SSL_ctrl` uprobe fix for connect-probe's CDN fallback-cert gap: compare the Kafka event's CN to see whether cert-analyzer's probe used the real hostname (`[port_probe] sni_capture_enabled = true`) or the raw destination IP (the default) |
+| load a certificate straight into memory (no file) and let CertSight discover it | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
+| load a certificate into a Java KeyStore (JCA) and let CertSight discover it | Spawns a JVM (`CertAgentTest`), jattaches CertSight's cert-agent Java instrumentation into it, then watches it call `KeyStore.setCertificateEntry()` on a fresh in-memory cert every few seconds | In-memory JCA cert detection via the `java-non-fips-cert.yaml` Tetragon policy (`java_cert_agent_write` uprobe); cert-analyzer builds a synthetic `uprobe://java_cert_agent_write/<pid>/<serial>` path since there's no real file |
 
 The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
 next to the button, both in the UI and as a `{"key_size": "1024"}` JSON
@@ -607,7 +607,7 @@ At most 2 of these can run concurrently
 (`_MAX_CONCURRENT_CONNECT_PROBES` in `use_cases.py`), for the same
 unauthenticated-endpoint reason as the bind-probe use case's own cap.
 
-### dial out with a real SNI hostname behind a CDN-style edge
+### dial out with a real SNI hostname behind a CDN-style edge and let CertSight discover it
 
 Verifies the `SSL_ctrl` uprobe fix on branch `connect_probe_sni_capture`
 for connect-probe's CDN fallback-cert gap (see
@@ -659,7 +659,7 @@ tells the two outcomes apart is the CN inside the resulting Kafka event,
 which `use_cases.py`'s result message reports back alongside the port so
 you know what to look for either way.
 
-### load a certificate straight into memory (no file)
+### load a certificate straight into memory (no file) and let CertSight discover it
 
 Unlike the other two use cases, this one exercises a **uprobe**, not a
 kprobe -- `openssl3-cert-load.yaml` hooks `SSL_CTX_use_certificate_ASN1`
@@ -696,7 +696,7 @@ This use case has no `--pause`/concurrency limit like the bind-probe one:
 it's a single in-process library call with no child process or listening
 socket, so nothing to bound.
 
-### load a certificate into a Java KeyStore (JCA)
+### load a certificate into a Java KeyStore (JCA) and let CertSight discover it
 
 Unlike every other use case here, the certificate is never handled by this
 Python process at all -- it's loaded by a **separate JVM**, and detection

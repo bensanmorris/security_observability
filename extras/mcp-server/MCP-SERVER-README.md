@@ -100,6 +100,7 @@ public, controls who can reach the endpoint.
 | `get_expiring_certs(max_days=30)` | What's expiring soon, soonest first |
 | `get_blast_radius(query)` | "What's exposed if this cert/key is compromised?" — groups by shared SPKI/checksum across the fleet |
 | `get_fips_rollout_status(node?)` | Per-node FIPS compliance + "cipher drift" (live non-approved cipher despite a compliant cert) |
+| `get_negotiated_sessions(node?, drift_only=false)` | Per-session negotiated protocol/cipher + the process/pod that negotiated it; `drift_only=true` for just the non-approved ones |
 | `explain_chain(query)` | Chain length, role of each cert, and any missing/cross-file-resolved issuer |
 | `query_prometheus(promql)` | Raw PromQL escape hatch |
 

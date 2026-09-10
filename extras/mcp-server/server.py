@@ -177,6 +177,50 @@ def get_fips_rollout_status(node: str = "") -> str:
 
 
 @mcp.tool()
+def get_negotiated_sessions(node: str = "", drift_only: bool = False) -> str:
+    """List every live TLS session cert-analyzer has actually negotiated (via
+    bind_probe_enabled/connect_probe_enabled), one row per session: the
+    certificate it served, the process that negotiated it (with pod/namespace
+    where available), and the protocol/cipher actually negotiated -- distinct
+    from the certificate's own algorithm/key strength, since a compliant
+    certificate can still be served over a non-approved live session (e.g. a
+    provider silently falling back when no approved cipher is available).
+    Set drift_only=True to see only sessions that negotiated a cipher/protocol
+    NIST SP 800-52 Rev. 2 doesn't approve. Optionally filter to one node
+    (substring match, case-insensitive)."""
+    certs = _load_fleet_certs()
+    for cert in certs.values():
+        cert["fips_compliant"] = None
+        cert["negotiations"] = []
+    fleet_fips_rollout._fetch_fleet_fips(PROMETHEUS_URL, certs)
+    fleet_fips_rollout._fetch_fleet_negotiated(PROMETHEUS_URL, certs)
+
+    node_l = node.lower()
+    out = []
+    for cert in certs.values():
+        if node_l and node_l not in cert["node_name"].lower():
+            continue
+        for neg in cert["negotiations"]:
+            if drift_only and neg["approved"]:
+                continue
+            leaf = next((l for l in cert["leaves"] if l["process"] == neg["process"]), None)
+            out.append({
+                "common_name": cert["common_name"],
+                "cert_path": cert["cert_path"],
+                "node_name": cert["node_name"],
+                "serial": cert["serial"],
+                "fips_compliant": cert["fips_compliant"],
+                "process": neg["process"],
+                "pod_name": leaf["pod_name"] if leaf else "",
+                "namespace": leaf["namespace"] if leaf else "",
+                "protocol": neg["protocol"],
+                "cipher": neg["cipher"],
+                "approved": neg["approved"],
+            })
+    return json.dumps(out, indent=2)
+
+
+@mcp.tool()
 def explain_chain(query: str) -> str:
     """Explain the certificate chain for a given cert_path or common-name
     (substring match): chain length, each cert's role (root / intermediate
