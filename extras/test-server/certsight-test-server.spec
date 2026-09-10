@@ -213,6 +213,16 @@ exit 0
 
 %changelog
 * %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
+- Add tls-bind-probe-non-fips-cipher use case
+  (tls_probe_helper_non_fips_cipher.py) exercising CertSight's inbound
+  [port_probe] bind_probe_enabled detection path with a listener pinned to
+  TLS 1.2 + ECDHE-RSA-CHACHA20-POLY1305 -- a cipher NIST SP 800-52 Rev. 2
+  doesn't approve for TLS 1.2, regardless of the served certificate's own
+  (compliant) key/signature strength. Demonstrates the "cipher drift" case
+  the Fleet FIPS rollout explorer flags: an individually FIPS-compliant
+  certificate whose live TLS session still negotiates a non-approved
+  cipher
+* %(date "+%a %b %d %Y") Build System <build@your-org.internal> - %{version}-%{release}
 - Add a "Fleet FIPS rollout" link to the console header
   (fleet_fips_rollout.py), generated live on click against Prometheus --
   groups every certificate by node_name (the closest available

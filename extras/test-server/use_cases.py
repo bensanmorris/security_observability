@@ -613,6 +613,105 @@ def _bind_tls_service_for_discovery(params: dict) -> UseCaseResult:
     )
 
 
+# Same rationale and mechanics as _bind_tls_service_for_discovery above (own
+# process for PID attribution, own concurrency cap), but the listener it
+# spawns pins TLS 1.2 + ECDHE-RSA-CHACHA20-POLY1305 -- a cipher NIST SP
+# 800-52 Rev. 2 doesn't approve for TLS 1.2, regardless of the cert's own
+# key/signature strength. Its own tracking state is kept separate from the
+# plain bind-probe use case's so the two can run concurrently without
+# fighting over the same counter/cap.
+_NON_FIPS_CIPHER_HELPER_SCRIPT = Path(__file__).resolve().parent / "tls_probe_helper_non_fips_cipher.py"
+_MAX_CONCURRENT_NON_FIPS_CIPHER_PROBES = 2
+_NON_FIPS_CIPHER_PROBE_LIFETIME_SECONDS = 12.0
+_NON_FIPS_CIPHER_PROBE_READY_TIMEOUT_SECONDS = 5.0
+_active_non_fips_cipher_probe_lock = threading.Lock()
+_active_non_fips_cipher_probe_count = 0
+
+
+def _bind_non_fips_cipher_tls_service_for_discovery(params: dict) -> UseCaseResult:
+    global _active_non_fips_cipher_probe_count
+    with _active_non_fips_cipher_probe_lock:
+        if _active_non_fips_cipher_probe_count >= _MAX_CONCURRENT_NON_FIPS_CIPHER_PROBES:
+            return UseCaseResult(
+                ok=False,
+                detail=f"{_MAX_CONCURRENT_NON_FIPS_CIPHER_PROBES} non-FIPS-cipher TLS probe "
+                "listener(s) are already running -- wait a few seconds for one to finish and try again",
+            )
+        _active_non_fips_cipher_probe_count += 1
+
+    def _release():
+        global _active_non_fips_cipher_probe_count
+        with _active_non_fips_cipher_probe_lock:
+            _active_non_fips_cipher_probe_count -= 1
+
+    token = _resolve_token(params)
+    cn = f"certsight-test-nonfips-cipher-{token}.local"
+    cert_path = _GENERATED_CERT_DIR / f"nonfips-cipher-probe-{token}.crt"
+    key_path = _GENERATED_CERT_DIR / f"nonfips-cipher-probe-{token}.key"
+
+    # 2048-bit RSA + SHA-256 -- deliberately unremarkable and FIPS-compliant
+    # on its own, so the resulting Kafka event's fips_compliant=true makes
+    # the live session's cipher drift the only thing wrong with this node.
+    cert_pem, key_pem = _generate_self_signed_cert(cn, key_size=2048)
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+    cert_path.write_bytes(cert_pem)
+    cert_path.chmod(0o644)
+    key_path.write_bytes(key_pem)
+    key_path.chmod(0o600)
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(_NON_FIPS_CIPHER_HELPER_SCRIPT), str(cert_path), str(key_path),
+             str(_NON_FIPS_CIPHER_PROBE_LIFETIME_SECONDS)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as e:
+        _release()
+        return UseCaseResult(ok=False, detail=f"failed to spawn non-FIPS-cipher TLS probe helper: {e}")
+
+    ready_q: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: ready_q.put(proc.stdout.readline()), daemon=True).start()
+
+    try:
+        first_line = ready_q.get(timeout=_NON_FIPS_CIPHER_PROBE_READY_TIMEOUT_SECONDS).strip()
+    except queue.Empty:
+        proc.kill()
+        _release()
+        return UseCaseResult(ok=False, detail="non-FIPS-cipher TLS probe helper didn't report readiness in time")
+
+    if not first_line.startswith("PORT "):
+        proc.kill()
+        _release()
+        return UseCaseResult(ok=False, detail=f"non-FIPS-cipher TLS probe helper failed to start: {first_line or '(no output)'}")
+
+    port = first_line.split(" ", 1)[1]
+
+    def _reap():
+        proc.wait()
+        _release()
+
+    threading.Thread(target=_reap, daemon=True).start()
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"spawned PID {proc.pid}, listening on 0.0.0.0:{port} for up to "
+            f"{int(_NON_FIPS_CIPHER_PROBE_LIFETIME_SECONDS)}s (CN={cn}), TLS 1.2 pinned to "
+            "ECDHE-RSA-CHACHA20-POLY1305 only -- if cert-analyzer has [port_probe] "
+            "bind_probe_enabled = true, it should connect within ~2s and negotiate that same "
+            "cipher. The cert itself stays FIPS-compliant (2048-bit RSA/SHA-256), so check the "
+            "[fleet FIPS rollout explorer](/fleet-fips-rollout) for this node to be flagged "
+            "'critical' on cipher drift alone -- click through to see the negotiated "
+            "TLSv1.2/ECDHE-RSA-CHACHA20-POLY1305 session listed against an otherwise-compliant cert"
+        ),
+        token=token,
+    )
+
+
 # tcp_connect_probe_helper.py runs as its own OS process for the same PID-
 # attribution reason as the bind-probe helper above. Its candidate ports are
 # a fixed subset of tcp-connect-tls.yaml's DPort filter (see that helper's
@@ -1283,6 +1382,70 @@ USE_CASES: List[UseCase] = [
             "Server-Sent Events stream, where it lands in the right-hand "
             "pane -- compare its 'pid' field against the PID shown in the "
             "status line above.",
+        ],
+    ),
+    UseCase(
+        id="tls-bind-probe-non-fips-cipher",
+        label="bind a TLS service that negotiates a non-FIPS cipher",
+        description=(
+            "Same bind-probe mechanics as above, but the listener is pinned "
+            "to TLS 1.2 + ECDHE-RSA-CHACHA20-POLY1305 -- a cipher NIST SP "
+            "800-52 Rev. 2 doesn't approve for TLS 1.2. The certificate "
+            "itself stays FIPS-compliant (2048-bit RSA/SHA-256); only the "
+            "live session's negotiated cipher is non-approved. Requires the "
+            "same [port_probe] bind_probe_enabled = true and "
+            "tls-service-tracking.yaml TracingPolicy as the plain bind-probe "
+            "use case, plus [metrics] fips_compliance_enabled = true for "
+            "the fleet FIPS rollout explorer to show it."
+        ),
+        run=_bind_non_fips_cipher_tls_service_for_discovery,
+        pipeline=[
+            "This server generates a fresh, ordinary self-signed X.509 cert "
+            f"(2048-bit RSA, SHA-256) + private key, and writes both to "
+            f"{_GENERATED_CERT_DIR}/ -- deliberately unremarkable and "
+            "FIPS-compliant on its own.",
+
+            "This server spawns tls_probe_helper_non_fips_cipher.py as a "
+            "separate OS process, same PID-attribution reasoning as the "
+            "plain bind-probe use case.",
+
+            "That helper process binds a random high port on 0.0.0.0, "
+            "same as the plain bind-probe helper, but builds its "
+            "SSLContext differently:\n"
+            "```python\n"
+            "context.maximum_version = ssl.TLSVersion.TLSv1_2\n"
+            "context.set_ciphers(\"ECDHE-RSA-CHACHA20-POLY1305\")\n"
+            "```\n"
+            "capping the protocol at 1.2 (set_ciphers() doesn't govern TLS "
+            "1.3 ciphersuite selection) and offering exactly one cipher -- "
+            "full source: "
+            "[tls_probe_helper_non_fips_cipher.py](/source/tls_probe_helper_non_fips_cipher.py)",
+
+            "Tetragon's security_socket_bind kprobe fires on that bind() "
+            "call, same as the plain bind-probe use case.",
+
+            "CertSight connects back with ssl.create_default_context() -- "
+            "since the helper offers only one cipher on TLS 1.2, that's "
+            "exactly what gets negotiated. agent/tls_probe.py reads "
+            "ssock.version() ('TLSv1.2') and cipher()[0] "
+            "('ECDHE-RSA-CHACHA20-POLY1305') off the completed handshake "
+            "and records them via Metrics.record_tls_negotiation, alongside "
+            "parsing the certificate itself exactly like any other "
+            "discovery (subject, issuer, key algorithm/size, FIPS "
+            "compliance, etc).",
+
+            "The certificate's own FIPS check passes (2048-bit RSA/SHA-256), "
+            "so the resulting Kafka event reads fips_compliant=true -- the "
+            "cert is fine. The negotiated cipher is published separately as "
+            "the tls_certificate_negotiated_protocol metric.",
+
+            "The [fleet FIPS rollout explorer](/fleet-fips-rollout) cross-"
+            "checks that metric against NIST SP 800-52 Rev. 2's approved "
+            "cipher list (extras/test-server/fleet_fips_rollout.py) and "
+            "flags this node 'critical' on cipher drift alone: an "
+            "individually-compliant cert whose live TLS session still "
+            "negotiated a non-approved cipher -- open it and click through "
+            "to this node to see both facts side by side.",
         ],
     ),
     UseCase(
