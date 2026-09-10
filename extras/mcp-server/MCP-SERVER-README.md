@@ -23,6 +23,11 @@ read-only query API.
 
 ## Setup
 
+Two ways to get this running, depending on whether the target host has
+pip/internet access.
+
+### Option A: virtualenv (target host has pip/internet access)
+
 Requires Python 3.10+ (the `mcp` SDK's minimum):
 
 ```bash
@@ -30,6 +35,52 @@ cd extras/mcp-server
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Only `mcp` itself needs installing here -- `server.py` imports its query
+functions (`blast_radius.py`, `fleet_blast_radius.py`, `chain_explorer.py`,
+`fleet_fips_rollout.py`) straight from the sibling
+[`extras/test-server/`](../test-server/TEST-SERVER-README.md) directory, so
+this only works run from inside a full repo checkout, not copied out on its
+own.
+
+### Option B: RPM (target host has no pip/internet access)
+
+CI builds this RPM already, for both el8 and el9, with the `mcp` SDK bundled
+into a relocatable virtualenv at `/opt/certsight-mcp/venv` -- no need to
+build it yourself. Grab `certsight-mcp-*.el8*.rpm` / `*.el9*.rpm` from a
+tagged [Release](../../releases) page, or -- for an untagged branch/PR --
+from the `build-mcp-server-rpm` job's artifacts on its
+[Actions run](../../actions/workflows/build.yml) (also triggerable on-demand
+via `workflow_dispatch`). Copy it to the target host and install it there
+with zero pip/internet access required:
+
+```bash
+sudo dnf install ./certsight-mcp-<version>-<release>.el9.*.rpm
+```
+
+This also pulls in `certsight-test-server` (a declared `Requires` -- see the
+Option A note above on why) if it isn't already installed. Unlike a source
+checkout, the RPM install has no sibling directory relationship between the
+two packages, so `certsight-mcp.service` sets
+`CERTSIGHT_TEST_SERVER_DIR=/opt/certsight-test-server` explicitly; running
+the bare `certsight-mcp` binary outside systemd needs the same variable set
+by hand.
+
+Only build it locally (`./build-rpm.sh --version 0.1.0 --release 1`) if you
+need a change that hasn't been through CI yet. Run that on any machine with
+normal pip/PyPI access (it doesn't need to be the target host), and it
+produces the same RPM under
+`~/rpmbuild/RPMS/$(uname -m)/certsight-mcp-<version>-<release>.*.rpm`,
+following the same pattern as `certsight-test-server.spec` (see there for
+why the debuginfo/build-id suppression macros at the top of the spec are
+needed).
+
+This installs a `certsight-mcp` wrapper onto `$PATH` that runs `server.py`
+with the bundled venv's interpreter, plus a `certsight-mcp.service` systemd
+unit and a dedicated `certsight-mcp` system user -- see "Running over the
+network" below.
+
+### Prometheus URL
 
 Point it at your Prometheus (defaults to `http://127.0.0.1:9090` if unset —
 note the dev-box convention elsewhere in this repo puts Prometheus on
@@ -70,6 +121,14 @@ export CERTSIGHT_MCP_TRANSPORT=streamable-http
 export CERTSIGHT_MCP_HOST=0.0.0.0   # or 127.0.0.1 to keep it local-only
 export CERTSIGHT_MCP_PORT=8092  # 8091 is already the test-console's internal port
 python3 server.py
+```
+
+RPM install (Option B above) instead configures `/etc/certsight-mcp/mcp.conf`
+and lets systemd manage it:
+
+```bash
+sudo $EDITOR /etc/certsight-mcp/mcp.conf   # uncomment/set the CERTSIGHT_MCP_* vars above
+sudo systemctl enable --now certsight-mcp
 ```
 
 **No auth of any kind** — same open-by-design posture as the Grafana

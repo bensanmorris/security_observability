@@ -67,12 +67,15 @@ tar -xzf tetragon-policies.tar.gz
 # legitimately fail on a stock image -- don't let that abort the whole install.
 ./tetragon-policies/apply-policies.sh || true
 
-echo "=== [6/9] CertSight RPMs (cert-analyzer, Java cert-agent, test console) ==="
+echo "=== [6/9] CertSight RPMs (cert-analyzer, Java cert-agent, test console, MCP server) ==="
 mkdir -p rpms && cd rpms
-for pkg in cert-analyzer cert-agent-jni cert-agent-deployer certsight-test-server; do
+for pkg in cert-analyzer cert-agent-jni cert-agent-deployer certsight-test-server certsight-mcp; do
     curl -fsSL -O "${RELEASE_BASE}/${pkg}-${CERTSIGHT_VERSION#v}-1.el9.x86_64.rpm"
 done
-# Installed together so dnf can resolve the local inter-package deps in one transaction
+# Installed together so dnf can resolve the local inter-package deps in one
+# transaction -- certsight-mcp Requires certsight-test-server (it imports
+# that package's blast_radius.py/fleet_blast_radius.py/chain_explorer.py/
+# fleet_fips_rollout.py rather than bundling copies).
 dnf -y install ./*.rpm
 cd "${WORKDIR}"
 
@@ -237,24 +240,17 @@ systemctl enable --now nginx
 nginx -t && systemctl reload nginx
 
 echo "=== MCP server (read-only fleet queries, no auth -- nginx rate-limits it) ==="
-# Runs straight out of the certsight-src checkout cloned in step [4/9] above --
-# extras/mcp-server/server.py imports its query functions from the sibling
-# extras/test-server/ directory, so this only works when run from inside
-# that checkout, not copied out on its own. Only the venv is private to this
-# service; the source is shared read-only with everything else that came
-# from that same clone.
-id certsight-mcp &>/dev/null || useradd --system --no-create-home --shell /sbin/nologin certsight-mcp
-
-MCP_SRC_DIR="${WORKDIR}/certsight-src/extras/mcp-server"
-dnf -y install python3.11 || true
-python3.11 -m venv /opt/certsight-mcp/venv
-/opt/certsight-mcp/venv/bin/pip install --quiet -r "${MCP_SRC_DIR}/requirements.txt"
-chown -R certsight-mcp:certsight-mcp /opt/certsight-mcp
-
+# Installed via RPM alongside the other packages in step [6/9] above (bundled
+# venv, systemd unit, dedicated user all come from the package -- see
+# extras/mcp-server/certsight-mcp.spec). Its own default
+# /etc/certsight-mcp/mcp.conf is a %config(noreplace) file with everything
+# commented out; overwritten here with this demo's real values the same way
+# TSCONF is above -- noreplace only protects an *upgrade* from clobbering an
+# operator's edits, not this first-boot provisioning step.
+#
 # No auth -- open like the dashboard/test console. Bound to localhost only
 # (127.0.0.1:8093); nginx below is the public-facing side on 8092, same
 # division of labor as the test console (8091 internal / 8090 public).
-mkdir -p /etc/certsight-mcp
 cat <<'EOF' > /etc/certsight-mcp/mcp.conf
 CERTSIGHT_MCP_TRANSPORT=streamable-http
 CERTSIGHT_MCP_HOST=127.0.0.1
@@ -262,9 +258,7 @@ CERTSIGHT_MCP_PORT=8093
 CERTSIGHT_PROMETHEUS_URL=http://127.0.0.1:9091
 EOF
 chmod 644 /etc/certsight-mcp/mcp.conf
-
-cp "${WORKDIR}/certsight-src/extras/systemd/certsight-mcp.service" /etc/systemd/system/certsight-mcp.service
-systemctl daemon-reload
+systemctl reset-failed certsight-mcp || true
 systemctl enable --now certsight-mcp
 
 echo "=== nginx reverse proxy in front of the MCP server (rate limiting) ==="

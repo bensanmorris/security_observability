@@ -31,6 +31,7 @@ jobs:
       java-agent: ${{ steps.filter.outputs.java-agent }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       test-server: ${{ steps.filter.outputs.test-server }}
+      mcp-server: ${{ steps.filter.outputs.mcp-server }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -64,6 +65,9 @@ jobs:
             - '.github/workflows/build.yml'
           test-server:
             - 'extras/test-server/**'
+            - '.github/workflows/build.yml'
+          mcp-server:
+            - 'extras/mcp-server/**'
             - '.github/workflows/build.yml'
 
   build:
@@ -392,6 +396,87 @@ jobs:
     - name: Build summary
       run: |
         echo "## 📦 Test Server RPM Build (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+
+  build-mcp-server-rpm:
+    name: Build MCP Server RPM (RHEL ${{ matrix.ubi-version }})
+    runs-on: ubuntu-latest
+    needs: changes
+    # Always run on tags, PRs, and manual dispatch; on branch pushes only run
+    # if extras/mcp-server/** changed. workflow_dispatch is included so this
+    # can be built on demand from any branch without cutting a tag release --
+    # see extras/mcp-server/MCP-SERVER-README.md.
+    if: |
+      github.ref_type == 'tag' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.mcp-server == 'true'
+    container:
+      image: registry.access.redhat.com/ubi${{ matrix.ubi-version }}/ubi:latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ubi-version: ["8", "9"]
+
+    steps:
+    - name: Install build prerequisites
+      run: |
+        dnf install -y \
+          python3.11 \
+          python3.11-devel \
+          rpm-build \
+          git \
+          gcc \
+          findutils \
+          which
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Fix git safe directory
+      run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          VERSION="${{ github.ref_name }}"
+          echo "value=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        else
+          SHA=$(git rev-parse --short HEAD)
+          echo "value=0.0.0~git${SHA}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build RPM
+      run: |
+        bash extras/mcp-server/build-rpm.sh \
+          --version "${{ steps.version.outputs.value }}" \
+          --release "${{ steps.version.outputs.release }}"
+
+    - name: Locate built RPM
+      id: rpm
+      run: |
+        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "certsight-mcp-*.rpm" | head -1)
+        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+
+    - name: Upload RPM as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.name }}
+        path: ${{ steps.rpm.outputs.path }}
+        retention-days: 30
+
+    - name: Build summary
+      run: |
+        echo "## 📦 MCP Server RPM Build (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
@@ -1012,7 +1097,7 @@ jobs:
     # today. Once the secrets exist and both AMI jobs are proven reliable,
     # add them to this needs: list and wire their ami_id outputs into the
     # release body below.
-    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms, build-test-server-rpm, build-test-server-container ]
+    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms, build-test-server-rpm, build-test-server-container, build-mcp-server-rpm ]
     permissions:
       contents: write
 
@@ -1066,6 +1151,13 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download MCP Server RPM artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: certsight-mcp-*.rpm
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Download cert-test-server container artifacts
       uses: actions/download-artifact@v4
       with:
@@ -1105,6 +1197,10 @@ jobs:
         echo "test_server_ubi8_name=$(basename ${TEST_SERVER_UBI8_PATH})" >> $GITHUB_OUTPUT
         TEST_SERVER_UBI9_PATH=$(find ./release-assets -name "certsight-test-server-*.el9*.rpm" | head -1)
         echo "test_server_ubi9_name=$(basename ${TEST_SERVER_UBI9_PATH})" >> $GITHUB_OUTPUT
+        MCP_UBI8_PATH=$(find ./release-assets -name "certsight-mcp-*.el8*.rpm" | head -1)
+        echo "mcp_ubi8_name=$(basename ${MCP_UBI8_PATH})" >> $GITHUB_OUTPUT
+        MCP_UBI9_PATH=$(find ./release-assets -name "certsight-mcp-*.el9*.rpm" | head -1)
+        echo "mcp_ubi9_name=$(basename ${MCP_UBI9_PATH})" >> $GITHUB_OUTPUT
         TEST_SERVER_CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-test-server-ubi8-*.tar.gz" | head -1)
         echo "test_server_container_ubi8_path=${TEST_SERVER_CONTAINER_UBI8_PATH}" >> $GITHUB_OUTPUT
         echo "test_server_container_ubi8_name=$(basename ${TEST_SERVER_CONTAINER_UBI8_PATH})" >> $GITHUB_OUTPUT
@@ -1122,6 +1218,7 @@ jobs:
           ./release-assets/cert-agent-jni-*.rpm
           ./release-assets/cert-agent-deployer-*.rpm
           ./release-assets/certsight-test-server-*.rpm
+          ./release-assets/certsight-mcp-*.rpm
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
@@ -1186,6 +1283,14 @@ jobs:
           certsight-test-server --kafka-host localhost --kafka-port 9092
           ```
           See `extras/test-server/TEST-SERVER-README.md` for prerequisites and how the detection pipeline works end to end. A container image is also published (see Container Images above) for running it in-cluster instead of installing the RPM directly on a host.
+
+          **certsight-mcp** (read-only MCP server for querying fleet cert/FIPS/chain data from Claude Desktop/Code — bundles its own venv, no pip/internet access needed on the target host; requires certsight-test-server, installed automatically alongside it):
+          ```bash
+          sudo dnf install ./${{ steps.assets.outputs.mcp_ubi8_name }}   # RHEL 8
+          sudo dnf install ./${{ steps.assets.outputs.mcp_ubi9_name }}   # RHEL 9
+          certsight-mcp
+          ```
+          See `extras/mcp-server/MCP-SERVER-README.md` for the network-transport configuration and Claude Desktop/Code setup.
 
           ### Tetragon Policies (tar.gz)
 
