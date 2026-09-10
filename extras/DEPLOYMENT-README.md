@@ -337,6 +337,14 @@ diff /etc/cert-analyzer/cert-analyzer.conf \
 
 If no `.rpmnew` file exists, your config was identical to the new default and no merge is needed.
 
+**Restart Tetragon after upgrading `cert-agent-jni` / `cert-agent-deployer`** — these packages ship `/opt/cert-agent/libcert_agent_stub.so`, the target of the `java_cert_agent_write` uprobe (`tetragon-policies/experimental/java-non-fips-cert.yaml`). Tetragon's uprobe attaches to that file's specific inode, not its path, so an RPM upgrade that rewrites the file (a new inode, even with unchanged content) silently detaches the uprobe from a Tetragon process that's been running since before the upgrade — the JCA KeyStore detection use case then produces no events at all, with no error anywhere, until Tetragon is restarted and reloads its policies against the current file:
+
+```bash
+sudo systemctl restart tetragon
+```
+
+`cert-analyzer` and `certsight-test-server` restart themselves automatically on upgrade (RPM `%postun` triggers), so this only needs doing by hand for the Java agent packages. Confirmed necessary in practice upgrading a live host from 0.95 to 0.98 — see the "load order" note on the `java_cert_agent_write` use case in `extras/test-server/use_cases.py` for the related (but distinct) in-order-vs-reload nuance.
+
 ### Uninstalling
 
 ```bash
