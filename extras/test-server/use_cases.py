@@ -1144,7 +1144,7 @@ def _run_java_keystore_cert(params: dict) -> UseCaseResult:
 USE_CASES: List[UseCase] = [
     UseCase(
         id="fresh-test-cert",
-        label="generate + read a fresh test certificate",
+        label="generate + read a fresh test certificate and let CertSight discover it",
         description=(
             f"Generates a new self-signed certificate at a unique path under "
             f"{_GENERATED_CERT_DIR} and cat's it. Guaranteed to be a first-time "
@@ -1373,7 +1373,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="tcp-connect-sni-capture",
-        label="dial out with a real SNI hostname behind a CDN-style edge",
+        label="dial out with a real SNI hostname behind a CDN-style edge and let CertSight discover it",
         description=(
             "Verifies the SSL_ctrl uprobe fix for connect-probe's CDN "
             "fallback-cert gap. Spawns a separate process that binds a real "
@@ -1479,7 +1479,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="in-memory-asn1-cert",
-        label="load a certificate straight into memory (no file)",
+        label="load a certificate straight into memory (no file) and let CertSight discover it",
         description=(
             "Generates a fresh self-signed certificate as raw DER bytes and "
             "hands them straight to libssl's SSL_CTX_use_certificate_ASN1() "
@@ -1545,7 +1545,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="java-jca-keystore",
-        label="load a certificate into a Java KeyStore (JCA)",
+        label="load a certificate into a Java KeyStore (JCA) and let CertSight discover it",
         description=(
             "Spawns a real JVM running CertAgentTest, jattaches CertSight's "
             "cert-agent Java instrumentation into it, then watches it call "
@@ -1619,7 +1619,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="cert-chain-missing-intermediates",
-        label="generate a 5-cert chain with missing intermediates",
+        label="generate a 5-cert chain with missing intermediates and let CertSight discover it",
         description=(
             "Builds a full 5-certificate chain (root CA -> 3 intermediate CAs "
             "-> leaf) and writes only some of it to a single PEM bundle, "
@@ -1684,7 +1684,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="cert-chain-across-multiple-files",
-        label="generate a 5-cert chain split across several files",
+        label="generate a 5-cert chain split across several files and let CertSight discover it",
         description=(
             "Same 5-certificate chain and same missing-intermediates drop "
             "rule as the use case above, but instead of writing the "
@@ -1748,7 +1748,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="spki-key-reuse",
-        label="reuse one key across two unrelated certs",
+        label="reuse one key across two unrelated certs and let CertSight discover it",
         description=(
             "Generates two certificates from the same RSA key but with "
             "different subjects, simulating the same private key backing "
