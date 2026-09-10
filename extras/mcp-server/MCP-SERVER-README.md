@@ -140,6 +140,15 @@ box without a rate-limiting reverse proxy in front of it — see
 uses on the live AWS demo (per-IP request-rate and connection limits, the
 server itself only ever bound to `127.0.0.1`).
 
+`server.py` itself has no HTTPS support, deliberately — TLS is terminated
+at the reverse proxy instead, same division of labor as rate limiting
+above. On the AWS demo, `extras/aws-demo/enable-mcp-https.sh` gets a real
+Let's Encrypt certificate and adds a `listen 8092 ssl` block to nginx's
+config; note it's a separate script from `user-data.sh` rather than part
+of first-boot provisioning, since it needs DNS already pointed at the
+instance before Let's Encrypt's HTTP-01 challenge can succeed. Once run,
+point clients at `https://` instead of `http://`.
+
 Point an MCP client at it with:
 
 ```bash

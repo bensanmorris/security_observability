@@ -125,6 +125,7 @@ if [[ -z "${SG_ID}" || "${SG_ID}" == "None" ]]; then
         "IpProtocol=tcp,FromPort=3000,ToPort=3000,IpRanges=[{CidrIp=0.0.0.0/0,Description='Grafana dashboard'}]" \
         "IpProtocol=tcp,FromPort=8090,ToPort=8090,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight test console'}]" \
         "IpProtocol=tcp,FromPort=8092,ToPort=8092,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight MCP server (rate-limited by nginx)'}]" \
+        "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description='Lets Encrypt HTTP-01 challenge (see enable-mcp-https.sh)'}]" \
         >/dev/null
     echo "    Created security group ${SG_ID}"
 else
