@@ -1386,7 +1386,7 @@ USE_CASES: List[UseCase] = [
     ),
     UseCase(
         id="tls-bind-probe-non-fips-cipher",
-        label="bind a TLS service that negotiates a non-FIPS cipher",
+        label="bind a TLS service that negotiates a non-FIPS cipher and let CertSight discover it",
         description=(
             "Same bind-probe mechanics as above, but the listener is pinned "
             "to TLS 1.2 + ECDHE-RSA-CHACHA20-POLY1305 -- a cipher NIST SP "
