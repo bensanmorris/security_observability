@@ -3,8 +3,8 @@ pytest>=7.4.0
 pytest-cov>=4.1.0
 
 # Production dependencies (for the analyzer itself)
-grpcio==1.60.1
-grpcio-tools==1.60.1
+grpcio==1.68.1
+grpcio-tools==1.68.1      # protobuf<6.0dev,>=5.26.1 -- must track protobuf's major version
 protobuf==5.29.6
 prometheus-client==0.19.0
 cryptography==50.0.0      # also provides PKCS12 (.p12/.pfx) support
