@@ -6,8 +6,9 @@ Split out of agent/analyzer.py as part of the monolithic-analyzer file split --
 see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _EventContextMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self.alert_threshold_days,
-self.demo_mode, self.host_prefix, self.filter_self_events) and methods from
-its sibling mixins/the core class (self.is_cert_path).
+self.demo_mode, self.host_prefix, self.filter_self_events, self.known_certs,
+self.kafka_publisher, self.metrics) and methods from its sibling mixins/the
+core class (self.is_cert_path, self._update_cache_metrics).
 """
 import logging
 import os
@@ -178,6 +179,48 @@ class _EventContextMixin:
             cert_info.container_name, cert_info.container_image,
             cert_info.container_privileged, cert_info.pod_labels,
         )
+
+    def _finish_single_certificate(
+        self,
+        cert_info: CertificateInfo,
+        tetragon_pod,
+        node_name: str,
+        parent_process: str = "",
+        parent_pid: int = 0,
+        skip_metrics_and_log: bool = False,
+        update_cache: bool = True,
+    ) -> None:
+        """
+        Apply pod/event context, update metrics, log, cache, and publish one
+        freshly-extracted certificate -- the common tail shared by every
+        discovery path that hands off a single CertificateInfo (Java FIPS/
+        in-memory uprobe captures in agent/java_fips.py, TLS port probes in
+        agent/tls_probe.py) and the per-cert body of
+        _finish_new_certificate_file's bundle loop in agent/retry_queue.py.
+
+        skip_metrics_and_log lets the bundle-file loop stay under
+        large_file_metrics_cap by skipping the per-cert Prometheus
+        series/log line for overflow certs while still caching and
+        publishing them. update_cache=False lets that same loop defer the
+        cache-size gauge update until after the whole batch instead of
+        recomputing it per cert.
+        """
+        self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name      = node_name
+        cert_info.parent_process = parent_process
+        cert_info.parent_pid     = parent_pid
+
+        if not skip_metrics_and_log:
+            self.metrics.update_certificate_metrics(cert_info)
+            self.log_certificate_status(cert_info)
+
+        self.known_certs[cert_info.unique_key] = cert_info
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        if update_cache:
+            self._update_cache_metrics()
 
     @staticmethod
     def _derive_app_label_and_container_name(tetragon_pod) -> Tuple[str, str]:

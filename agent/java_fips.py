@@ -6,13 +6,12 @@ Split out of agent/analyzer.py as part of the monolithic-analyzer file split --
 see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _JavaFipsMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self.filter_self_events,
-self.known_certs, self._known_paths/_known_paths_lock, self._recent_client_sni,
+self._known_paths/_known_paths_lock, self._recent_client_sni,
 self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_log_lock/
 _uprobe_rate_limit_last_log_time/_uprobe_rate_limit_dropped_since_log,
-self.metrics, self.kafka_publisher, self.last_event_time) and methods from its
-sibling mixins (self._resolve_process_binary, self._is_self_event,
-self.extract_certificate_info, self._apply_pod_context,
-self.log_certificate_status, self._update_cache_metrics).
+self.metrics, self.last_event_time) and methods from its sibling mixins
+(self._resolve_process_binary, self._is_self_event,
+self.extract_certificate_info, self._finish_single_certificate).
 """
 import logging
 import time
@@ -210,18 +209,7 @@ class _JavaFipsMixin:
         if cert_info is None:
             return False
 
-        self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name      = event.node_name
-        cert_info.parent_process = parent_process
-        cert_info.parent_pid     = parent_pid
-        self.metrics.update_certificate_metrics(cert_info)
-        self.log_certificate_status(cert_info)
-        self.known_certs[cert_info.unique_key] = cert_info
-
-        if self.kafka_publisher is not None:
-            self.kafka_publisher.publish(cert_info)
-
-        self._update_cache_metrics()
+        self._finish_single_certificate(cert_info, tetragon_pod, event.node_name, parent_process, parent_pid)
         return True
 
     def _handle_nsc_find_objects_init(self, event) -> bool:
@@ -386,16 +374,5 @@ class _JavaFipsMixin:
         if cert_info is None:
             return False
 
-        self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name      = event.node_name
-        cert_info.parent_process = parent_process
-        cert_info.parent_pid     = parent_pid
-        self.metrics.update_certificate_metrics(cert_info)
-        self.log_certificate_status(cert_info)
-        self.known_certs[cert_info.unique_key] = cert_info
-
-        if self.kafka_publisher is not None:
-            self.kafka_publisher.publish(cert_info)
-
-        self._update_cache_metrics()
+        self._finish_single_certificate(cert_info, tetragon_pod, event.node_name, parent_process, parent_pid)
         return True

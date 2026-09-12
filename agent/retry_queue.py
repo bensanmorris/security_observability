@@ -6,11 +6,10 @@ see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _RateLimitRetryQueueMixin assumes the composing class provides the
 instance state set up in CertificateAnalyzer.__init__ (self._rate_limit_log_lock,
 self._rate_limit_dropped_since_log, self._rate_limit_last_log_time,
-self.processed_paths, self.known_certs, self.kafka_publisher, self.metrics,
-self._new_cert_rate_limiter, self._retry_queue/_retry_queue_lock/
-_retry_queue_paths/_retry_queue_max_size) and methods from its sibling
-mixins (self.parse_certificates, self.extract_certificate_info,
-self._apply_pod_context, self.log_certificate_status,
+self.processed_paths, self.metrics, self._new_cert_rate_limiter,
+self._retry_queue/_retry_queue_lock/_retry_queue_paths/_retry_queue_max_size)
+and methods from its sibling mixins (self.parse_certificates,
+self.extract_certificate_info, self._finish_single_certificate,
 self._snapshot_pod_context) and the core class (self._update_cache_metrics,
 self._path_has_live_known_cert).
 """
@@ -188,24 +187,16 @@ class _RateLimitRetryQueueMixin:
 
         for i, cert_info in enumerate(cert_infos):
             try:
-                self._apply_pod_context(cert_info, tetragon_pod)
-                cert_info.node_name      = node_name
-                cert_info.parent_process = parent_process
-                cert_info.parent_pid     = parent_pid
-
-                if not is_bundle or i < metrics_cap:
-                    self.metrics.update_certificate_metrics(cert_info)
-                    self.log_certificate_status(cert_info)
-                else:
+                overflow = is_bundle and i >= metrics_cap
+                self._finish_single_certificate(
+                    cert_info, tetragon_pod, node_name, parent_process, parent_pid,
+                    skip_metrics_and_log=overflow, update_cache=False,
+                )
+                if overflow:
                     if cert_info.is_self_signed:
                         skipped_self_signed += 1
                     if cert_info.fips_violations:
                         skipped_fips_noncompliant += 1
-
-                self.known_certs[cert_info.unique_key] = cert_info
-
-                if self.kafka_publisher is not None:
-                    self.kafka_publisher.publish(cert_info)
             except Exception as e:
                 # One bad cert (e.g. an unexpected label value) must not abort
                 # the rest of the file — each cert is otherwise independent.

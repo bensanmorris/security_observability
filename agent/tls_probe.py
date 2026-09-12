@@ -8,11 +8,10 @@ composes. _TlsProbeMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self._probed_endpoints,
 self._probe_in_flight/_probe_in_flight_lock, self._recent_client_sni,
 self._sni_capture_enabled/_sni_capture_window_seconds, self._port_probe_timeout,
-self._port_probe_connect_delay, self._tls_outbound_ports, self.known_certs,
-self.metrics, self.kafka_publisher, self.last_event_time) and methods/constants
-from its sibling mixins and the core class (self._resolve_process_binary,
-self._apply_pod_context, self.log_certificate_status, self.extract_certificate_info,
-self._update_cache_metrics, self._start_background_thread,
+self._port_probe_connect_delay, self._tls_outbound_ports, self.metrics,
+self.last_event_time) and methods/constants from its sibling mixins and the
+core class (self._resolve_process_binary, self.extract_certificate_info,
+self._finish_single_certificate, self._start_background_thread,
 self._SNI_CAPTURE_POLL_INTERVAL_SECONDS, self._SNI_CAPTURE_POLL_MAX_SECONDS).
 """
 import logging
@@ -200,13 +199,6 @@ class _TlsProbeMixin:
             self.metrics.tls_port_probes_total.labels(status='failed', node_name=self.metrics._node_name).inc()
             return
 
-        if tetragon_pod is not None:
-            self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name = node_name
-
-        self.metrics.update_certificate_metrics(cert_info)
-        self.log_certificate_status(cert_info)
-        self.known_certs[cert_info.unique_key] = cert_info
         # Guarded by _probe_in_flight_lock -- the same lock the event-consumer
         # thread holds while checking "already probed or in flight" before
         # spawning a probe (see _handle_tls_bind_event/_handle_tls_connect_event).
@@ -217,13 +209,11 @@ class _TlsProbeMixin:
         # path's double-add through the same lock is harmless.
         with self._probe_in_flight_lock:
             self._probed_endpoints.add(endpoint_key)
-        self._update_cache_metrics()
+
+        self._finish_single_certificate(cert_info, tetragon_pod, node_name)
 
         if tls_version and cipher_name:
             self.metrics.record_tls_negotiation(cert_info, tls_version, cipher_name)
-
-        if self.kafka_publisher is not None:
-            self.kafka_publisher.publish(cert_info)
 
         self.metrics.tls_port_probes_total.labels(status='success', node_name=self.metrics._node_name).inc()
         logger.info(
