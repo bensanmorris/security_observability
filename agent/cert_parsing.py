@@ -50,6 +50,62 @@ class _CertParsingMixin:
         re.DOTALL,
     )
 
+    def _open_keystore_with_password_retry(
+        self,
+        cert_path: str,
+        env_var: str,
+        format_label: str,
+        error_type: str,
+        open_fn,
+        immediate_fail_exceptions: tuple = (),
+    ):
+        """
+        Try opening a password-protected keystore with the operator-configured
+        password (env_var), then 'changeit' (the Java ecosystem default), then
+        an empty string (unprotected truststores/keystores) -- shared retry
+        loop for parse_jks_certificates and parse_pkcs12_certificates, whose
+        only difference is how each actually opens the file (open_fn(password)
+        -> opened keystore object, raising on failure).
+
+        immediate_fail_exceptions lets a caller opt certain exceptions out of
+        the retry-next-password behavior (e.g. JKS's BadKeystoreFormatException,
+        which means "not a JKS file at all" regardless of password) -- these
+        propagate to the caller immediately instead of being retried against
+        the remaining passwords or counted as a password failure.
+
+        Returns the opened keystore object, or None if every password failed
+        -- in the None case, this has already logged a warning, incremented
+        cert_analysis_errors, and cached cert_path in password_failed_paths so
+        future events for this path skip the expensive retries.
+        """
+        configured = os.getenv(env_var, '')
+        # env var -> changeit -> empty string only -- 'changeit' is retained
+        # as the Java ecosystem default, present in many managed environments
+        # on legacy or CA bundle keystores.
+        passwords_to_try = list(dict.fromkeys([configured, 'changeit', '']))
+
+        for password in passwords_to_try:
+            try:
+                keystore = open_fn(password)
+                logger.debug(
+                    f"Opened {format_label} {cert_path} "
+                    f"(password={'<empty>' if not password else '<set>'})"
+                )
+                return keystore
+            except immediate_fail_exceptions:
+                raise
+            except Exception:
+                continue  # nosec B112 - trying the next candidate password, not swallowing a real error
+
+        logger.warning(
+            f"Could not open {format_label} {cert_path}: all passwords failed. "
+            f"Set {env_var} env var if the file uses a custom password."
+        )
+        self.metrics.cert_analysis_errors.labels(error_type=error_type, node_name=self.metrics._node_name).inc()
+        self.password_failed_paths.add(cert_path)
+        self._update_cache_metrics()
+        return None
+
     def is_cert_path(self, path: str) -> bool:
         """Check if a path looks like a certificate or keystore file"""
         if not path:
@@ -102,35 +158,17 @@ class _CertParsingMixin:
             return []
 
         jks = _analyzer_module.jks
-        configured = os.getenv('JKS_PASSWORD', '')
-        # Option B: env var → changeit → empty string only
-        # 'changeit' is retained as it is the Java ecosystem default and present
-        # in many managed environments on legacy or CA bundle keystores.
-        passwords_to_try = list(dict.fromkeys([configured, 'changeit', '']))
-
-        ks = None
-        for password in passwords_to_try:
-            try:
-                ks = jks.KeyStore.load(cert_path, password)
-                logger.debug(
-                    f"Opened JKS {cert_path} "
-                    f"(password={'<empty>' if not password else '<set>'})"
-                )
-                break
-            except jks.util.BadKeystoreFormatException:
-                logger.debug(f"Not a valid JKS keystore: {cert_path}")
-                return []
-            except Exception:
-                continue  # nosec B112 - trying the next candidate password, not swallowing a real error
+        try:
+            ks = self._open_keystore_with_password_retry(
+                cert_path, 'JKS_PASSWORD', 'JKS', 'jks_password_failed',
+                open_fn=lambda password: jks.KeyStore.load(cert_path, password),
+                immediate_fail_exceptions=(jks.util.BadKeystoreFormatException,),
+            )
+        except jks.util.BadKeystoreFormatException:
+            logger.debug(f"Not a valid JKS keystore: {cert_path}")
+            return []
 
         if ks is None:
-            logger.warning(
-                f"Could not open JKS {cert_path}: all passwords failed. "
-                "Set JKS_PASSWORD env var if the keystore uses a custom password."
-            )
-            self.metrics.cert_analysis_errors.labels(error_type='jks_password_failed', node_name=self.metrics._node_name).inc()
-            self.password_failed_paths.add(cert_path)
-            self._update_cache_metrics()
             return []
 
         certificates = []
@@ -173,10 +211,6 @@ class _CertParsingMixin:
         """
         from cryptography.hazmat.primitives.serialization.pkcs12 import load_pkcs12
 
-        configured = os.getenv('PKCS12_PASSWORD', '')
-        # Option B: env var → changeit → empty string only
-        passwords_to_try = list(dict.fromkeys([configured, 'changeit', '']))
-
         # Skip files that have already failed password attempts
         if cert_path in self.password_failed_paths:
             logger.debug(
@@ -197,27 +231,11 @@ class _CertParsingMixin:
             self.metrics.cert_analysis_errors.labels(error_type='permission_denied', node_name=self.metrics._node_name).inc()
             return []
 
-        p12 = None
-        for password in passwords_to_try:
-            try:
-                pw_bytes = password.encode() if password else b''
-                p12 = load_pkcs12(p12_data, pw_bytes)
-                logger.debug(
-                    f"Opened PKCS12 {cert_path} "
-                    f"(password={'<empty>' if not password else '<set>'})"
-                )
-                break
-            except Exception:
-                continue  # nosec B112 - trying the next candidate password, not swallowing a real error
-
+        p12 = self._open_keystore_with_password_retry(
+            cert_path, 'PKCS12_PASSWORD', 'PKCS12', 'pkcs12_password_failed',
+            open_fn=lambda password: load_pkcs12(p12_data, password.encode() if password else b''),
+        )
         if p12 is None:
-            logger.warning(
-                f"Could not open PKCS12 {cert_path}: all passwords failed. "
-                "Set PKCS12_PASSWORD env var if the file uses a custom password."
-            )
-            self.metrics.cert_analysis_errors.labels(error_type='pkcs12_password_failed', node_name=self.metrics._node_name).inc()
-            self.password_failed_paths.add(cert_path)
-            self._update_cache_metrics()
             return []
 
         certificates = []
