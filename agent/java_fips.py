@@ -7,8 +7,7 @@ see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _JavaFipsMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self.filter_self_events,
 self._known_paths/_known_paths_lock, self._recent_client_sni,
-self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_log_lock/
-_uprobe_rate_limit_last_log_time/_uprobe_rate_limit_dropped_since_log,
+self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_logger,
 self.metrics, self.last_event_time) and methods from its sibling mixins
 (self._extract_uprobe_context, self._is_self_event,
 self.extract_certificate_info, self._finish_single_certificate).
@@ -35,27 +34,19 @@ class _JavaFipsMixin:
 
     def _log_rate_limited_uprobe_cert(self, synthetic_path: str) -> None:
         """
-        Log a uprobe-cert rate-limit hit at most once every 10 seconds, with
-        a count of how many were dropped in between -- mirrors
-        _log_rate_limited_new_cert's throttling in agent/retry_queue.py, kept
-        as a separate counter/lock here since these are a different trigger
-        (uprobe captures, not file discovery) and shouldn't share one
-        dropped-count with it.
+        Log a uprobe-cert rate-limit hit at most once every 10 seconds --
+        mirrors _log_rate_limited_new_cert's throttling in
+        agent/retry_queue.py via the shared _RateLimitLogger, kept as a
+        separate instance here since these are a different trigger (uprobe
+        captures, not file discovery) and shouldn't share one dropped-count
+        with it.
         """
-        with self._uprobe_rate_limit_log_lock:
-            self._uprobe_rate_limit_dropped_since_log += 1
-            now = time.monotonic()
-            if now - self._uprobe_rate_limit_last_log_time < 10.0:
-                return
-            dropped = self._uprobe_rate_limit_dropped_since_log
-            self._uprobe_rate_limit_dropped_since_log = 0
-            self._uprobe_rate_limit_last_log_time = now
-        logger.warning(
+        self._uprobe_rate_limit_logger.note_drop(lambda dropped: (
             f"Uprobe-cert analysis rate limit reached (most recently for {synthetic_path}) -- "
             f"{dropped} uprobe capture(s) skipped in the last ~10s. Tune via "
             f"[certificates] uprobe_cert_events_per_second in cert-analyzer.conf or "
             f"UPROBE_CERT_EVENTS_PER_SECOND."
-        )
+        ))
 
     @staticmethod
     def _read_process_memory(pid: int, address: int, size: int) -> Optional[bytes]:

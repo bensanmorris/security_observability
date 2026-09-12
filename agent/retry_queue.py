@@ -4,8 +4,7 @@ New-certificate rate limiter and retry-queue pipeline for CertificateAnalyzer.
 Split out of agent/analyzer.py as part of the monolithic-analyzer file split --
 see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _RateLimitRetryQueueMixin assumes the composing class provides the
-instance state set up in CertificateAnalyzer.__init__ (self._rate_limit_log_lock,
-self._rate_limit_dropped_since_log, self._rate_limit_last_log_time,
+instance state set up in CertificateAnalyzer.__init__ (self._rate_limit_logger,
 self.processed_paths, self.metrics, self._new_cert_rate_limiter,
 self._retry_queue/_retry_queue_lock/_retry_queue_paths/_retry_queue_max_size)
 and methods from its sibling mixins (self.parse_certificates,
@@ -55,6 +54,45 @@ class _TokenBucket:
             return False
 
 
+class _RateLimitLogger:
+    """
+    Throttles a repeated "rate limit reached" warning to at most once every
+    window_seconds, counting how many events were dropped in between so the
+    eventual log line still reflects the true drop count rather than just
+    the most recent trigger -- logging every single throttled event would
+    just move the flood from CPU cost to log-volume cost.
+
+    Used by _log_rate_limited_new_cert (this module) and
+    _log_rate_limited_uprobe_cert (agent/java_fips.py), each with its own
+    instance (CertificateAnalyzer.__init__'s self._rate_limit_logger /
+    self._uprobe_rate_limit_logger) so a flood on one trigger doesn't reset
+    or share a drop count with the other.
+    """
+
+    def __init__(self, window_seconds: float = 10.0):
+        self._window_seconds = window_seconds
+        self._lock = threading.Lock()
+        self._dropped_since_log = 0
+        self._last_log_time = 0.0
+
+    def note_drop(self, message_fn) -> None:
+        """
+        Record one dropped event. Logs a warning built by
+        message_fn(dropped_count) if window_seconds have passed since the
+        last log -- message_fn is only called when actually logging, so the
+        message string isn't built on every throttled call in between.
+        """
+        with self._lock:
+            self._dropped_since_log += 1
+            now = time.monotonic()
+            if now - self._last_log_time < self._window_seconds:
+                return
+            dropped = self._dropped_since_log
+            self._dropped_since_log = 0
+            self._last_log_time = now
+        logger.warning(message_fn(dropped))
+
+
 class _RetryEntry(NamedTuple):
     """
     Captures everything needed to fully replay a rate-limited new-certificate
@@ -90,25 +128,13 @@ class _RateLimitRetryQueueMixin:
     """
 
     def _log_rate_limited_new_cert(self, cert_path: str) -> None:
-        """
-        Log a rate-limit hit at most once every 10 seconds, with a count of
-        how many were dropped in between -- logging every single throttled
-        event would just move the flood from CPU cost to log-volume cost.
-        """
-        with self._rate_limit_log_lock:
-            self._rate_limit_dropped_since_log += 1
-            now = time.monotonic()
-            if now - self._rate_limit_last_log_time < 10.0:
-                return
-            dropped = self._rate_limit_dropped_since_log
-            self._rate_limit_dropped_since_log = 0
-            self._rate_limit_last_log_time = now
-        logger.warning(
+        """Log a rate-limit hit at most once every 10 seconds -- see _RateLimitLogger."""
+        self._rate_limit_logger.note_drop(lambda dropped: (
             f"New-certificate analysis rate limit reached (most recently for {cert_path}) -- "
             f"{dropped} new-file event(s) skipped in the last ~10s. Tune via "
             f"[certificates] new_cert_events_per_second in cert-analyzer.conf or "
             f"NEW_CERT_EVENTS_PER_SECOND."
-        )
+        ))
 
     def analyze_certificate(
         self,
