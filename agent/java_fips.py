@@ -10,7 +10,7 @@ self._known_paths/_known_paths_lock, self._recent_client_sni,
 self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_log_lock/
 _uprobe_rate_limit_last_log_time/_uprobe_rate_limit_dropped_since_log,
 self.metrics, self.last_event_time) and methods from its sibling mixins
-(self._resolve_process_binary, self._is_self_event,
+(self._extract_uprobe_context, self._is_self_event,
 self.extract_certificate_info, self._finish_single_certificate).
 """
 import logging
@@ -97,16 +97,10 @@ class _JavaFipsMixin:
         CKA_VALUE, verifies the object is a certificate, then follows the CKA_VALUE
         pValue pointer to extract the raw DER bytes.
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
-        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
-        namespace = tetragon_pod.namespace if tetragon_pod else ""
-        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
-        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
+        uprobe, pid, process_name, tetragon_pod, namespace, parent_process, parent_pid = ctx
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
@@ -223,12 +217,10 @@ class _JavaFipsMixin:
         NSC_FindObjects + NSC_GetAttributeValue calls), but we log the event
         to show that Java FIPS cert enumeration was detected.
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        uprobe, pid, process_name = ctx.uprobe, ctx.pid, ctx.process_name
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
@@ -284,12 +276,10 @@ class _JavaFipsMixin:
         event carries a hostname, not cert bytes. Returns True if a hostname
         was captured, False otherwise (no string_arg, event malformed, etc.).
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        uprobe, pid, process_name = ctx.uprobe, ctx.pid, ctx.process_name
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
@@ -314,16 +304,10 @@ class _JavaFipsMixin:
         successfully extracted and processed, False otherwise (no bytes_arg,
         unparseable bytes, etc.).
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
-        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
-        namespace = tetragon_pod.namespace if tetragon_pod else ""
-        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
-        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
+        uprobe, pid, process_name, tetragon_pod, namespace, parent_process, parent_pid = ctx
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             logger.debug(f"Skipping self-generated uprobe bytes event from {process_name} (PID {pid})")

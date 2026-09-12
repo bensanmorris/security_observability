@@ -49,6 +49,22 @@ class _PodContextSnapshot(NamedTuple):
     container_start_time: Optional[object]
 
 
+class _UprobeContext(NamedTuple):
+    """
+    The process/pod/parent fields `_extract_uprobe_context` pulls off a
+    process_uprobe event -- every uprobe handler in _JavaFipsMixin
+    (agent/java_fips.py) needs some subset of these, so they're extracted
+    once in one place rather than re-derived per handler.
+    """
+    uprobe: object
+    pid: int
+    process_name: str
+    tetragon_pod: object
+    namespace: str
+    parent_process: str
+    parent_pid: int
+
+
 class _EventContextMixin:
     """
     Tetragon event/pod-context extraction, self-event filtering, and
@@ -379,6 +395,28 @@ class _EventContextMixin:
         except OSError as e:
             logger.debug(f"Could not resolve binary path for PID {pid}: {e}")
         return process_name
+
+    def _extract_uprobe_context(self, event) -> Optional[_UprobeContext]:
+        """
+        Pull the process/pod/parent fields common to every process_uprobe
+        handler in _JavaFipsMixin out of one event. Returns None if the
+        event isn't a process_uprobe at all, so callers can use it as their
+        entire "is this event even relevant to me" guard.
+        """
+        if not event.HasField('process_uprobe'):
+            return None
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
+        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
+
+        return _UprobeContext(
+            uprobe, pid, process_name, tetragon_pod, namespace, parent_process, parent_pid
+        )
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
         """
