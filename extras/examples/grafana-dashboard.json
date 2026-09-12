@@ -389,7 +389,10 @@
                   "prometheus_port": true,
                   "probe_events_per_second": true,
                   "kafka_plain_enabled": true,
-                  "kafka_connect_enabled": true
+                  "kafka_connect_enabled": true,
+                  "sni_capture_enabled": true,
+                  "sni_capture_window_seconds": true,
+                  "uprobe_cert_events_per_second": true
                 },
                 "indexByName": {
                   "node_name": 0,
@@ -910,7 +913,10 @@
                   "kafka_plain_enabled": 25,
                   "kafka_connect_enabled": 26,
                   "prometheus_port": 27,
-                  "probe_events_per_second": 11
+                  "probe_events_per_second": 11,
+                  "sni_capture_enabled": 28,
+                  "sni_capture_window_seconds": 29,
+                  "uprobe_cert_events_per_second": 30
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -940,7 +946,10 @@
                   "kafka_plain_enabled": "Kafka Plain Enabled",
                   "kafka_connect_enabled": "Kafka Connect Enabled",
                   "prometheus_port": "Prometheus Port",
-                  "probe_events_per_second": "Probe Rate Limit (events/s)"
+                  "probe_events_per_second": "Probe Rate Limit (events/s)",
+                  "sni_capture_enabled": "SNI Capture",
+                  "sni_capture_window_seconds": "SNI Capture Window (s)",
+                  "uprobe_cert_events_per_second": "Uprobe Cert Rate Limit (events/s)"
                 }
               }
             }
