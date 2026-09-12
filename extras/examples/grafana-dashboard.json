@@ -386,7 +386,8 @@
                   "scan_paths": true,
                   "kafka_enabled": true,
                   "kafka_bootstrap_servers": true,
-                  "prometheus_port": true
+                  "prometheus_port": true,
+                  "probe_events_per_second": true
                 },
                 "indexByName": {
                   "node_name": 0,
