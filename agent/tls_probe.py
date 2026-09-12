@@ -144,6 +144,7 @@ class _TlsProbeMixin:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
         # KNOWN LIMITATION (mitigated for 'connect' below when sni_capture_enabled):
         # server_hostname defaults to the raw destination IP, not the real

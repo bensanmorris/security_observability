@@ -106,7 +106,9 @@ def main() -> int:
     lifetime = float(lifetime_str)
 
     real_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    real_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     fallback_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    fallback_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         real_ctx.load_cert_chain(certfile=real_certfile, keyfile=real_keyfile)
         fallback_ctx.load_cert_chain(certfile=fallback_certfile, keyfile=fallback_keyfile)
@@ -153,6 +155,7 @@ def main() -> int:
     client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     client_ctx.check_hostname = False
     client_ctx.verify_mode = ssl.CERT_NONE
+    client_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=3) as raw_sock:
             with client_ctx.wrap_socket(raw_sock, server_hostname=real_hostname):

@@ -162,6 +162,8 @@ def write_jks(path: str, cert, password: str = 'changeit'):
     entry += struct.pack('>I', len(cert_der))  + cert_der
 
     body     = struct.pack('>III', 0xFEEDFEED, 2, 1) + entry
+    # SHA-1 + this exact salt is mandated by Oracle's JKS binary format for
+    # its tamper-detection digest, not a choice made here.
     pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
     digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
 

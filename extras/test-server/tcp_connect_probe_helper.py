@@ -79,6 +79,7 @@ def main() -> int:
     lifetime = float(lifetime_str)
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         context.load_cert_chain(certfile=certfile, keyfile=keyfile)
     except Exception as e:

@@ -95,6 +95,9 @@ class ConfigResult:
 def _make_cert(cn: str, key_size: int, days: int = 365) -> x509.Certificate:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        # key_size is deliberately as low as 1024 here (see build_cert_pool's
+        # fips_mix) to synthesize non-FIPS-compliant throwaway test certs --
+        # never used for anything but this in-process perf comparison.
         key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
     nvb = datetime.utcnow()
     nva = datetime.utcnow() + timedelta(days=days)

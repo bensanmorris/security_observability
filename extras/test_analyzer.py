@@ -142,6 +142,8 @@ def generate_test_jks(days_valid: int, output_path: str, cn: str = None, passwor
     body = struct.pack('>III', 0xFEEDFEED, 2, 1) + entry      # header + 1 entry
 
     # JKS integrity digest: SHA1(pw_as_java_chars + "Mighty Aphrodite" + body)
+    # -- mandated by Oracle's JKS binary format, not a choice made here; a
+    # different algorithm produces a file real JKS parsers can't recognize.
     pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
     digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
 

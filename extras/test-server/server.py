@@ -180,6 +180,11 @@ def make_handler(broadcaster: Optional[EventBroadcaster], prometheus_url: str, m
             self.wfile.write(data)
 
         def _serve_source(self, filename):
+            # filename comes straight from the URL path, but the exact-match
+            # membership check above rejects anything that isn't one of
+            # SOURCE_FILES' fixed literal names -- a traversal payload like
+            # "../../etc/passwd" is simply not a member and 404s before ever
+            # reaching the filesystem, so no path outside APP_DIR is reachable.
             if filename not in SOURCE_FILES:
                 self.send_error(404, f"no such source file '{filename}'")
                 return

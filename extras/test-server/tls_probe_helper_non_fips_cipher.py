@@ -48,6 +48,7 @@ def main() -> int:
     # 1.3 would otherwise prefer it over anything offered here regardless of
     # this cipher list. Capping maximum_version forces negotiation down to
     # 1.2, where this single-entry cipher list actually takes effect.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.maximum_version = ssl.TLSVersion.TLSv1_2
     context.set_ciphers(_NON_FIPS_CIPHER)
 
