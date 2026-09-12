@@ -8,7 +8,8 @@ composes. _TlsProbeMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self._probed_endpoints,
 self._probe_in_flight/_probe_in_flight_lock, self._recent_client_sni,
 self._sni_capture_enabled/_sni_capture_window_seconds, self._port_probe_timeout,
-self._port_probe_connect_delay, self._tls_outbound_ports, self.metrics,
+self._port_probe_connect_delay, self._tls_outbound_ports,
+self._probe_rate_limiter, self._probe_rate_limit_logger, self.metrics,
 self.last_event_time) and methods/constants from its sibling mixins and the
 core class (self._resolve_process_binary, self.extract_certificate_info,
 self._finish_single_certificate, self._start_background_thread,
@@ -222,6 +223,15 @@ class _TlsProbeMixin:
             f"protocol={tls_version} cipher={cipher_name}"
         )
 
+    def _log_rate_limited_probe(self, mechanism: str, host: str, port: int) -> None:
+        """Log a probe-throttle hit at most once every 10 seconds -- see _RateLimitLogger."""
+        self._probe_rate_limit_logger.note_drop(lambda dropped: (
+            f"TLS probe rate limit reached (most recently for {mechanism}:{host}:{port}) -- "
+            f"{dropped} probe(s) dropped in the last ~10s. Tune via "
+            f"[port_probe] probe_events_per_second in cert-analyzer.conf or "
+            f"PORT_PROBE_EVENTS_PER_SECOND."
+        ))
+
     def _schedule_tls_probe(
         self,
         mechanism: str,
@@ -247,6 +257,15 @@ class _TlsProbeMixin:
         outbound connect to the exact same host:port are tracked (and
         published) independently instead of racing for one shared dedup
         slot -- see _probe_tls_endpoint's docstring.
+
+        Dispatch is also gated by _probe_rate_limiter: bounds how many *new*
+        probe threads can start per second, regardless of how large a single
+        burst of bind/connect kprobe events is. A burst beyond that rate is
+        dropped here exactly like a burst beyond max_concurrent_background_
+        threads already is below -- there is no queue or retry. Default
+        matches max_concurrent_background_threads, so it costs no burst
+        coverage beyond what the thread cap already drops, while still
+        bounding sustained throughput over time.
         """
         endpoint_key = f'{mechanism}:{host}:{port}'
         with self._probe_in_flight_lock:
@@ -254,6 +273,13 @@ class _TlsProbeMixin:
                 logger.debug("TLS %s probe: %s already probed or in flight, skipping", mechanism, endpoint_key)
                 return
             self._probe_in_flight.add(endpoint_key)
+
+        if not self._probe_rate_limiter.try_acquire():
+            with self._probe_in_flight_lock:
+                self._probe_in_flight.discard(endpoint_key)
+            self._log_rate_limited_probe(mechanism, host, port)
+            self.metrics.tls_port_probes_total.labels(status='rate_limited', node_name=self.metrics._node_name).inc()
+            return
 
         def _probe():
             if delay:

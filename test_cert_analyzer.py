@@ -10101,6 +10101,121 @@ class TestPortProbe:
         synthetic_path = f'tls-connect-probe://127.0.0.1:{port}'
         assert any(k.startswith(synthetic_path + ':') for k in probe_analyzer.known_certs)
 
+    # ── probe rate limiter ─────────────────────────────────────────────────────
+    # _schedule_tls_probe's probe_events_per_second gate (agent/tls_probe.py) --
+    # bounds how many *new* probe threads can start per second, dropping (not
+    # queueing) anything beyond that, the same way a full
+    # max_concurrent_background_threads semaphore already does.
+
+    @staticmethod
+    def _mock_probe_tls_endpoint(probe_analyzer, monkeypatch):
+        """Replace _probe_tls_endpoint with a no-op that just records calls, no real TLS."""
+        calls = []
+
+        def _fake(self, host, port, process_name, pid, node_name, tetragon_pod, mechanism='bind'):
+            calls.append((mechanism, host, port))
+
+        monkeypatch.setattr(type(probe_analyzer), '_probe_tls_endpoint', _fake)
+        return calls
+
+    def test_schedule_probe_burst_respects_rate_limiter_capacity(self, probe_analyzer, monkeypatch):
+        """A burst larger than the token bucket's capacity only dispatches up to that capacity."""
+        from agent.retry_queue import _TokenBucket
+
+        calls = self._mock_probe_tls_endpoint(probe_analyzer, monkeypatch)
+        probe_analyzer._probe_rate_limiter = _TokenBucket(rate=2)
+
+        for i in range(5):
+            probe_analyzer._schedule_tls_probe(
+                'connect', f'127.0.0.{i + 2}', 443, 'curl', 1000 + i, 'node1', None,
+            )
+
+        assert len(calls) == 2
+
+    def test_schedule_probe_throttled_endpoint_is_dropped_not_queued(self, probe_analyzer, monkeypatch):
+        """A throttled dispatch is dropped immediately -- no retry queue, in-flight marker released."""
+        from agent.retry_queue import _TokenBucket
+
+        calls = self._mock_probe_tls_endpoint(probe_analyzer, monkeypatch)
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        probe_analyzer._probe_rate_limiter = bucket
+
+        probe_analyzer._schedule_tls_probe('connect', '127.0.0.2', 443, 'curl', 1001, 'node1', None)
+
+        assert calls == []
+        assert 'connect:127.0.0.2:443' not in probe_analyzer._probe_in_flight
+        assert 'connect:127.0.0.2:443' not in probe_analyzer._probed_endpoints
+
+    def test_schedule_probe_rate_limited_metric_increments(self, probe_analyzer, monkeypatch):
+        """A throttled dispatch is counted under tls_port_probes_total{status='rate_limited'}."""
+        from agent.retry_queue import _TokenBucket
+
+        self._mock_probe_tls_endpoint(probe_analyzer, monkeypatch)
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        probe_analyzer._probe_rate_limiter = bucket
+
+        before = probe_analyzer.metrics.tls_port_probes_total.labels(
+            status='rate_limited', node_name=probe_analyzer.metrics._node_name
+        )._value.get()
+
+        probe_analyzer._schedule_tls_probe('connect', '127.0.0.2', 443, 'curl', 1001, 'node1', None)
+
+        after = probe_analyzer.metrics.tls_port_probes_total.labels(
+            status='rate_limited', node_name=probe_analyzer.metrics._node_name
+        )._value.get()
+        assert after == before + 1
+
+    def test_schedule_probe_throttled_endpoint_can_be_retried_on_next_event(self, probe_analyzer, monkeypatch):
+        """Unlike a queued design, a dropped probe has no memory of its own -- a fresh event for
+        the same endpoint after tokens free up is a brand new, independent attempt."""
+        from agent.retry_queue import _TokenBucket
+
+        calls = self._mock_probe_tls_endpoint(probe_analyzer, monkeypatch)
+        bucket = _TokenBucket(rate=1)
+        bucket._tokens = 0
+        probe_analyzer._probe_rate_limiter = bucket
+
+        probe_analyzer._schedule_tls_probe('connect', '127.0.0.2', 443, 'curl', 1001, 'node1', None)
+        assert calls == []
+
+        bucket._tokens = 1  # simulate the bucket having refilled by the time a later event arrives
+        probe_analyzer._schedule_tls_probe('connect', '127.0.0.2', 443, 'curl', 1001, 'node1', None)
+        assert calls == [('connect', '127.0.0.2', 443)]
+
+    def test_rate_limiter_disabled_when_probe_events_per_second_is_zero(self, monkeypatch):
+        """probe_events_per_second <= 0 disables the limiter entirely -- see _TokenBucket."""
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(
+            tetragon_address='unix:///dev/null',
+            bind_probe_enabled=True, connect_probe_enabled=True,
+            port_probe_connect_delay=0.0,
+            probe_events_per_second=0,
+        )
+        a._background_thread_semaphore = threading.Semaphore(1000)  # isolate the rate limiter, not the thread cap
+        calls = self._mock_probe_tls_endpoint(a, monkeypatch)
+
+        for i in range(50):
+            a._schedule_tls_probe('connect', f'127.0.0.{i + 2}', 443, 'curl', 1000 + i, 'node1', None)
+
+        deadline = _time.monotonic() + 3.0
+        while _time.monotonic() < deadline and len(calls) < 50:
+            _time.sleep(0.02)
+        assert len(calls) == 50
+
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
 
 class TestEventRateMetrics:
     """Tests for per-process event-rate counters (event_rate_metrics_enabled).

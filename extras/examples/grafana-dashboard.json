@@ -386,7 +386,8 @@
                   "scan_paths": true,
                   "kafka_enabled": true,
                   "kafka_bootstrap_servers": true,
-                  "prometheus_port": true
+                  "prometheus_port": true,
+                  "probe_events_per_second": true
                 },
                 "indexByName": {
                   "node_name": 0,
@@ -895,22 +896,23 @@
                   "connect_probe_enabled": 8,
                   "port_probe_timeout": 9,
                   "port_probe_connect_delay": 10,
-                  "tls_outbound_ports": 11,
-                  "large_file_cert_threshold": 12,
-                  "large_file_metrics_cap": 13,
-                  "large_file_byte_cap": 14,
-                  "max_concurrent_background_threads": 15,
-                  "max_processes_per_cert": 16,
-                  "new_cert_events_per_second": 17,
-                  "retry_queue_max_size": 18,
-                  "alert_threshold_days": 19,
-                  "Value #B": 20,
-                  "scan_paths": 21,
-                  "kafka_enabled": 22,
-                  "kafka_bootstrap_servers": 23,
-                  "kafka_plain_enabled": 24,
-                  "kafka_connect_enabled": 25,
-                  "prometheus_port": 26
+                  "tls_outbound_ports": 12,
+                  "large_file_cert_threshold": 13,
+                  "large_file_metrics_cap": 14,
+                  "large_file_byte_cap": 15,
+                  "max_concurrent_background_threads": 16,
+                  "max_processes_per_cert": 17,
+                  "new_cert_events_per_second": 18,
+                  "retry_queue_max_size": 19,
+                  "alert_threshold_days": 20,
+                  "Value #B": 21,
+                  "scan_paths": 22,
+                  "kafka_enabled": 23,
+                  "kafka_bootstrap_servers": 24,
+                  "kafka_plain_enabled": 25,
+                  "kafka_connect_enabled": 26,
+                  "prometheus_port": 27,
+                  "probe_events_per_second": 11
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -939,7 +941,8 @@
                   "kafka_bootstrap_servers": "Kafka Brokers",
                   "kafka_plain_enabled": "Kafka Plain Enabled",
                   "kafka_connect_enabled": "Kafka Connect Enabled",
-                  "prometheus_port": "Prometheus Port"
+                  "prometheus_port": "Prometheus Port",
+                  "probe_events_per_second": "Probe Rate Limit (events/s)"
                 }
               }
             }
