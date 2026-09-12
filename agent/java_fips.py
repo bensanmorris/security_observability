@@ -6,13 +6,11 @@ Split out of agent/analyzer.py as part of the monolithic-analyzer file split --
 see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _JavaFipsMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self.filter_self_events,
-self.known_certs, self._known_paths/_known_paths_lock, self._recent_client_sni,
-self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_log_lock/
-_uprobe_rate_limit_last_log_time/_uprobe_rate_limit_dropped_since_log,
-self.metrics, self.kafka_publisher, self.last_event_time) and methods from its
-sibling mixins (self._resolve_process_binary, self._is_self_event,
-self.extract_certificate_info, self._apply_pod_context,
-self.log_certificate_status, self._update_cache_metrics).
+self._known_paths/_known_paths_lock, self._recent_client_sni,
+self._uprobe_cert_rate_limiter, self._uprobe_rate_limit_logger,
+self.metrics, self.last_event_time) and methods from its sibling mixins
+(self._extract_uprobe_context, self._is_self_event,
+self.extract_certificate_info, self._finish_single_certificate).
 """
 import logging
 import time
@@ -36,27 +34,19 @@ class _JavaFipsMixin:
 
     def _log_rate_limited_uprobe_cert(self, synthetic_path: str) -> None:
         """
-        Log a uprobe-cert rate-limit hit at most once every 10 seconds, with
-        a count of how many were dropped in between -- mirrors
-        _log_rate_limited_new_cert's throttling in agent/retry_queue.py, kept
-        as a separate counter/lock here since these are a different trigger
-        (uprobe captures, not file discovery) and shouldn't share one
-        dropped-count with it.
+        Log a uprobe-cert rate-limit hit at most once every 10 seconds --
+        mirrors _log_rate_limited_new_cert's throttling in
+        agent/retry_queue.py via the shared _RateLimitLogger, kept as a
+        separate instance here since these are a different trigger (uprobe
+        captures, not file discovery) and shouldn't share one dropped-count
+        with it.
         """
-        with self._uprobe_rate_limit_log_lock:
-            self._uprobe_rate_limit_dropped_since_log += 1
-            now = time.monotonic()
-            if now - self._uprobe_rate_limit_last_log_time < 10.0:
-                return
-            dropped = self._uprobe_rate_limit_dropped_since_log
-            self._uprobe_rate_limit_dropped_since_log = 0
-            self._uprobe_rate_limit_last_log_time = now
-        logger.warning(
+        self._uprobe_rate_limit_logger.note_drop(lambda dropped: (
             f"Uprobe-cert analysis rate limit reached (most recently for {synthetic_path}) -- "
             f"{dropped} uprobe capture(s) skipped in the last ~10s. Tune via "
             f"[certificates] uprobe_cert_events_per_second in cert-analyzer.conf or "
             f"UPROBE_CERT_EVENTS_PER_SECOND."
-        )
+        ))
 
     @staticmethod
     def _read_process_memory(pid: int, address: int, size: int) -> Optional[bytes]:
@@ -98,16 +88,10 @@ class _JavaFipsMixin:
         CKA_VALUE, verifies the object is a certificate, then follows the CKA_VALUE
         pValue pointer to extract the raw DER bytes.
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
-        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
-        namespace = tetragon_pod.namespace if tetragon_pod else ""
-        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
-        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
+        uprobe, pid, process_name, tetragon_pod, namespace, parent_process, parent_pid = ctx
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
@@ -210,18 +194,7 @@ class _JavaFipsMixin:
         if cert_info is None:
             return False
 
-        self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name      = event.node_name
-        cert_info.parent_process = parent_process
-        cert_info.parent_pid     = parent_pid
-        self.metrics.update_certificate_metrics(cert_info)
-        self.log_certificate_status(cert_info)
-        self.known_certs[cert_info.unique_key] = cert_info
-
-        if self.kafka_publisher is not None:
-            self.kafka_publisher.publish(cert_info)
-
-        self._update_cache_metrics()
+        self._finish_single_certificate(cert_info, tetragon_pod, event.node_name, parent_process, parent_pid)
         return True
 
     def _handle_nsc_find_objects_init(self, event) -> bool:
@@ -235,12 +208,10 @@ class _JavaFipsMixin:
         NSC_FindObjects + NSC_GetAttributeValue calls), but we log the event
         to show that Java FIPS cert enumeration was detected.
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        uprobe, pid, process_name = ctx.uprobe, ctx.pid, ctx.process_name
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
@@ -296,12 +267,10 @@ class _JavaFipsMixin:
         event carries a hostname, not cert bytes. Returns True if a hostname
         was captured, False otherwise (no string_arg, event malformed, etc.).
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        uprobe, pid, process_name = ctx.uprobe, ctx.pid, ctx.process_name
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             return False
@@ -326,16 +295,10 @@ class _JavaFipsMixin:
         successfully extracted and processed, False otherwise (no bytes_arg,
         unparseable bytes, etc.).
         """
-        if not event.HasField('process_uprobe'):
+        ctx = self._extract_uprobe_context(event)
+        if ctx is None:
             return False
-
-        uprobe = event.process_uprobe
-        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
-        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
-        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
-        namespace = tetragon_pod.namespace if tetragon_pod else ""
-        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
-        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
+        uprobe, pid, process_name, tetragon_pod, namespace, parent_process, parent_pid = ctx
 
         if self.filter_self_events and self._is_self_event(process_name, pid):
             logger.debug(f"Skipping self-generated uprobe bytes event from {process_name} (PID {pid})")
@@ -386,16 +349,5 @@ class _JavaFipsMixin:
         if cert_info is None:
             return False
 
-        self._apply_pod_context(cert_info, tetragon_pod)
-        cert_info.node_name      = event.node_name
-        cert_info.parent_process = parent_process
-        cert_info.parent_pid     = parent_pid
-        self.metrics.update_certificate_metrics(cert_info)
-        self.log_certificate_status(cert_info)
-        self.known_certs[cert_info.unique_key] = cert_info
-
-        if self.kafka_publisher is not None:
-            self.kafka_publisher.publish(cert_info)
-
-        self._update_cache_metrics()
+        self._finish_single_certificate(cert_info, tetragon_pod, event.node_name, parent_process, parent_pid)
         return True

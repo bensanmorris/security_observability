@@ -6,8 +6,9 @@ Split out of agent/analyzer.py as part of the monolithic-analyzer file split --
 see that module's docstring for the full list of mixins CertificateAnalyzer
 composes. _EventContextMixin assumes the composing class provides the instance
 state set up in CertificateAnalyzer.__init__ (self.alert_threshold_days,
-self.demo_mode, self.host_prefix, self.filter_self_events) and methods from
-its sibling mixins/the core class (self.is_cert_path).
+self.demo_mode, self.host_prefix, self.filter_self_events, self.known_certs,
+self.kafka_publisher, self.metrics) and methods from its sibling mixins/the
+core class (self.is_cert_path, self._update_cache_metrics).
 """
 import logging
 import os
@@ -46,6 +47,22 @@ class _PodContextSnapshot(NamedTuple):
     container_privileged: Optional[bool]
     container_pid: Optional[int]
     container_start_time: Optional[object]
+
+
+class _UprobeContext(NamedTuple):
+    """
+    The process/pod/parent fields `_extract_uprobe_context` pulls off a
+    process_uprobe event -- every uprobe handler in _JavaFipsMixin
+    (agent/java_fips.py) needs some subset of these, so they're extracted
+    once in one place rather than re-derived per handler.
+    """
+    uprobe: object
+    pid: int
+    process_name: str
+    tetragon_pod: object
+    namespace: str
+    parent_process: str
+    parent_pid: int
 
 
 class _EventContextMixin:
@@ -178,6 +195,48 @@ class _EventContextMixin:
             cert_info.container_name, cert_info.container_image,
             cert_info.container_privileged, cert_info.pod_labels,
         )
+
+    def _finish_single_certificate(
+        self,
+        cert_info: CertificateInfo,
+        tetragon_pod,
+        node_name: str,
+        parent_process: str = "",
+        parent_pid: int = 0,
+        skip_metrics_and_log: bool = False,
+        update_cache: bool = True,
+    ) -> None:
+        """
+        Apply pod/event context, update metrics, log, cache, and publish one
+        freshly-extracted certificate -- the common tail shared by every
+        discovery path that hands off a single CertificateInfo (Java FIPS/
+        in-memory uprobe captures in agent/java_fips.py, TLS port probes in
+        agent/tls_probe.py) and the per-cert body of
+        _finish_new_certificate_file's bundle loop in agent/retry_queue.py.
+
+        skip_metrics_and_log lets the bundle-file loop stay under
+        large_file_metrics_cap by skipping the per-cert Prometheus
+        series/log line for overflow certs while still caching and
+        publishing them. update_cache=False lets that same loop defer the
+        cache-size gauge update until after the whole batch instead of
+        recomputing it per cert.
+        """
+        self._apply_pod_context(cert_info, tetragon_pod)
+        cert_info.node_name      = node_name
+        cert_info.parent_process = parent_process
+        cert_info.parent_pid     = parent_pid
+
+        if not skip_metrics_and_log:
+            self.metrics.update_certificate_metrics(cert_info)
+            self.log_certificate_status(cert_info)
+
+        self.known_certs[cert_info.unique_key] = cert_info
+
+        if self.kafka_publisher is not None:
+            self.kafka_publisher.publish(cert_info)
+
+        if update_cache:
+            self._update_cache_metrics()
 
     @staticmethod
     def _derive_app_label_and_container_name(tetragon_pod) -> Tuple[str, str]:
@@ -336,6 +395,28 @@ class _EventContextMixin:
         except OSError as e:
             logger.debug(f"Could not resolve binary path for PID {pid}: {e}")
         return process_name
+
+    def _extract_uprobe_context(self, event) -> Optional[_UprobeContext]:
+        """
+        Pull the process/pod/parent fields common to every process_uprobe
+        handler in _JavaFipsMixin out of one event. Returns None if the
+        event isn't a process_uprobe at all, so callers can use it as their
+        entire "is this event even relevant to me" guard.
+        """
+        if not event.HasField('process_uprobe'):
+            return None
+
+        uprobe = event.process_uprobe
+        pid = uprobe.process.pid.value if uprobe.process.HasField('pid') else 0
+        process_name = self._resolve_process_binary(uprobe.process.binary, pid)
+        tetragon_pod = uprobe.process.pod if uprobe.process.HasField('pod') else None
+        namespace = tetragon_pod.namespace if tetragon_pod else ""
+        parent_process = uprobe.parent.binary if uprobe.HasField('parent') else ""
+        parent_pid = uprobe.parent.pid.value if uprobe.HasField('parent') and uprobe.parent.HasField('pid') else 0
+
+        return _UprobeContext(
+            uprobe, pid, process_name, tetragon_pod, namespace, parent_process, parent_pid
+        )
 
     def extract_cert_path_from_event(self, event) -> Tuple[Optional[str], str, int, str, object]:
         """

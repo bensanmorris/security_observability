@@ -52,7 +52,7 @@ from .tls_probe import _TlsProbeMixin
 from .tetragon_monitor import _TetragonMonitorMixin
 from .event_context import _EventContextMixin
 from .cert_parsing import _CertParsingMixin
-from .retry_queue import _TokenBucket, _RateLimitRetryQueueMixin
+from .retry_queue import _TokenBucket, _RateLimitLogger, _RateLimitRetryQueueMixin
 
 logger = logging.getLogger(__name__)
 
@@ -198,9 +198,7 @@ class CertificateAnalyzer(
         # the part an attacker can drive purely by generating distinct
         # certificate content/paths, with no config access.
         self._new_cert_rate_limiter = _TokenBucket(new_cert_events_per_second)
-        self._rate_limit_log_lock = threading.Lock()
-        self._rate_limit_last_log_time = 0.0
-        self._rate_limit_dropped_since_log = 0
+        self._rate_limit_logger = _RateLimitLogger()
         # Separate token bucket for the PKCS11/NSS and in-memory-DER uprobe
         # discovery paths (agent/java_fips.py): those bypass
         # _new_cert_rate_limiter entirely (see the comment on
@@ -214,9 +212,7 @@ class CertificateAnalyzer(
         # uprobe captures can't also starve real file-based cert discovery
         # of its budget.
         self._uprobe_cert_rate_limiter = _TokenBucket(uprobe_cert_events_per_second)
-        self._uprobe_rate_limit_log_lock = threading.Lock()
-        self._uprobe_rate_limit_last_log_time = 0.0
-        self._uprobe_rate_limit_dropped_since_log = 0
+        self._uprobe_rate_limit_logger = _RateLimitLogger()
         # A rate-limited file isn't dropped -- it's queued here and replayed
         # by the retry-queue drainer thread once capacity frees up, with its
         # *original* triggering process/pod context intact (unlike
