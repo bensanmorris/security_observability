@@ -212,8 +212,14 @@ function connectEventStream() {
       // showing another visitor's activity
       return;
     }
+    // certificate_discovered events carry common_name; certificate_accessed
+    // events (use_cases.py's "re-access from a different process" use case)
+    // deliberately don't -- they carry path instead, which still embeds the
+    // token since it's the exact same generated file path as the original
+    // discovery. Checking both lets one filter cover either event type.
     const commonName = parsed && typeof parsed.common_name === 'string' ? parsed.common_name : '';
-    const isMine = [...myTokens].some((token) => commonName.includes(token));
+    const path = parsed && typeof parsed.path === 'string' ? parsed.path : '';
+    const isMine = [...myTokens].some((token) => commonName.includes(token) || path.includes(token));
     if (!isMine) return;
 
     const entry = document.createElement('pre');

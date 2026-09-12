@@ -81,6 +81,32 @@ class TestParseArgsMode:
         args = ts.parse_args()
         assert args.disable_use_cases == 'in-memory-asn1-cert,java-jca-keystore'
 
+    def test_access_topic_default(self, monkeypatch):
+        monkeypatch.delenv('TEST_SERVER_ACCESS_TOPIC', raising=False)
+        monkeypatch.setattr(sys, 'argv', [
+            'server.py', '--kafka-host', 'localhost', '--kafka-port', '9092',
+        ])
+        args = ts.parse_args()
+        assert args.access_topic == 'cert-analyzer-access-events'
+
+    def test_access_topic_via_env_var(self, monkeypatch):
+        monkeypatch.setenv('TEST_SERVER_ACCESS_TOPIC', 'custom-access-events')
+        monkeypatch.setattr(sys, 'argv', [
+            'server.py', '--kafka-host', 'localhost', '--kafka-port', '9092',
+        ])
+        args = ts.parse_args()
+        assert args.access_topic == 'custom-access-events'
+
+    def test_access_topic_can_be_disabled_with_empty_string(self, monkeypatch):
+        """main() only appends access_topic to the watched topics if it's truthy --
+        see the `topics = (args.topic,) + ((args.access_topic,) if args.access_topic else ())`
+        line -- this just confirms parse_args() itself accepts an empty override."""
+        monkeypatch.setattr(sys, 'argv', [
+            'server.py', '--kafka-host', 'localhost', '--kafka-port', '9092', '--access-topic', '',
+        ])
+        args = ts.parse_args()
+        assert args.access_topic == ''
+
 
 # ── make_handler() routing in each mode ─────────────────────────────────────
 

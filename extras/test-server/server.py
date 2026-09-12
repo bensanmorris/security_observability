@@ -103,17 +103,22 @@ class EventBroadcaster:
             q.put(message)
 
 
-def _consume_kafka(broadcaster: EventBroadcaster, host: str, port: int, topic: str) -> None:
+def _consume_kafka(broadcaster: EventBroadcaster, host: str, port: int, topics: tuple) -> None:
+    """Consumes one or more topics through a single KafkaConsumer -- e.g. the
+    discovery topic (certificate_discovered) and the access topic
+    (certificate_accessed) both land on the same SSE stream this way, so the
+    "re-access from a different process" use case's events reach the browser
+    without a second consumer thread/connection."""
     bootstrap = f"{host}:{port}"
     while True:
         try:
             consumer = KafkaConsumer(
-                topic,
+                *topics,
                 bootstrap_servers=bootstrap,
                 auto_offset_reset="latest",
                 enable_auto_commit=False,
             )
-            logger.info("connected to Kafka %s, topic '%s'", bootstrap, topic)
+            logger.info("connected to Kafka %s, topic(s) %s", bootstrap, ", ".join(repr(t) for t in topics))
             for message in consumer:
                 broadcaster.publish(message.value.decode("utf-8", errors="replace"))
         except KafkaError as e:
@@ -359,6 +364,19 @@ def parse_args() -> argparse.Namespace:
         help="Kafka topic to watch (default: cert-analyzer-events, env: TEST_SERVER_TOPIC)",
     )
     parser.add_argument(
+        "--access-topic",
+        default=os.environ.get("TEST_SERVER_ACCESS_TOPIC", "cert-analyzer-access-events"),
+        help=(
+            "Kafka topic for certificate_accessed events -- cert-analyzer's separate "
+            "topic (default: cert-analyzer-access-events, env: TEST_SERVER_ACCESS_TOPIC) "
+            "for a distinct process re-accessing an already-known cert, published only "
+            "when [kafka] access_enabled = true there. Watched by the same consumer as "
+            "--topic, alongside it, not instead of it. Pass an empty string to skip it "
+            "(e.g. a deployment that never enables access_enabled and would rather not "
+            "log repeated 'unknown topic' warnings against a topic that will never exist)."
+        ),
+    )
+    parser.add_argument(
         "--prometheus-url",
         default=os.environ.get("TEST_SERVER_PROMETHEUS_URL", "http://127.0.0.1:9090"),
         help=(
@@ -410,9 +428,10 @@ def main() -> None:
     broadcaster: Optional[EventBroadcaster] = None
     if args.mode == "full":
         broadcaster = EventBroadcaster()
+        topics = (args.topic,) + ((args.access_topic,) if args.access_topic else ())
         consumer_thread = threading.Thread(
             target=_consume_kafka,
-            args=(broadcaster, args.kafka_host, args.kafka_port, args.topic),
+            args=(broadcaster, args.kafka_host, args.kafka_port, topics),
             daemon=True,
         )
         consumer_thread.start()
@@ -421,8 +440,9 @@ def main() -> None:
     server.daemon_threads = True
     if args.mode == "full":
         logger.info(
-            "serving on http://%s:%d in 'full' mode (Kafka: %s:%d, topic '%s'; Prometheus: %s)",
-            args.bind, args.port, args.kafka_host, args.kafka_port, args.topic, args.prometheus_url,
+            "serving on http://%s:%d in 'full' mode (Kafka: %s:%d, topic(s) %s; Prometheus: %s)",
+            args.bind, args.port, args.kafka_host, args.kafka_port,
+            ", ".join(repr(t) for t in topics), args.prometheus_url,
         )
     else:
         logger.info(
