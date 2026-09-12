@@ -387,7 +387,9 @@
                   "kafka_enabled": true,
                   "kafka_bootstrap_servers": true,
                   "prometheus_port": true,
-                  "probe_events_per_second": true
+                  "probe_events_per_second": true,
+                  "kafka_plain_enabled": true,
+                  "kafka_connect_enabled": true
                 },
                 "indexByName": {
                   "node_name": 0,
@@ -402,9 +404,7 @@
                   "Value #E": 9,
                   "Value #F": 10,
                   "Value #J": 11,
-                  "Value #K": 12,
-                  "kafka_plain_enabled": 13,
-                  "kafka_connect_enabled": 14
+                  "Value #K": 12
                 },
                 "renameByName": {
                   "node_name": "Node",
@@ -417,8 +417,6 @@
                   "Value #F": "Kafka Err/s",
                   "version": "Analyzer Version",
                   "Value #I": "Scraping Interval",
-                  "kafka_plain_enabled": "Kafka Plain Enabled",
-                  "kafka_connect_enabled": "Kafka Connect Enabled",
                   "Value #J": "Kafka Connected",
                   "Value #K": "Kafka Last Published",
                   "Value #L": "Last Scraped"
