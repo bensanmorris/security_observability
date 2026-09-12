@@ -138,8 +138,13 @@ Then open http://localhost:8090.
 `--kafka-host`/`--kafka-port` are required (no baked-in default) since the
 broker is whatever you configured cert-analyzer's `[kafka] bootstrap_servers`
 to point at. `--topic` defaults to `cert-analyzer-events` (cert-analyzer's
-own default); pass `--port` to change this server's own listen port
-(default `8090`). `--prometheus-url` defaults to `http://127.0.0.1:9090`
+own default) and `--access-topic` defaults to `cert-analyzer-access-events`
+(cert-analyzer's `certificate_accessed` topic, only published to when
+`[kafka] access_enabled = true` there -- required for the "re-access an
+already-known certificate from a different process" use case below; pass
+`--access-topic ''` to skip watching it); pass `--port` to change this
+server's own listen port (default `8090`). `--prometheus-url` defaults to
+`http://127.0.0.1:9090`
 (an IPv4 literal, not `localhost` -- see below) and only matters for the
 "Certificate blast radius explorer" / "Fleet certificate blast radius" /
 "Certificate chain explorer" / "Fleet FIPS rollout" links -- adjust it if
@@ -377,6 +382,8 @@ you've made to it.
 | dial out with a real SNI hostname behind a CDN-style edge and let CertSight discover it | Spawns `tcp_connect_sni_probe_helper.py`, which binds a TLS listener that serves a different cert depending on the SNI it receives, then connects back to itself presenting a real hostname as SNI | The `SSL_ctrl` uprobe fix for connect-probe's CDN fallback-cert gap: compare the Kafka event's CN to see whether cert-analyzer's probe used the real hostname (`[port_probe] sni_capture_enabled = true`) or the raw destination IP (the default) |
 | load a certificate straight into memory (no file) and let CertSight discover it | Generates a fresh self-signed cert as DER bytes and calls `SSL_CTX_use_certificate_ASN1()` directly against the system libssl via `ctypes` -- no file is ever written | In-memory cert detection via the `openssl3-cert-load.yaml` Tetragon policy (`SSL_CTX_use_certificate_ASN1` uprobe); cert-analyzer builds a synthetic `uprobe://SSL_CTX_use_certificate_ASN1/<pid>/<serial>` path since there's no real one |
 | load a certificate into a Java KeyStore (JCA) and let CertSight discover it | Spawns a JVM (`CertAgentTest`), jattaches CertSight's cert-agent Java instrumentation into it, then watches it call `KeyStore.setCertificateEntry()` on a fresh in-memory cert every few seconds | In-memory JCA cert detection via the `java-non-fips-cert.yaml` Tetragon policy (`java_cert_agent_write` uprobe); cert-analyzer builds a synthetic `uprobe://java_cert_agent_write/<pid>/<serial>` path since there's no real file |
+| re-access an already-known certificate from a different process | Generates a fresh cert (the write already discovers it), then reads the same file with `cat` and then `head` | Distinct-accessor tracking (`_record_cert_process_access`): each of `cat`/`head` is a genuinely new process touching an already-known cert, so each produces its own `certificate_accessed` event on the separate `cert-analyzer-access-events` topic. Requires `[kafka] access_enabled = true` |
+| generate a large CA-style bundle and let CertSight discover it | Generates a configurable-size PEM bundle (default 350) of unrelated self-signed EC certs and `cat`s it | Large-bundle handling: above `large_file_cert_threshold` (default 20) cert-analyzer parses on a background thread instead of its Tetragon event-consumer thread; above `large_file_metrics_cap` (default 300) only that many get full per-cert Prometheus tracking, summarized in one log line otherwise -- the cardinality cap a real 2026-07-03 production incident led to |
 
 The RSA key size is selectable (1024/2048/3072/4096 bits) via a dropdown
 next to the button, both in the UI and as a `{"key_size": "1024"}` JSON

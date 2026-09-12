@@ -26,7 +26,7 @@ from typing import Callable, List, Optional, Tuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
 
@@ -139,6 +139,30 @@ _MAX_EXPIRED_DAYS = 3650
 _CHAIN_INTERMEDIATE_COUNT = 3
 _ALLOWED_MISSING_INTERMEDIATE_COUNTS = ["1", "2", "3"]
 _DEFAULT_MISSING_INTERMEDIATE_COUNT = "1"
+
+# The large-bundle use case's cert count is a free-form number (not a small
+# fixed allowlist like the ones above) since the whole point is letting a
+# visitor cross either of cert-analyzer's two size thresholds
+# (large_file_cert_threshold, default 20; large_file_metrics_cap, default
+# 300) at will. Bounded server-side regardless -- this endpoint is
+# unauthenticated -- generously above both defaults so a visitor with a
+# differently-configured cert-analyzer can still demonstrate crossing
+# large_file_metrics_cap, but not so high it becomes an easy CPU/memory
+# sink (each cert still costs a real EC keygen + sign + later parse).
+_MIN_BUNDLE_CERT_COUNT = 5
+_MAX_BUNDLE_CERT_COUNT = 500
+_DEFAULT_BUNDLE_CERT_COUNT = "350"
+
+# Only this many of the bundle's certs get the visitor's token folded into
+# their CN (see _resolve_token) -- cert-analyzer's own kafka_publisher.publish()
+# call in _finish_single_certificate is unconditional, so *every* cert in the
+# bundle really does get its own certificate_discovered Kafka event
+# regardless of large_file_metrics_cap (that cap only skips the Prometheus
+# metrics/log line for overflow certs, not the cache write or the publish).
+# With a 350-cert bundle that means flooding this visitor's own Kafka pane
+# with 350 entries for one click if every CN carried the token -- keeping it
+# to a handful still proves discovery happened without the scroll spam.
+_BUNDLE_TOKEN_TAGGED_CERT_COUNT = 3
 
 
 def _generate_self_signed_cert(cn: str, key_size: int, expired_days: int = 0) -> Tuple[bytes, bytes]:
@@ -507,6 +531,169 @@ def _generate_key_reused_certs(params: dict) -> UseCaseResult:
             f"won't show this. In SPKI mode, badged groups (key reuse) now sort first, so the "
             f"one from this run should be at or near the top of the grid; its detail table "
             f"lists both certs above under different common names"
+        ),
+        token=token,
+    )
+
+
+_REACCESS_SETTLE_SECONDS = 2.0
+# A genuinely different binary from 'cat' -- real fd_install kprobe event,
+# distinct process attribution, no different from a second real tool on the
+# host (a health check, a different monitoring agent, ...) reading the same
+# certificate later.
+_REACCESS_SECOND_READER = "head"
+
+
+def _reaccess_existing_cert_from_new_process(params: dict) -> UseCaseResult:
+    token = _resolve_token(params)
+    cn = f"certsight-test-reaccess-{token}.local"
+    path = _GENERATED_CERT_DIR / f"reaccess-{token}.crt"
+
+    cert_pem, _key_pem = _generate_self_signed_cert(cn, int(_DEFAULT_KEY_SIZE))
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+    path.write_bytes(cert_pem)
+    path.chmod(0o644)
+
+    try:
+        proc = subprocess.run(["cat", str(path)], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return UseCaseResult(ok=False, detail=f"cat {path} timed out (first read)")
+    if proc.returncode != 0:
+        return UseCaseResult(
+            ok=False, detail=f"cat {path} exited {proc.returncode}: {proc.stderr.strip()} (first read)",
+        )
+
+    # Give cert-analyzer time to fully process everything above -- this
+    # server's own write() already fired the fd_install kprobe once (attributed
+    # to this test server's own python3 process) before 'cat' even ran, so by
+    # the time 'cat' above completes, the path is typically *already* known
+    # and cat's own read lands as the first certificate_accessed rather than
+    # a discovery -- confirmed live: process=python3 discovers it, then
+    # process=cat shows up as a re-access a few ms later. This sleep is just
+    # to safely settle before the second reader below, not to protect cat's
+    # own read -- this server has no way to poll cert-analyzer's internal
+    # cache directly, so a fixed wait is the same style already used
+    # elsewhere for async settling (bind-probe's connect_delay_seconds).
+    time.sleep(_REACCESS_SETTLE_SECONDS)
+
+    try:
+        proc = subprocess.run(
+            [_REACCESS_SECOND_READER, "-c", "1", str(path)], capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return UseCaseResult(ok=False, detail=f"{_REACCESS_SECOND_READER} {path} timed out (second read)")
+    if proc.returncode != 0:
+        return UseCaseResult(
+            ok=False,
+            detail=f"{_REACCESS_SECOND_READER} {path} exited {proc.returncode}: {proc.stderr.strip()} (second read)",
+        )
+
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"generated a fresh self-signed cert (CN={cn}) at {path} -- writing it already "
+            f"discovers it -- then read the same file with 'cat' and, after "
+            f"{_REACCESS_SETTLE_SECONDS:.0f}s, with '{_REACCESS_SECOND_READER}' too. Since "
+            "[kafka] access_enabled = true, expect two distinct 'certificate_accessed' events "
+            "(not more 'certificate_discovered' ones) for this same already-known certificate: "
+            f"one attributing process=cat, one attributing process={_REACCESS_SECOND_READER} -- "
+            "two genuinely different accessors, tracked independently"
+        ),
+        token=token,
+    )
+
+
+def _generate_large_bundle_cert(cn: str) -> bytes:
+    """Fast EC P-256 self-signed leaf cert -- see _generate_large_bundle_and_read.
+
+    EC P-256 instead of RSA purely for keygen speed: a few hundred RSA-2048
+    keys takes several real seconds (~30ms each), while the same count of EC
+    P-256 keys is essentially free -- this use case's point is bundle-size
+    handling, not key type, and P-256 is itself FIPS-approved
+    (agent/fips_compliance_checker.py), so it doesn't introduce an unrelated
+    compliance finding into a demo that isn't about that.
+    """
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+        .sign(private_key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def _generate_large_bundle_and_read(params: dict) -> UseCaseResult:
+    count_str = params.get("cert_count", _DEFAULT_BUNDLE_CERT_COUNT)
+    try:
+        count = int(count_str)
+    except (TypeError, ValueError):
+        return UseCaseResult(ok=False, detail=f"invalid cert_count '{count_str}' -- must be an integer")
+    if not (_MIN_BUNDLE_CERT_COUNT <= count <= _MAX_BUNDLE_CERT_COUNT):
+        return UseCaseResult(
+            ok=False,
+            detail=f"cert_count must be between {_MIN_BUNDLE_CERT_COUNT} and {_MAX_BUNDLE_CERT_COUNT}",
+        )
+
+    token = _resolve_token(params)
+    path = _GENERATED_CERT_DIR / f"generated-bundle-{token}.pem"
+
+    # Only the first _BUNDLE_TOKEN_TAGGED_CERT_COUNT get the token in their
+    # CN -- see that constant's own comment for why the rest are still real
+    # discoveries, just not tagged as this visitor's.
+    tagged = min(_BUNDLE_TOKEN_TAGGED_CERT_COUNT, count)
+    pem_blobs = []
+    for i in range(count):
+        cn = (
+            f"certsight-test-bundle-{token}-{i}.local" if i < tagged
+            else f"certsight-test-bundle-member-{i}.internal"
+        )
+        pem_blobs.append(_generate_large_bundle_cert(cn))
+
+    _GENERATED_CERT_DIR.mkdir(parents=True, exist_ok=True)
+    _GENERATED_CERT_DIR.chmod(0o755)
+    path.write_bytes(b"".join(pem_blobs))
+    path.chmod(0o644)
+
+    try:
+        proc = subprocess.run(["cat", str(path)], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return UseCaseResult(ok=False, detail=f"cat {path} timed out")
+    if proc.returncode != 0:
+        return UseCaseResult(ok=False, detail=f"cat {path} exited {proc.returncode}: {proc.stderr.strip()}")
+
+    routing_note = (
+        "exceeds the default large_file_cert_threshold (20), so CertSight parses this on its "
+        "own background thread instead of the Tetragon event-consumer thread"
+        if count > 20
+        else "stays within the default large_file_cert_threshold (20), so CertSight parses "
+        "this synchronously, same as a small bundle"
+    )
+    cap_note = (
+        f" It also exceeds the default large_file_metrics_cap (300): only the first 300 certs "
+        f"get full Prometheus metrics + a per-cert log line -- check cert-analyzer's own logs "
+        f"for a 'bundle of {count} certs ... cached but not individually tracked' summary line "
+        "covering the rest."
+        if count > 300
+        else ""
+    )
+    return UseCaseResult(
+        ok=True,
+        detail=(
+            f"generated a {count}-cert PEM bundle (distinct EC P-256 self-signed leaf certs, "
+            f"unrelated to each other -- simulating a system CA trust bundle) at {path} and "
+            f"cat'd it -- {count} certs {routing_note}.{cap_note} Only the first {tagged} carry "
+            "this run's token in their CN, so only those should appear in the Kafka pane below "
+            "(the rest are real discoveries too, just not tagged as yours)"
         ),
         token=token,
     )
@@ -1959,6 +2146,132 @@ USE_CASES: List[UseCase] = [
             "glance signal that this key backs more than one logically "
             "distinct certificate. Badged groups sort first in SPKI mode, "
             "so this one should be near the top of the grid.",
+        ],
+    ),
+    UseCase(
+        id="cert-reaccess-new-process",
+        label="re-access an already-known certificate from a different process",
+        description=(
+            "Generates a fresh certificate (writing it is itself a "
+            "first-time discovery), then reads the exact same file twice "
+            "more with two different real tools. Demonstrates "
+            "certificate_accessed -- CertSight's distinct-accessor tracking "
+            "for an already-known cert -- which every other use case here "
+            "never exercises, since they all only ever touch a path once. "
+            "Requires [kafka] access_enabled = true."
+        ),
+        run=_reaccess_existing_cert_from_new_process,
+        pipeline=[
+            "This server generates a fresh self-signed X.509 cert + key in "
+            f"memory and writes it to a brand-new path under {_GENERATED_CERT_DIR}/. "
+            "That write already opens a file descriptor for a never-before-"
+            "seen path, so Tetragon's fd_install kprobe fires for it too -- "
+            "CertSight reads the file itself and records this test server's "
+            "own process as the first-time discoverer, publishing a "
+            "'certificate_discovered' event to the cert-analyzer-events topic.",
+
+            "This server then runs 'cat <path>' as a real subprocess -- the "
+            "same real open()/read() every file-based use case here "
+            "triggers. Tetragon's fd_install kprobe fires again; "
+            "CertSight's process_event() looks the path up in its "
+            "_known_paths index, finds it already cached from the write "
+            "above, and takes the re-access branch instead of re-parsing "
+            "the file from scratch.",
+
+            "_record_cert_process_access dedupes per cert on (process, "
+            "parent_process, pod_name, namespace, app_label, container_name) "
+            "-- 'cat' is a genuinely new accessor for this cert (the write "
+            "above was attributed to this server's own process, not "
+            "'cat'), so it returns True, and CertSight publishes a "
+            "'certificate_accessed' event -- to a *different* Kafka topic "
+            "(cert-analyzer-access-events, not cert-analyzer-events) -- "
+            "carrying the accessing process/pid but deliberately none of "
+            "the cert metadata already on the discovery event (consumers "
+            "join the two on cert_unique_key).",
+
+            f"This server waits {_REACCESS_SETTLE_SECONDS:.0f}s, then runs a "
+            f"third real subprocess -- '{_REACCESS_SECOND_READER} -c 1 <path>' -- "
+            "against the exact same file. Same re-access branch as 'cat' "
+            f"above, but '{_REACCESS_SECOND_READER}' is itself a new accessor "
+            "(distinct from both the writer and from 'cat'), so this "
+            "produces a second, independent 'certificate_accessed' event.",
+
+            "This test server's own Kafka consumer thread is subscribed to "
+            "both the discovery and access topics and pushes every event "
+            "to every connected browser over the same Server-Sent Events "
+            "stream, where they land in the right-hand pane in order: one "
+            "discovery, then two distinct accesses.",
+        ],
+    ),
+    UseCase(
+        id="large-cert-bundle",
+        label="generate a large CA-style bundle and let CertSight discover it",
+        description=(
+            "Generates a single PEM bundle of many distinct, unrelated "
+            "self-signed certs (simulating a system CA trust bundle) and "
+            "cat's it. Above large_file_cert_threshold certs (default 20), "
+            "CertSight parses the bundle on a background thread instead of "
+            "blocking its own Tetragon event-consumer thread; above "
+            "large_file_metrics_cap (default 300), only that many get full "
+            "per-cert Prometheus tracking, the rest cached but summarized -- "
+            "the cardinality cap a real production incident (2026-07-03) "
+            "led to. Pick a cert count to cross either threshold, both, or "
+            "neither."
+        ),
+        run=_generate_large_bundle_and_read,
+        params=[
+            UseCaseParam(
+                name="cert_count",
+                label="certs in bundle",
+                type="number",
+                default=_DEFAULT_BUNDLE_CERT_COUNT,
+                min=str(_MIN_BUNDLE_CERT_COUNT),
+                max=str(_MAX_BUNDLE_CERT_COUNT),
+            ),
+        ],
+        pipeline=[
+            "This server generates N distinct self-signed X.509 certs "
+            "(N = the chosen cert count), each with its own fresh EC P-256 "
+            "key so none of them incidentally exercise the SPKI-reuse use "
+            "case above, and concatenates all N into one PEM bundle under "
+            f"{_GENERATED_CERT_DIR}/ -- simulating a system CA trust bundle "
+            "(dozens to hundreds of unrelated root certs in one file).",
+
+            "This server runs 'cat <path>' as a real subprocess against "
+            "that bundle -- the same real open()/read() every file-based "
+            "use case here triggers.",
+
+            "Tetragon's fd_install kprobe fires once for the whole file. "
+            "cert-analyzer's own pre-check (_count_pem_certs) scans for "
+            "'-----BEGIN CERTIFICATE-----' markers and, if the count "
+            "exceeds large_file_cert_threshold (default 20), routes the "
+            "actual parse to a dedicated background thread "
+            "(_process_certificate_file_async) instead of the single "
+            "Tetragon event-consumer thread -- so a big bundle can't block "
+            "that thread from draining the rest of the gRPC event stream "
+            "while it parses.",
+
+            "CertSight parses every cert in the bundle by position "
+            "(cert_index) and caches all of them in known_certs regardless "
+            "of count -- but only the first large_file_metrics_cap (default "
+            "300) get full per-cert Prometheus metrics and a detailed log "
+            "line; the rest are still cached and still published to Kafka, "
+            "just summarized in one 'bundle of N certs ... cached but not "
+            "individually tracked' log line instead of fanning out hundreds "
+            "more Prometheus series -- this cap is what a real 2026-07-03 "
+            "production incident (a system CA bundle's cardinality blowing "
+            "up Prometheus) led to.",
+
+            "Because every cert in the bundle is a genuine first-time "
+            "discovery (unique path + index + serial), CertSight publishes "
+            "a 'certificate_discovered' Kafka event for *every one* of "
+            "them, regardless of the metrics cap above -- this test "
+            "server's own Kafka consumer thread pushes each to every "
+            "connected browser, but the frontend only shows events whose "
+            "common_name carries your session's token, and only the first "
+            "few certs in the bundle are tagged that way (see the run "
+            "result for why) -- so you'll see a handful of events here, "
+            "not hundreds, even though hundreds really were discovered.",
         ],
     ),
 ]
