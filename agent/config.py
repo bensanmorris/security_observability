@@ -230,6 +230,20 @@ def main():
     connect_probe_enabled = cfg(cp, 'port_probe', 'connect_probe_enabled', 'CONNECT_PROBE_ENABLED', 'false').lower() == 'true'
     port_probe_timeout       = cfg_float(cp, 'port_probe', 'timeout_seconds',        'PORT_PROBE_TIMEOUT',       '5')
     port_probe_connect_delay = cfg_float(cp, 'port_probe', 'connect_delay_seconds',  'PORT_PROBE_CONNECT_DELAY', '2')
+    # Caps how many *new* bind/connect probe threads can be started per
+    # second, regardless of how large a single burst of kprobe events is --
+    # e.g. a package manager retrying several mirror IPs on the same TLS
+    # port in quick succession. Smooths that burst into a steady rate
+    # instead of every event in it racing for a max_concurrent_background_
+    # threads slot in the same instant, which is what turns a burst into a
+    # measurable CPU spike. A probe throttled here is dropped, same as one
+    # that loses the max_concurrent_background_threads race -- this changes
+    # *when* admitted probes start, not whether an over-capacity one is
+    # retried. 10/sec is intentionally lower than max_concurrent_background_
+    # threads's default of 20 so a burst above the thread cap is actually
+    # smoothed rather than immediately refilled back up to the same
+    # instantaneous spike by the token bucket's own one-second allowance.
+    port_probe_events_per_second = cfg_float(cp, 'port_probe', 'probe_events_per_second', 'PORT_PROBE_EVENTS_PER_SECOND', '10')
     # Uses the real SNI hostname (captured via an SSL_ctrl uprobe -- see
     # agent/analyzer.py's _handle_ssl_ctrl_sni_capture) instead of the raw
     # destination IP when connect-probe re-dials, so CDN-fronted destinations
@@ -305,6 +319,7 @@ def main():
     logger.info(f"Connect probe:     {'enabled' if connect_probe_enabled else 'disabled'}")
     if bind_probe_enabled or connect_probe_enabled:
         logger.info(f"Port probe timeout:        {port_probe_timeout}s")
+        logger.info(f"Port probe rate limit:     {port_probe_events_per_second}/sec" if port_probe_events_per_second > 0 else "Port probe rate limit:     disabled")
     if bind_probe_enabled:
         logger.info(f"Port probe connect delay:  {port_probe_connect_delay}s")
     if connect_probe_enabled:
@@ -362,6 +377,7 @@ def main():
                                    new_cert_events_per_second=new_cert_events_per_second,
                                    uprobe_cert_events_per_second=uprobe_cert_events_per_second,
                                    retry_queue_max_size=retry_queue_max_size,
+                                   probe_events_per_second=port_probe_events_per_second,
                                    scan_paths=scan_paths,
                                    scan_interval_seconds=scan_interval,
                                    metrics_port=metrics_port)

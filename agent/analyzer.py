@@ -147,6 +147,7 @@ class CertificateAnalyzer(
                  new_cert_events_per_second: float = 50.0,
                  uprobe_cert_events_per_second: float = 50.0,
                  retry_queue_max_size: int = 2000,
+                 probe_events_per_second: float = 10.0,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600,
                  metrics_port: int = 9090):
@@ -252,6 +253,7 @@ class CertificateAnalyzer(
             'new_cert_events_per_second':          str(new_cert_events_per_second),
             'uprobe_cert_events_per_second':       str(uprobe_cert_events_per_second),
             'retry_queue_max_size':                str(retry_queue_max_size),
+            'probe_events_per_second':              str(probe_events_per_second),
             'max_processes_per_cert':              str(max_processes_per_cert),
             'alert_threshold_days':                str(alert_threshold_days),
             'scan_paths':                          ','.join(self._scan_paths),
@@ -311,6 +313,23 @@ class CertificateAnalyzer(
         self._probed_endpoints: LRUCache = LRUCache()
         self._probe_in_flight: Set[str] = set()
         self._probe_in_flight_lock = threading.Lock()
+        # Bounds how many *new* probe threads (bind or connect) can be
+        # scheduled per second, regardless of how large a single burst of
+        # kprobe events is -- separate from _background_thread_semaphore's
+        # instantaneous concurrency cap above, this smooths a burst into a
+        # steady rate instead of letting every event in the burst race for
+        # a thread slot in the same instant (the mechanism behind a measured
+        # CPU spike from a burst of connect-probe endpoints -- see
+        # probe_tests/test_tcp_connect_probe.py's --count burst mode). A
+        # probe throttled here is dropped exactly like one that loses the
+        # max_concurrent_background_threads race -- this only changes *when*
+        # admitted probes start, not whether a probe beyond capacity is ever
+        # retried. Kept as its own token bucket (like _uprobe_cert_rate_limiter)
+        # rather than sharing _new_cert_rate_limiter's budget, so a probe
+        # burst can't starve real file-based cert discovery of its
+        # throughput, or vice versa.
+        self._probe_rate_limiter = _TokenBucket(probe_events_per_second)
+        self._probe_rate_limit_logger = _RateLimitLogger()
         # pid -> (hostname, captured_at) from the SSL_ctrl(cmd==55) uprobe --
         # the real SNI hostname a client process is about to send, captured
         # just before its own TLS handshake. Consulted (not actively expired;
