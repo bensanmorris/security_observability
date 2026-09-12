@@ -262,10 +262,10 @@ class _TlsProbeMixin:
         probe threads can start per second, regardless of how large a single
         burst of bind/connect kprobe events is. A burst beyond that rate is
         dropped here exactly like a burst beyond max_concurrent_background_
-        threads already is below -- this only smooths *when* admitted probes
-        start (turning a burst into a steady trickle instead of every event
-        racing for a thread slot in the same instant), it doesn't queue or
-        retry a throttled one.
+        threads already is below -- there is no queue or retry. Default
+        matches max_concurrent_background_threads, so it costs no burst
+        coverage beyond what the thread cap already drops, while still
+        bounding sustained throughput over time.
         """
         endpoint_key = f'{mechanism}:{host}:{port}'
         with self._probe_in_flight_lock:

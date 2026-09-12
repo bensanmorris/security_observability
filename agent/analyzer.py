@@ -147,7 +147,7 @@ class CertificateAnalyzer(
                  new_cert_events_per_second: float = 50.0,
                  uprobe_cert_events_per_second: float = 50.0,
                  retry_queue_max_size: int = 2000,
-                 probe_events_per_second: float = 10.0,
+                 probe_events_per_second: float = 20.0,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600,
                  metrics_port: int = 9090):
@@ -316,15 +316,18 @@ class CertificateAnalyzer(
         # Bounds how many *new* probe threads (bind or connect) can be
         # scheduled per second, regardless of how large a single burst of
         # kprobe events is -- separate from _background_thread_semaphore's
-        # instantaneous concurrency cap above, this smooths a burst into a
-        # steady rate instead of letting every event in the burst race for
-        # a thread slot in the same instant (the mechanism behind a measured
-        # CPU spike from a burst of connect-probe endpoints -- see
+        # instantaneous concurrency cap above (the mechanism behind a
+        # measured CPU spike from a burst of connect-probe endpoints -- see
         # probe_tests/test_tcp_connect_probe.py's --count burst mode). A
         # probe throttled here is dropped exactly like one that loses the
-        # max_concurrent_background_threads race -- this only changes *when*
-        # admitted probes start, not whether a probe beyond capacity is ever
-        # retried. Kept as its own token bucket (like _uprobe_cert_rate_limiter)
+        # max_concurrent_background_threads race -- there is no retry queue.
+        # Measured tuning showed this is a straight-line tradeoff below the
+        # thread cap's default of 20 (less CPU, proportionally fewer of the
+        # burst's endpoints ever probed, no sweet spot) -- so the default
+        # matches that cap rather than undercutting it, costing no coverage
+        # the thread cap wasn't already going to drop, while still bounding
+        # *sustained* throughput over time the thread cap alone doesn't.
+        # Kept as its own token bucket (like _uprobe_cert_rate_limiter)
         # rather than sharing _new_cert_rate_limiter's budget, so a probe
         # burst can't starve real file-based cert discovery of its
         # throughput, or vice versa.
