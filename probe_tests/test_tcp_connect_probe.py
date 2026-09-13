@@ -58,6 +58,7 @@ def _serve(cert_path: str, key_path: str, bind_ip: str, port: int,
            ready: threading.Event, stop: threading.Event) -> None:
     """Accept TLS connections on bind_ip:port until stop is set."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(cert_path, key_path)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as raw:

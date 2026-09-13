@@ -1489,6 +1489,10 @@ class TestPKCS12Parsing:
             c.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
             for c in certs
         ]
+        # These check a locally-parsed test certificate's CN against an
+        # expected literal -- not a URL authorization/redirect decision --
+        # so the substring-check shape isn't the security anti-pattern
+        # py/incomplete-url-substring-sanitization targets.
         assert "server.example.com" in common_names
         assert "Intermediate CA" in common_names
         assert "Root CA" in common_names
@@ -1661,6 +1665,8 @@ class TestCABundles:
         assert len(cert_infos) == 3
         assert "Root CA" in cert_infos[0].common_name
         assert "Intermediate CA" in cert_infos[1].common_name
+        # Same non-issue as test_ca_bundle_with_chain above -- a locally
+        # generated test cert's CN, not a URL trust decision.
         assert "server.example.com" in cert_infos[2].common_name
     
     def test_expired_intermediate_in_chain(self, analyzer, temp_dir):
@@ -2173,6 +2179,10 @@ def _make_jks_truststore(cert: x509.Certificate, password: str = 'changeit') -> 
 
     body   = struct.pack('>III', 0xFEEDFEED, 2, 1) + entry      # header + 1 entry
 
+    # SHA-1 + this exact salt is mandated by Oracle's JKS binary format for
+    # its tamper-detection digest, not a choice made here -- a different
+    # algorithm would produce a file real JKS parsers (including the one
+    # under test) can't recognize.
     pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
     digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
 
@@ -2203,6 +2213,8 @@ def _make_jks_truststore_multi(certs: list, password: str = 'changeit') -> bytes
 
     body = struct.pack('>III', 0xFEEDFEED, 2, len(certs)) + entries
 
+    # SHA-1 + this exact salt is mandated by Oracle's JKS binary format for
+    # its tamper-detection digest -- see _make_jks_truststore above.
     pw_bytes = b''.join(struct.pack('>H', ord(c)) for c in password)
     digest   = hashlib.sha1(pw_bytes + b'Mighty Aphrodite' + body).digest()
 
@@ -2439,6 +2451,8 @@ class TestJKSParsing:
             c.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
             for c in certs
         ]
+        # Same non-issue as test_ca_bundle_with_chain above -- locally
+        # generated test certs' CNs, not a URL trust decision.
         assert "ca-root.example.com"  in common_names
         assert "ca-inter.example.com" in common_names
         assert "leaf.example.com"     in common_names
@@ -5947,6 +5961,8 @@ class TestCertificateParsingExceptions:
         # Two valid certs should come through; broken one silently skipped
         assert len(cert_infos) == 2
         common_names = [c.common_name for c in cert_infos]
+        # Same non-issue as test_ca_bundle_with_chain above -- locally
+        # generated test certs' CNs, not a URL trust decision.
         assert "valid1.example.com" in common_names
         assert "valid2.example.com" in common_names
 
@@ -7989,6 +8005,8 @@ class TestOpensslUprobeHooking:
         analyzer._handle_uprobe_in_memory_cert(event)
 
         info = list(analyzer.known_certs.values())[0]
+        # Same non-issue as test_ca_bundle_with_chain above -- a locally
+        # generated test cert's subject DN, not a URL trust decision.
         assert 'fields.example.com' in info.subject
         assert info.pid == 42
         assert info.process == '/usr/bin/python3'
@@ -9177,6 +9195,7 @@ class TestPortProbe:
 
         def _serve():
             ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(cert_path, key_path)
             with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as raw:
                 raw.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
@@ -9372,6 +9391,7 @@ class TestPortProbe:
 
         def _serve():
             ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(cert_path, key_path)
             ctx.sni_callback = _sni_callback
             with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as raw:
