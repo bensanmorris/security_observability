@@ -3833,7 +3833,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Thread time per event (ingest + background), by source. This is the number that ranks what to tune: a source that is 80% of the event volume but microseconds each (dedup hits on a known path) matters less than one that is 5% of volume but a TLS handshake each. Multiply by the rate in the volume panel to get each source's total thread-seconds per second.",
+          "description": "Thread time per event (ingest + background), by source. This is the number that ranks what to tune: a source that is 80% of the event volume but microseconds each (dedup hits on a known path) matters less than one that is 5% of volume but a TLS handshake each. Multiply by the rate in the volume panel to get each source's total thread-seconds per second. Sources with no events in the window are omitted rather than shown as infinite - time can still land on one (a background parse finishing after its event was counted).",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -3847,7 +3847,7 @@
                 "uid": "${datasource}"
               },
               "refId": "A",
-              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_processing_seconds_total{stage=~\"ingest|background\", node_name=~\"$node\"}[$__rate_interval])) / sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[$__rate_interval])) > 0)",
+              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_processing_seconds_total{stage=~\"ingest|background\", node_name=~\"$node\"}[$__rate_interval])) / (sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[$__rate_interval])) > 0))",
               "legendFormat": "{{source}}",
               "instant": true
             }
