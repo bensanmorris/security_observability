@@ -144,13 +144,6 @@ PROCESSING_STAGE_SCANNER = 'scanner'
 # The rate-limit retry drainer thread replaying queued files.
 PROCESSING_STAGE_RETRY_QUEUE = 'retry_queue'
 
-PROCESSING_STAGES = (
-    PROCESSING_STAGE_INGEST,
-    PROCESSING_STAGE_BACKGROUND,
-    PROCESSING_STAGE_SCANNER,
-    PROCESSING_STAGE_RETRY_QUEUE,
-)
-
 # Retry-queue replays have lost their originating source by the time they
 # run (the entry only carries the path), so they are attributed to their own
 # value rather than guessed. Only ever paired with PROCESSING_STAGE_RETRY_QUEUE

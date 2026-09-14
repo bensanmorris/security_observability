@@ -549,12 +549,24 @@ class CertificateAnalyzer(
             try:
                 target()
             finally:
-                self._background_thread_semaphore.release()
+                # dec before release: once the slot is released another
+                # caller can acquire and inc, so the other order lets the
+                # gauge transiently read cap+1.
                 active.dec()
+                self._background_thread_semaphore.release()
                 self._record_processing_seconds(
                     source, PROCESSING_STAGE_BACKGROUND, time.perf_counter() - started)
 
-        threading.Thread(target=_run, daemon=True, name=name).start()
+        try:
+            threading.Thread(target=_run, daemon=True, name=name).start()
+        except RuntimeError:
+            # "can't start new thread" -- the OS/thread limit, typically under
+            # the same memory pressure that makes the pool matter. _run never
+            # ran, so undo the slot and gauge here or both leak for good.
+            active.dec()
+            self._background_thread_semaphore.release()
+            logger.error(f"Failed to start background thread {name}", exc_info=True)
+            return False
         return True
 
     def _process_certificate_file_async(
@@ -641,20 +653,14 @@ class CertificateAnalyzer(
         return EVENT_SOURCE_OTHER
 
     def _record_event_source(self, source: str) -> None:
-        """Count one event against its source. Never let metrics break ingest."""
-        try:
-            self.metrics.cert_source_events_total.labels(
-                source=source, node_name=self.metrics._node_name).inc()
-        except Exception:  # pragma: no cover - defensive
-            logger.debug("Failed to record event source %s", source, exc_info=True)
+        """Count one event against its source."""
+        self.metrics.cert_source_events_total.labels(
+            source=source, node_name=self.metrics._node_name).inc()
 
     def _record_processing_seconds(self, source: str, stage: str, seconds: float) -> None:
-        """Charge wall-clock time to a (source, stage). Never let metrics break the caller."""
-        try:
-            self.metrics.cert_source_processing_seconds_total.labels(
-                source=source, stage=stage, node_name=self.metrics._node_name).inc(seconds)
-        except Exception:  # pragma: no cover - defensive
-            logger.debug("Failed to record processing time for %s/%s", source, stage, exc_info=True)
+        """Charge wall-clock time to a (source, stage)."""
+        self.metrics.cert_source_processing_seconds_total.labels(
+            source=source, stage=stage, node_name=self.metrics._node_name).inc(seconds)
 
     def process_event(self, event):
         """Process a single Tetragon event.

@@ -27,7 +27,7 @@ from typing import Optional
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 
-from .constants import EVENT_SOURCE_BY_PROBE_MECHANISM
+from .constants import EVENT_SOURCE_BY_PROBE_MECHANISM, EVENT_SOURCE_OTHER_KPROBE
 
 # Logger name is hardcoded (not __name__) so log records from this mixin keep
 # reporting under "agent.analyzer" -- see the identical note in java_fips.py.
@@ -307,7 +307,10 @@ class _TlsProbeMixin:
 
         started = self._start_background_thread(
             _probe, name=f'tls-{mechanism}-probe-{host}-{port}',
-            source=EVENT_SOURCE_BY_PROBE_MECHANISM[mechanism])
+            # .get: a mechanism missing from the map must collapse into the
+            # catch-all, not raise here -- endpoint_key is already in
+            # _probe_in_flight and only _probe's finally would remove it.
+            source=EVENT_SOURCE_BY_PROBE_MECHANISM.get(mechanism, EVENT_SOURCE_OTHER_KPROBE))
         if not started:
             # _probe's finally never ran, so undo the in-flight marker here —
             # this endpoint will be retried on its next qualifying event.

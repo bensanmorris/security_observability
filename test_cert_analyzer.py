@@ -11178,3 +11178,68 @@ class TestProcessingSecondsAndPoolOccupancy:
                     and time.time() < deadline:
                 time.sleep(0.005)
         assert self._seconds(occ_analyzer, 'retry_queue', 'retry_queue') >= 0.01
+
+    # --- review fixes -----------------------------------------------------
+
+    def test_thread_start_failure_releases_slot_and_gauge(self, occ_analyzer):
+        """Thread.start() raising (thread limit) must not leak the slot or the gauge."""
+        sem = occ_analyzer._background_thread_semaphore
+        with _patch('agent.analyzer.threading.Thread') as thread_cls:
+            thread_cls.return_value.start.side_effect = RuntimeError("can't start new thread")
+            assert occ_analyzer._start_background_thread(lambda: None, name='t', source='tcp_connect') is False
+        assert self._active(occ_analyzer) == 0
+        # All 3 slots still available: acquire them all without blocking.
+        for _ in range(3):
+            assert sem.acquire(blocking=False)
+        for _ in range(3):
+            sem.release()
+        assert self._seconds(occ_analyzer, 'tcp_connect', 'background') == 0
+
+    def test_unknown_probe_mechanism_collapses_to_catch_all_and_does_not_leak(self, occ_analyzer):
+        """A mechanism missing from the map must not raise after the in-flight marker is set."""
+        with _patch.object(occ_analyzer, '_probe_tls_endpoint', side_effect=lambda *a, **k: None):
+            occ_analyzer._schedule_tls_probe('future-mechanism', '10.0.0.9', 443, 'x', 1, 'n', None)
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert 'future-mechanism:10.0.0.9:443' not in occ_analyzer._probe_in_flight
+        assert 'future-mechanism:10.0.0.9:443' in occ_analyzer._probed_endpoints
+        assert self._seconds(occ_analyzer, 'kprobe_other', 'background') is not None
+
+
+class TestDashboardConventions:
+    """Guards for extras/examples/grafana-dashboard.json that were only ever caught live."""
+
+    @pytest.fixture(scope='class')
+    def dashboard(self):
+        import json
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'extras', 'examples', 'grafana-dashboard.json')
+        with open(path) as f:
+            return json.load(f)
+
+    @staticmethod
+    def _all_panels(dashboard):
+        for p in dashboard['panels']:
+            yield p
+            yield from p.get('panels', [])
+
+    def test_no_panel_uses_rate_interval(self, dashboard):
+        """The analyzer is scraped every 60s; $__rate_interval resolves to 60s unless the
+        datasource declares its scrape interval, and a 60s window holds one sample.
+        Every rate panel hardcodes [5m] for this reason."""
+        offenders = [
+            (p['id'], p.get('title'))
+            for p in self._all_panels(dashboard)
+            for t in p.get('targets', [])
+            if '$__rate_interval' in t.get('expr', '')
+        ]
+        assert offenders == []
+
+    def test_panel_ids_unique(self, dashboard):
+        ids = [p['id'] for p in self._all_panels(dashboard)]
+        assert len(ids) == len(set(ids))
+
+    def test_rows_ordered_by_grid_y(self, dashboard):
+        ys = [p['gridPos']['y'] for p in dashboard['panels'] if p['type'] == 'row']
+        assert ys == sorted(ys)

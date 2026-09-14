@@ -523,9 +523,14 @@ class PrometheusMetrics:
         #
         # Wall-clock (perf_counter), not CPU: the pool is bounded by slots,
         # not cores, and a probe sleeping through its pre-handshake delay is
-        # occupying a slot exactly as much as one that's parsing. A Counter
-        # of seconds rather than a Histogram: the sum/count pair answers the
-        # mean and saturation questions at ~1/10th the series.
+        # occupying a slot exactly as much as one that's parsing. The flip
+        # side is that ingest time includes waiting for the GIL, so a pool
+        # thread deep in a bundle parse inflates the ingest number for
+        # whatever event is being handled at the time. Right for the
+        # saturation question (wall time is what backs the stream up), but
+        # per-source *attribution* on ingest is soft while the pool is busy.
+        # A Counter of seconds rather than a Histogram: the sum/count pair
+        # answers the mean and saturation questions at ~1/10th the series.
         self.cert_source_processing_seconds_total = Counter(
             'tls_certificate_source_processing_seconds_total',
             'Wall-clock seconds spent processing certificate-activity events, by the '
