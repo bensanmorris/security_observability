@@ -181,12 +181,10 @@ Look for any eBPF load errors. If Tetragon fails to load eBPF programs the cert-
 
 These tell Tetragon what to intercept. Without them no certificate access events will be emitted.
 
-Note: `certificate-file-access.yaml` and `openssl-cert-load.yaml` in the original repo are not compatible with the current version of Tetragon. Updated versions are provided as `-v2` files. The original files are left untouched to avoid disrupting the existing demo.
-
 ```bash
-kubectl apply -f tetragon-policies/certificate-file-access-v2.yaml
-kubectl apply -f tetragon-policies/openssl-cert-load-v2.yaml
-kubectl apply -f tetragon-policies/tls-service-tracking.yaml
+kubectl apply -f tetragon-policies/certificate-file-access.yaml
+kubectl apply -f tetragon-policies/experimental/openssl3-cert-load.yaml
+kubectl apply -f tetragon-policies/experimental/tls-service-tracking.yaml
 ```
 
 Verify they loaded:
@@ -195,12 +193,12 @@ Verify they loaded:
 kubectl get tracingpolicies
 ```
 
-You should see `certificate-file-access-v2` listed. Note that in a kind environment:
+You should see `certificate-file-access` listed. Note that in a kind environment:
 
 - `tls-service-tracking` will be created but fail to load — the `sockaddr` selector syntax has changed in the current Tetragon version. This policy is not required for the cert expiry demo.
-- `openssl-cert-load-v2` will fail to load — the kind node does not have `libssl.so.3` at the expected paths. This is also non-critical as `certificate-file-access-v2` (which monitors file access via `fd_install`) is sufficient for the demo.
+- `openssl3-cert-load` will fail to load — the kind node does not have `libssl.so.3` at the expected paths. This is also non-critical as `certificate-file-access` (which monitors file access via `fd_install`) is sufficient for the demo.
 
-`certificate-file-access-v2` is the critical policy and is confirmed working.
+`certificate-file-access` is the critical policy and is confirmed working.
 
 ### 5. Deploy cert-analyzer
 

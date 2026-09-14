@@ -483,7 +483,7 @@ sudo /usr/local/bin/tetra tracingpolicy list
 
 **Known gap on containerized/RHCOS nodes**: the `openssl3-cert-load`, `java-fips-nss-cert`, and `java-non-fips-cert` experimental policies are host-uprobe policies that hook a specific absolute host library/agent path. If that path doesn't exist on the node (e.g. a bare RHCOS/minimal node with no host-level OpenSSL 3 or Java agent installed), Tetragon logs `adding tracing policy failed: open <path>: no such file or directory` and the policy simply doesn't attach — expected, not a misconfiguration, unless those libraries/agents are actually present at those exact host paths.
 
-Confirm that tracing policies survive node reboots — configure them to load automatically via systemd or your configuration management tooling.
+Confirm that tracing policies survive node reboots. `apply-policies.sh` persists each policy it applies to `/etc/tetragon/tetragon.tp.d`, from which Tetragon reloads them on restart; policies added by hand with `tetra tracingpolicy add` are **not** persisted. On Kubernetes, apply them via your configuration management tooling or the Helm chart (`extras/helm/cert-analyzer/templates/policies/`).
 
 ### 6. Install the SELinux Policy Module
 

@@ -35,9 +35,7 @@ streamed live via Server-Sent Events as it arrives.
 - For the "bind a TLS service" use case specifically: cert-analyzer
   configured with `[port_probe] bind_probe_enabled = true`, and the
   `tls-service-tracking.yaml` TracingPolicy loaded (under
-  `tetragon-policies/experimental/` -- despite what some other docs in
-  this repo reference, `tls-service-tracking-fixed.yaml` doesn't actually
-  exist yet; the experimental policy has no port/binary filter, so it
+  `tetragon-policies/experimental/` -- it has no port/binary filter, so it
   fires on every bind() on the host, which is fine for local testing but
   worth knowing before loading it anywhere else)
 - For the "dial out to a TLS port" use case specifically: cert-analyzer

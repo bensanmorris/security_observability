@@ -15,16 +15,17 @@ sleep 3
 echo "✅ Services running"
 echo ""
 
-# Load Tetragon policies (needed after Tetragon restart)
+# Load Tetragon policies. apply-policies.sh is idempotent and persists to
+# /etc/tetragon/tetragon.tp.d, so it is safe to run on every demo start.
 echo "📜 Loading Tetragon policies..."
-POLICIES_LOADED=$(sudo /usr/local/bin/tetra tracingpolicy list 2>/dev/null | wc -l)
-if [ "$POLICIES_LOADED" -lt 3 ]; then
-    sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml 2>/dev/null || true
-    sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml 2>/dev/null || true
-    sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml 2>/dev/null || true
+if sudo ./tetragon-policies/apply-policies.sh >/dev/null 2>&1; then
     echo "   Policies loaded"
 else
-    echo "   Policies already loaded"
+    # Exits non-zero if any policy failed -- usually an experimental uprobe
+    # policy on a host without the matching library or debuginfo, which does
+    # not affect the file-access detection this demo relies on.
+    echo "   Policies loaded (some optional ones did not attach)"
+    echo "   Run 'sudo ./tetragon-policies/apply-policies.sh' for the per-policy summary"
 fi
 echo ""
 

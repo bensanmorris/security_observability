@@ -42,10 +42,12 @@ Download the policies archive from the [latest GitHub Release](https://github.co
 # Extract the policies archive (downloaded from the GitHub Release page)
 tar -xzf tetragon-policies-<version>.tar.gz
 
-# Load the certificate file access policy
-sudo tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
+# Load the policies applicable to this host. Detects your RHEL version and
+# installed libssl, and persists to /etc/tetragon/tetragon.tp.d so they
+# survive a Tetragon restart. Safe to re-run at any time.
+sudo ./tetragon-policies/apply-policies.sh
 
-# Verify it loaded
+# Verify they loaded
 sudo tetra tracingpolicy list
 ```
 
