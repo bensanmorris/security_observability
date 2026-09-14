@@ -96,6 +96,12 @@ echo "=== [6/6] cert-analyzer chart (analyzer DaemonSet + test-console pod + Tra
 # blast-radius/chain-explorer/FIPS-rollout panels specifically (everything
 # else works without it). Also needs deploy-k8s-node.sh's SG rule + a
 # firewalld port opened on the main instance -- see its comments.
+# resources.limits.memory raised from the chart's 512Mi default: the demo
+# node carries the full system CA trust store in its inventory (~920 certs
+# after catting the RHEL bundles) and sits at ~300MB RSS at that size,
+# scaling ~0.25MB/cert -- 512Mi left too little headroom against an OOM
+# kill (the main instance's July 2026 crash-loop was at 384MB). Applied
+# live via helm upgrade on 2026-09-14; set here so a redeploy keeps it.
 IMAGE_TAG_ARGS=()
 if [[ -n "${K8S_ANALYZER_IMAGE_TAG}" ]]; then
     IMAGE_TAG_ARGS=(--set "image.tag=${K8S_ANALYZER_IMAGE_TAG}" --set "demo.testServer.image.tag=${K8S_ANALYZER_IMAGE_TAG}")
@@ -110,7 +116,8 @@ helm install cert-analyzer "${WORKDIR}/certsight-src/extras/helm/cert-analyzer" 
     --set kafka.bootstrapServers="${MAIN_PRIVATE_IP}:9092" \
     --set demo.testServer.enabled=true \
     --set demo.testServer.kafka.host="${MAIN_PRIVATE_IP}" \
-    --set demo.testServer.prometheusUrl="http://${MAIN_PRIVATE_IP}:9091"
+    --set demo.testServer.prometheusUrl="http://${MAIN_PRIVATE_IP}:9091" \
+    --set resources.limits.memory=768Mi
 
 for i in $(seq 1 30); do
     kubectl get pods -n certsight 2>/dev/null | grep -q "cert-test-server.*Running" && break
