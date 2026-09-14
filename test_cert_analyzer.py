@@ -10762,3 +10762,201 @@ class TestMainEntryPoint:
             main()
 
         mocks['thread_cls'].assert_not_called()
+
+
+class TestEventSourceCounter:
+    """Tests for tls_certificate_source_events_total (per-source ingest counter).
+
+    Covers:
+      classification of every mapped kprobe / uprobe hook
+      unrecognised hooks collapsing into the catch-all buckets
+      counting at ingest -- before the self-event filter and before dedup
+      always-on (no config flag), and zero-initialised for known sources
+      periodic_scan counted per processed file, not per walked file
+    """
+
+    @pytest.fixture
+    def src_analyzer(self):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(tetragon_address='unix:///dev/null')
+        yield a
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _make_kprobe_event(fn, binary='/usr/bin/cat', pid=1234, args=None):
+        from unittest.mock import MagicMock
+        kprobe = MagicMock()
+        kprobe.function_name = fn
+        kprobe.process.binary = binary
+        kprobe.process.pid.value = pid
+        kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        kprobe.HasField.return_value = False
+        kprobe.args = args if args is not None else []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        event.process_kprobe = kprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _make_uprobe_event(symbol, binary='/usr/bin/openssl', pid=5678):
+        from unittest.mock import MagicMock
+        uprobe = MagicMock()
+        uprobe.symbol = symbol
+        uprobe.process.binary = binary
+        uprobe.process.pid.value = pid
+        uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        uprobe.HasField.return_value = False
+        uprobe.args = []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        event.process_uprobe = uprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _count(analyzer, source):
+        return analyzer.metrics.cert_source_events_total.labels(
+            source=source, node_name=analyzer.metrics._node_name)._value.get()
+
+    # --- classification ---------------------------------------------------
+
+    @pytest.mark.parametrize('fn,expected', [
+        ('fd_install', 'file_access'),
+        ('security_socket_bind', 'socket_bind'),
+        ('sys_bind', 'socket_bind'),
+        ('tcp_connect', 'tcp_connect'),
+    ])
+    def test_kprobe_sources_classified(self, src_analyzer, fn, expected):
+        event = self._make_kprobe_event(fn)
+        before = self._count(src_analyzer, expected)
+        src_analyzer.process_event(event)
+        assert self._count(src_analyzer, expected) == before + 1
+
+    @pytest.mark.parametrize('symbol,expected', [
+        ('SSL_CTX_use_certificate_file', 'openssl_file'),
+        ('SSL_CTX_use_certificate_chain_file', 'openssl_file'),
+        ('SSL_CTX_use_certificate_ASN1', 'openssl_asn1'),
+        ('java_cert_agent_write', 'java_jca'),
+        ('NSC_CreateObject', 'pkcs11_create'),
+        ('NSC_FindObjectsInit', 'pkcs11_find'),
+        ('SSL_ctrl', 'sni_capture'),
+    ])
+    def test_uprobe_sources_classified(self, src_analyzer, symbol, expected):
+        event = self._make_uprobe_event(symbol)
+        before = self._count(src_analyzer, expected)
+        src_analyzer.process_event(event)
+        assert self._count(src_analyzer, expected) == before + 1
+
+    def test_unknown_kprobe_collapses_to_catch_all(self, src_analyzer):
+        """An unmapped hook must not mint a new series -- that's the cardinality guard."""
+        before = self._count(src_analyzer, 'kprobe_other')
+        src_analyzer.process_event(self._make_kprobe_event('some_future_hook'))
+        src_analyzer.process_event(self._make_kprobe_event('another_new_hook'))
+        assert self._count(src_analyzer, 'kprobe_other') == before + 2
+
+    def test_unknown_uprobe_collapses_to_catch_all(self, src_analyzer):
+        before = self._count(src_analyzer, 'uprobe_other')
+        src_analyzer.process_event(self._make_uprobe_event('SSL_some_new_symbol'))
+        assert self._count(src_analyzer, 'uprobe_other') == before + 1
+
+    def test_event_with_neither_probe_type_counted_as_other(self, src_analyzer):
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        event.HasField.return_value = False
+        event.node_name = 'test-node'
+        before = self._count(src_analyzer, 'other')
+        src_analyzer.process_event(event)
+        assert self._count(src_analyzer, 'other') == before + 1
+
+    # --- counted at ingest, not at outcome --------------------------------
+
+    def test_counted_even_when_event_is_self_filtered(self, src_analyzer):
+        """A dropped event still cost a hook + a gRPC message, so it still counts."""
+        from unittest.mock import MagicMock, patch
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'file_arg'
+        arg.file_arg.path = '/etc/pki/tls/certs/self.pem'
+        event = self._make_kprobe_event('fd_install', args=[arg])
+        src_analyzer.filter_self_events = True
+        with patch.object(src_analyzer, '_is_self_event', return_value=True):
+            before = self._count(src_analyzer, 'file_access')
+            src_analyzer.process_event(event)
+        assert self._count(src_analyzer, 'file_access') == before + 1
+
+    def test_counted_even_when_probe_disabled(self, src_analyzer):
+        """bind/connect events count on arrival regardless of the probe flags."""
+        src_analyzer._bind_probe_enabled = False
+        src_analyzer._connect_probe_enabled = False
+        before_bind = self._count(src_analyzer, 'socket_bind')
+        before_conn = self._count(src_analyzer, 'tcp_connect')
+        src_analyzer.process_event(self._make_kprobe_event('security_socket_bind'))
+        src_analyzer.process_event(self._make_kprobe_event('tcp_connect'))
+        assert self._count(src_analyzer, 'socket_bind') == before_bind + 1
+        assert self._count(src_analyzer, 'tcp_connect') == before_conn + 1
+
+    def test_counted_without_event_rate_metrics_flag(self, src_analyzer):
+        """Unlike the per-process counters, this one needs no opt-in."""
+        assert src_analyzer._event_rate_metrics_enabled is False
+        before = self._count(src_analyzer, 'socket_bind')
+        src_analyzer.process_event(self._make_kprobe_event('security_socket_bind'))
+        assert self._count(src_analyzer, 'socket_bind') == before + 1
+
+    # --- registry shape ---------------------------------------------------
+
+    def test_known_sources_zero_initialised(self, src_analyzer):
+        """A configured-but-quiet source must read 0, not be absent from the panel."""
+        from agent.constants import EVENT_SOURCE_KNOWN_LABELS
+        for source in EVENT_SOURCE_KNOWN_LABELS:
+            value = REGISTRY.get_sample_value(
+                'tls_certificate_source_events_total',
+                {'source': source, 'node_name': src_analyzer.metrics._node_name},
+            )
+            assert value == 0, f"{source} should be zero-initialised, got {value}"
+
+    def test_catch_alls_not_zero_initialised(self, src_analyzer):
+        """Catch-alls appear only once something unrecognised actually fires."""
+        for source in ('kprobe_other', 'uprobe_other', 'other'):
+            assert REGISTRY.get_sample_value(
+                'tls_certificate_source_events_total',
+                {'source': source, 'node_name': src_analyzer.metrics._node_name},
+            ) is None
+
+    def test_label_taxonomy_is_bounded_and_complete(self):
+        """Every mapped value must be declared in EVENT_SOURCE_LABELS."""
+        from agent.constants import (
+            EVENT_SOURCE_BY_KPROBE, EVENT_SOURCE_BY_UPROBE, EVENT_SOURCE_LABELS,
+        )
+        mapped = set(EVENT_SOURCE_BY_KPROBE.values()) | set(EVENT_SOURCE_BY_UPROBE.values())
+        assert mapped <= set(EVENT_SOURCE_LABELS)
+        assert len(EVENT_SOURCE_LABELS) == len(set(EVENT_SOURCE_LABELS))
+
+    # --- periodic scan ----------------------------------------------------
+
+    def test_periodic_scan_counts_processed_files_only(self, src_analyzer, temp_dir):
+        """Counted per file the scan decides to parse, not per file it walks."""
+        cert, _ = TestCertificateGeneration.generate_certificate('scanned.example.com', 365)
+        cert_file = os.path.join(temp_dir, 'scanned.pem')
+        with open(cert_file, 'wb') as f:
+            f.write(cert.public_bytes(Encoding.PEM))
+        # A non-cert file in the same directory must not be counted.
+        with open(os.path.join(temp_dir, 'notes.txt'), 'w') as f:
+            f.write('not a certificate')
+
+        before = self._count(src_analyzer, 'periodic_scan')
+        src_analyzer.periodic_scan([temp_dir])
+        assert self._count(src_analyzer, 'periodic_scan') == before + 1
+
+        # Second pass: the file is now known, so it is skipped and not recounted.
+        src_analyzer.periodic_scan([temp_dir])
+        assert self._count(src_analyzer, 'periodic_scan') == before + 1

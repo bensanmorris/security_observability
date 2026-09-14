@@ -10,7 +10,12 @@ from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
 from prometheus_client import Gauge, Counter, Info, REGISTRY, make_wsgi_app
 from prometheus_client.core import GaugeMetricFamily
 
-from .constants import CERT_ANALYZER_VERSION, TETRAGON_BUILD_VERSION, CACHE_MAX_SIZE
+from .constants import (
+    CERT_ANALYZER_VERSION,
+    TETRAGON_BUILD_VERSION,
+    CACHE_MAX_SIZE,
+    EVENT_SOURCE_KNOWN_LABELS,
+)
 from .models import CertificateInfo
 
 logger = logging.getLogger(__name__)
@@ -477,6 +482,28 @@ class PrometheusMetrics:
             'useful for diagnosing which application is driving probe load',
             ['process', 'node_name'],
         )
+
+        # Per-source ingest counter. Unlike the two per-process counters above,
+        # `source` is a fixed ~13-value set (see EVENT_SOURCE_LABELS), so this
+        # is bounded and always on -- a tuning metric that has to be enabled
+        # first can't tell you what to tune.
+        #
+        # Counted at ingest, before self-event filtering, dedup and the
+        # new-cert rate limiter, because the question it answers is "what is
+        # arriving" -- an event dropped downstream still cost the kernel a hook
+        # and this process a gRPC message, and is exactly what you'd tune away
+        # by unloading a policy or narrowing its filter.
+        self.cert_source_events_total = Counter(
+            'tls_certificate_source_events_total',
+            'Total certificate-activity events received, by the source that produced '
+            'them (Tetragon kprobe/uprobe hook, or the analyzer\'s own periodic scan). '
+            'Bounded label set; use to see which source drives event volume on a node',
+            ['source', 'node_name'],
+        )
+        # Zero-initialise the real sources so a quiet one reads as an explicit
+        # 0 rather than vanishing from the panel.
+        for _source in EVENT_SOURCE_KNOWN_LABELS:
+            self.cert_source_events_total.labels(source=_source, node_name=self._node_name)
 
         # Tetragon policy tracking
         self.tetragon_policy_info = Gauge(

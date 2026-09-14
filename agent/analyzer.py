@@ -42,7 +42,16 @@ try:
 except ImportError:
     JKS_AVAILABLE = False
 
-from .constants import _NODE_NAME, TETRAGON_BUILD_VERSION
+from .constants import (
+    _NODE_NAME,
+    TETRAGON_BUILD_VERSION,
+    EVENT_SOURCE_BY_KPROBE,
+    EVENT_SOURCE_BY_UPROBE,
+    EVENT_SOURCE_OTHER,
+    EVENT_SOURCE_OTHER_KPROBE,
+    EVENT_SOURCE_OTHER_UPROBE,
+    EVENT_SOURCE_PERIODIC_SCAN,
+)
 from .models import CertificateInfo
 from .metrics import PrometheusMetrics
 from .cache import LRUCache
@@ -590,9 +599,44 @@ class CertificateAnalyzer(
                 self._large_file_in_flight.discard(cert_path)
             self.metrics.cert_analysis_errors.labels(error_type='background_thread_cap_reached', node_name=self.metrics._node_name).inc()
 
+    @staticmethod
+    def _classify_event_source(event) -> str:
+        """Map a Tetragon event to one of the fixed source labels.
+
+        Classification is on the hook that produced the event (kprobe
+        function_name / uprobe symbol), not on what the event turned out to
+        contain -- an fd_install on a .pem that fails to parse still came from
+        the file-access policy, and counting it there is what makes the metric
+        usable for "should I unload this policy".
+
+        Anything unrecognised collapses into a catch-all rather than minting a
+        new series, so a policy added without updating the maps in constants.py
+        can't blow up the metric's cardinality.
+        """
+        if event.HasField('process_kprobe'):
+            fn = getattr(event.process_kprobe, 'function_name', '')
+            return EVENT_SOURCE_BY_KPROBE.get(fn, EVENT_SOURCE_OTHER_KPROBE)
+        if event.HasField('process_uprobe'):
+            symbol = getattr(event.process_uprobe, 'symbol', '')
+            return EVENT_SOURCE_BY_UPROBE.get(symbol, EVENT_SOURCE_OTHER_UPROBE)
+        return EVENT_SOURCE_OTHER
+
+    def _record_event_source(self, source: str) -> None:
+        """Count one event against its source. Never let metrics break ingest."""
+        try:
+            self.metrics.cert_source_events_total.labels(
+                source=source, node_name=self.metrics._node_name).inc()
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to record event source %s", source, exc_info=True)
+
     def process_event(self, event):
         """Process a single Tetragon event"""
         logger.debug("Processing event...")
+
+        # Counted before any filtering/dedup/rate-limiting below -- see the
+        # comment on cert_source_events_total in metrics.py for why ingest,
+        # not outcome, is the right place for a tuning metric.
+        self._record_event_source(self._classify_event_source(event))
 
         # Bind and outbound-connect events carry no cert paths — route them to
         # port-probe handlers and return. Other kprobe/uprobe events fall through
@@ -943,6 +987,16 @@ class CertificateAnalyzer(
                     # entry is transiently stale.
                     if self._path_has_live_known_cert(cert_path):
                         continue
+
+                    # Counted here, after the already-known skip, rather than
+                    # per rglob() entry. Deliberately asymmetric with the
+                    # Tetragon path (counted pre-dedup): a kprobe event arrived
+                    # and cost something whether or not we dedup it, whereas
+                    # re-walking the same known files every scan_interval is
+                    # work this scanner chose to do and would otherwise swamp
+                    # the metric with a number that tracks the scan interval
+                    # rather than any real certificate activity.
+                    self._record_event_source(EVENT_SOURCE_PERIODIC_SCAN)
 
                     if self._is_large_certificate_file(cert_path):
                         self._process_certificate_file_async(

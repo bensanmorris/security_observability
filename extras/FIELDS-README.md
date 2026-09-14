@@ -96,6 +96,28 @@ binary running in several different pods shows up as several distinct series her
 |---|---|---|---|
 | `tls_certificate_events_total` | Counter | `event_type`, `status` | Total certificate events processed. `event_type=analysis`, `status=success\|failed` |
 | `tls_certificate_analysis_errors_total` | Counter | `error_type` | Parse and extraction failures. See error types below |
+| `tls_certificate_source_events_total` | Counter | `source`, `node_name` | Total certificate-activity events received, by the mechanism that produced them. Always emitted — the `source` label is a fixed set, so unlike the per-process counters below it carries no cardinality risk. Counted at ingest, *before* self-event filtering, dedup and the new-cert rate limiter, so it measures what each loaded policy actually costs rather than what survived processing. See source values below |
+
+`source` values for `tls_certificate_source_events_total`:
+
+| Value | Produced by | Policy |
+|---|---|---|
+| `file_access` | `fd_install` kprobe — any process opening a file with a certificate extension | `certificate-file-access.yaml` |
+| `socket_bind` | `security_socket_bind` (or `sys_bind`) kprobe — a process binding a port | `experimental/tls-service-tracking.yaml` |
+| `tcp_connect` | `tcp_connect` kprobe — outbound connection to a TLS port | `tcp-connect-tls.yaml` |
+| `openssl_file` | `SSL_CTX_use_certificate_file` / `_chain_file` uprobe — explicit OpenSSL cert-file load | `experimental/openssl*-cert-load.yaml` |
+| `openssl_asn1` | `SSL_CTX_use_certificate_ASN1` uprobe — in-memory DER load | `experimental/openssl*-cert-load.yaml` |
+| `sni_capture` | `SSL_ctrl` uprobe (`cmd == 55`) — client SNI hostname, feeding the outbound connect probe | `experimental/openssl3-cert-load.yaml` |
+| `java_jca` | `java_cert_agent_write` uprobe — `KeyStore.setCertificateEntry` via the cert-agent native stub | `experimental/java-non-fips-cert.yaml` |
+| `pkcs11_create` | `NSC_CreateObject` uprobe — cert stored into the NSS token (FIPS-mode JVMs) | `experimental/java-fips-nss-cert.yaml` |
+| `pkcs11_find` | `NSC_FindObjectsInit` uprobe — NSS token enumeration (attribution only, no cert bytes) | `experimental/java-fips-nss-cert.yaml` |
+| `periodic_scan` | The analyzer's own directory scan, counted per file it parses (not per file walked) | n/a — `[scanning] paths` |
+| `kprobe_other` / `uprobe_other` / `other` | Catch-alls for a hook the analyzer doesn't recognise. Bounds cardinality if a policy is loaded without updating the maps in `agent/constants.py` | n/a |
+
+The ten named sources are zero-initialised at startup, so a source reading `0`
+means "configured but producing nothing" rather than "no data" — itself a
+useful tuning answer. The catch-alls appear only if something unrecognised
+actually fires.
 
 `error_type` values for `tls_certificate_analysis_errors_total`:
 

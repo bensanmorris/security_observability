@@ -180,7 +180,7 @@ sudo systemctl enable --now cert-analyzer
 | Setting | Default | Description |
 |---|---|---|
 | `port` | `9090` | Prometheus metrics port |
-| `event_rate_metrics_enabled` | `false` | Track `tcp_connect` and socket-bind event counts per process as Prometheus counters (`tls_tcp_connect_events_total`, `tls_socket_bind_events_total`). Useful for identifying which application is driving probe load spikes. Disabled by default to avoid high label cardinality in environments with many distinct process names |
+| `event_rate_metrics_enabled` | `false` | Track `tcp_connect` and socket-bind event counts per process as Prometheus counters (`tls_tcp_connect_events_total`, `tls_socket_bind_events_total`). Useful for identifying which application is driving probe load spikes. Disabled by default to avoid high label cardinality in environments with many distinct process names. Note this is the *per-process* breakdown; the per-**source** counter `tls_certificate_source_events_total` (which mechanism produced the event — file access, connect probe, Java JCA, etc) is always on and needs no flag, since its label set is fixed and small |
 
 **[health]**
 

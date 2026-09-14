@@ -151,6 +151,7 @@ Dashboards → Import → Upload `extras/examples/grafana-dashboard.json` → se
 | **FIPS Compliance** | Compliant vs non-compliant donut; key algorithm distribution; table of non-compliant certificates with algorithm and hash details |
 | **Security** | Self-signed certificate table; Tetragon build/runtime version match; Kafka delivery error rate; self-signed breakdown by namespace |
 | **Operational Health** | Event processing rate; analysis error rate by type; cache occupancy time series (vs configured cap); per-cache utilisation % bar gauge |
+| **Certificate Event Sources** | Which mechanism is driving event volume on each node: per-source rate bar gauge, share-of-total donut, and a stacked rate-over-time chart. Use it for tuning — a source at 0 is a policy you could unload; the heaviest source is where narrowing a policy filter or adjusting config pays off most. Always populated, no config flag required |
 
 Template variables at the top of the dashboard filter all panels by **Namespace** and **Node** simultaneously. Both default to "All", which also covers bare-metal deployments where namespace is empty.
 
