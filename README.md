@@ -85,13 +85,13 @@ The installer will fail with a clear error if Tetragon is not found.
 | Policy | Purpose | RHEL |
 |---|---|---|
 | `certificate-file-access.yaml` | Detects certificate file opens by process (`.pem`, `.crt`, `.jks`, `.p12`, etc.) | 8 and 9 |
-| `tls-service-tracking-fixed.yaml` | Identifies processes binding on TLS-capable ports (nginx, httpd) via `sys_bind` — used with `port_probe` to ingest the served certificate | 8 and 9 |
 | `tcp-connect-tls.yaml` | Fires on outbound `tcp_connect` calls to common TLS ports (443, 636, 2376, 4443, 5671, 5672, 5986, 6380, 6443, 8140, 8443, 8883, 9093, 9094, 9443) — used with `port_probe` to probe remote server certificate expiry without any per-service configuration. **If you add or remove ports from the `DPort` filter in this policy you must also update `tls_outbound_ports` in `cert-analyzer.conf` to match** — the policy filters events at the kernel boundary; cert-analyzer applies the same list as a Python-side guard | 8 and 9 |
 | `experimental/openssl1_1-cert-load.yaml` | Intercepts in-memory certificate loads via OpenSSL 1.1 (`libssl.so.1.1`) | 8 only |
 | `experimental/openssl3-cert-load.yaml` | Intercepts in-memory certificate loads via OpenSSL 3 (`libssl.so.3`) | 9 only |
+| `experimental/openssl3-cert-load-rhel8.yaml` | RHEL 8 variant of the above — omits the string-argument hooks, which need `bpf_copy_from_user_str` (kernel 6.3+) | 8 only |
 | `experimental/java-fips-nss-cert.yaml` | Intercepts certificate objects created via NSS/PKCS11 (FIPS-mode JVMs) | 9 only |
 | `experimental/java-non-fips-cert.yaml` | Intercepts certificates exported via the Java cert-agent native stub | 8 and 9 |
-| `experimental/tls-service-tracking.yaml` | Identifies TLS service binds using Tetragon's `Protocol` selector (requires Tetragon ≥ v1.4) | 8 and 9 |
+| `experimental/tls-service-tracking.yaml` | Fires on `security_socket_bind` — identifies processes binding a port (nginx, httpd, etc.) so `port_probe` can handshake back and ingest the served certificate. No port or binary filter, so it posts every `bind()` on the host; cert-analyzer applies the port narrowing | 8 and 9 |
 
 Policies are not bundled in the RPM — they are shipped separately so they can be updated independently of the agent. Each CI run and release attaches a `tetragon-policies-<version>.tar.gz` artifact containing all policy YAMLs (including those under `experimental/`).
 
@@ -244,7 +244,7 @@ sudo systemctl enable --now cert-analyzer
 
 | Setting | Default | Description |
 |---|---|---|
-| `bind_probe_enabled` | `false` | Enable inbound TLS probing. Bind events from `tls-service-tracking-fixed.yaml` trigger a TLS handshake against the newly bound address/port and ingest the served certificate. Low event volume — safe to enable broadly. Each unique `host:port` is probed at most once (O(1) dedup). The handshake also captures the negotiated TLS protocol version and cipher suite (`tls_certificate_negotiated_protocol`) — no separate flag needed |
+| `bind_probe_enabled` | `false` | Enable inbound TLS probing. Bind events from `experimental/tls-service-tracking.yaml` trigger a TLS handshake against the newly bound address/port and ingest the served certificate. Low event volume — safe to enable broadly. Each unique `host:port` is probed at most once (O(1) dedup). The handshake also captures the negotiated TLS protocol version and cipher suite (`tls_certificate_negotiated_protocol`) — no separate flag needed |
 | `connect_probe_enabled` | `false` | Enable outbound TLS probing. `tcp_connect` events from `tcp-connect-tls.yaml` to common TLS ports trigger an immediate probe against the remote server, making remote certificate expiry visible without per-service configuration. Each unique `host:port` is probed at most once (O(1) dedup); enable with care on hosts with high outbound connection rates. The handshake also captures the negotiated TLS protocol version and cipher suite (`tls_certificate_negotiated_protocol`) — no separate flag needed |
 | `tls_outbound_ports` | _(built-in list)_ | Comma-separated list of destination ports to treat as TLS for outbound connect probing. Defaults to `443,636,2376,4443,5671,5672,5986,6380,6443,8140,8443,8883,9093,9094,9443`. If you add or remove ports, you must also update the `DPort` filter in `tcp-connect-tls.yaml` — the Tetragon policy filters events at the kernel boundary; this list is the Python-side guard. Both must agree |
 | `connect_delay_seconds` | `2` | Seconds to wait after a bind event before probing, to allow TLS initialisation to complete (applies to `bind_probe_enabled` only — outbound probes fire immediately) |

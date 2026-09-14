@@ -324,10 +324,10 @@ Exercises the end-to-end port-probe pipeline: `security_socket_bind` kprobe →
 cert_analyzer bind event handler → TLS handshake back to the server →
 certificate extraction and Prometheus metric emission.
 
-This test uses `tls-service-tracking.yaml` (the experimental LSM hook variant),
-which hooks all TCP binds with no binary filter.  The fixed variant
-(`tls-service-tracking-fixed.yaml`) retains a `matchBinaries` allowlist for
-production use where event volume must be controlled.
+This test uses `experimental/tls-service-tracking.yaml`, which hooks all TCP
+binds with no port or binary filter.  For production use where event volume
+must be controlled, add a `matchBinaries` allowlist (nginx, httpd, ...) to a
+local copy of the policy.
 
 **Prerequisites:**
 
@@ -390,11 +390,11 @@ sudo tetra tracingpolicy delete tls-service-tracking
 
 **Production note:**
 
-`tls-service-tracking.yaml` hooks all TCP binds with no binary filter, making it
-suitable for broad coverage but potentially noisy on busy hosts.
-`tls-service-tracking-fixed.yaml` retains a `matchBinaries` allowlist (nginx,
-httpd) for deployments where event volume must be controlled — add any additional
-TLS server binaries there as needed.
+`experimental/tls-service-tracking.yaml` hooks all TCP binds with no port or
+binary filter, making it suitable for broad coverage but potentially noisy on
+busy hosts.  Where event volume must be controlled, add a `matchBinaries`
+allowlist (nginx, httpd, plus any other TLS server binaries) to a local copy
+of the policy.
 
 ---
 

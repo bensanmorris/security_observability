@@ -97,24 +97,25 @@ ls -la /etc/pki/tls/certs/*.crt | tail -6
 
 ### Step 3.5: Load Tetragon Policies
 
-**Important**: Policies need to be loaded after each Tetragon restart.
-
 ```bash
-# Load the certificate monitoring policies
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml
+# Detects your RHEL version and installed libssl, applies every applicable
+# policy, and persists them to /etc/tetragon/tetragon.tp.d so they survive a
+# Tetragon restart. Safe to re-run at any time.
+sudo ./tetragon-policies/apply-policies.sh
 
 # Verify they're loaded
 sudo /usr/local/bin/tetra tracingpolicy list
 ```
 
-You should see:
+You should see each applied policy listed, for example:
 ```
 [1] certificate-file-access enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-1
-[2] openssl-cert-load enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-2
-[3] tls-service-tracking enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-3
+[2] tcp-connect-tls enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-2
+[3] openssl3-cert-load enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-3
+[4] tls-service-tracking enabled:true filterID:0 namespace:(global) sensors:gkp-sensor-4
 ```
+The exact set depends on what the script detected — `apply-policies.sh` prints a
+per-policy OK/FAILED/SKIPPED summary when it runs.
 
 ### Step 4: Trigger Real-Time Detection
 
@@ -297,9 +298,7 @@ sudo podman logs cert-analyzer | grep "Connected to Tetragon"
 sudo /usr/local/bin/tetra tracingpolicy list
 
 # Re-apply if needed
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml
+sudo ./tetragon-policies/apply-policies.sh
 ```
 
 ---
@@ -311,15 +310,15 @@ sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracki
 sudo /usr/local/bin/tetra tracingpolicy list
 
 # If empty, reload them
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/certificate-file-access.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/openssl-cert-load-fixed.yaml
-sudo /usr/local/bin/tetra tracingpolicy add tetragon-policies/tls-service-tracking-fixed.yaml
+sudo ./tetragon-policies/apply-policies.sh
 
 # Verify
 sudo /usr/local/bin/tetra tracingpolicy list
 ```
 
-**Note**: Policies are lost when Tetragon restarts and must be reloaded.
+**Note**: `apply-policies.sh` persists policies to `/etc/tetragon/tetragon.tp.d`,
+so they are reloaded automatically when Tetragon restarts. Policies added by hand
+with `tetra tracingpolicy add` are not persisted and are lost on restart.
 
 ## Demo Talking Points
 
