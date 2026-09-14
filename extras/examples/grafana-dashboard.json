@@ -3477,6 +3477,985 @@
       ]
     },
     {
+      "id": 53,
+      "title": "Certificate Event Sources",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 124
+      },
+      "panels": [
+        {
+          "id": 54,
+          "title": "Event Volume by Source",
+          "type": "bargauge",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Which mechanism is producing certificate activity on this node. Counted at ingest, before dedup and rate limiting, so it reflects what each loaded policy delivers to the analyzer. A source sitting at 0 is loaded but producing nothing - a candidate for unloading. Volume is not cost: pair with the Mean Cost per Event panel below to see which source is actually worth tuning.",
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 125
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "instant": true,
+              "refId": "A",
+              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[5m])))",
+              "legendFormat": "{{source}}"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "valueMode": "color",
+            "minVizWidth": 0,
+            "minVizHeight": 10
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "decimals": 2,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.1
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 10
+                  },
+                  {
+                    "color": "orange",
+                    "value": 100
+                  },
+                  {
+                    "color": "red",
+                    "value": 1000
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 55,
+          "title": "Share of Total Event Volume",
+          "type": "piechart",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Proportion of all certificate-activity events contributed by each source over the selected range. Environments differ sharply - a connect-probe-heavy host and a file-access-heavy host want very different tuning.",
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 125
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "instant": true,
+              "refId": "A",
+              "expr": "sum by (source) (increase(tls_certificate_source_events_total{node_name=~\"$node\"}[$__range])) > 0",
+              "legendFormat": "{{source}}"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "pieType": "donut",
+            "displayLabels": [
+              "percent"
+            ],
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true,
+              "values": [
+                "value",
+                "percent"
+              ]
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "desc"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 56,
+          "title": "Event Rate by Source Over Time",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Stacked so the total height is the node's overall event load and each band is one source's contribution. Use it to catch a source that spikes (a deploy touching every keystore, a burst of outbound TLS) rather than one that is merely steadily busy.",
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 134
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "expr": "sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[5m]))",
+              "legendFormat": "{{source}}"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 40,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 57,
+          "title": "Ingest Thread Occupancy",
+          "type": "gauge",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Busy fraction of the single Tetragon event-consumer thread. Every event is processed on it in order, so as this approaches 100% the gRPC stream backs up into Tetragon and events start being dropped upstream - the counter panels cannot show that. Sustained above ~70% means a source needs narrowing (see the cost-per-event panel for which).",
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 0,
+            "y": 143
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "expr": "sum by (node_name) (rate(tls_certificate_source_processing_seconds_total{stage=\"ingest\", node_name=~\"$node\"}[5m]))",
+              "legendFormat": "{{node_name}}",
+              "instant": true
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.5
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.7
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 58,
+          "title": "Background Pool Occupancy",
+          "type": "gauge",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Mean fraction of max_concurrent_background_threads slots in use (TLS probes and large-file parses). Wall-clock, so a probe sleeping through its pre-handshake delay counts - it holds the slot. Once this hits 100% new work is dropped, not queued: see the background_thread_cap_reached error rate under Operational Health.",
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 6,
+            "y": 143
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "expr": "sum by (node_name) (rate(tls_certificate_source_processing_seconds_total{stage=\"background\", node_name=~\"$node\"}[5m])) / on (node_name) cert_analyzer_background_threads_max{node_name=~\"$node\"}",
+              "legendFormat": "{{node_name}}",
+              "instant": true
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.5
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.7
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 59,
+          "title": "Mean Cost per Event by Source",
+          "type": "bargauge",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Thread time per event (ingest + background), by source. This is the number that ranks what to tune: a source that is 80% of the event volume but microseconds each (dedup hits on a known path) matters less than one that is 5% of volume but a TLS handshake each. Multiply by the rate in the volume panel to get each source's total thread-seconds per second. Sources with no events in the window are omitted rather than shown as infinite - time can still land on one (a background parse finishing after its event was counted).",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 143
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_processing_seconds_total{stage=~\"ingest|background\", node_name=~\"$node\"}[5m])) / (sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[5m])) > 0))",
+              "legendFormat": "{{source}}",
+              "instant": true
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "valueMode": "color",
+            "minVizWidth": 0,
+            "minVizHeight": 10
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 2,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.001
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.01
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 60,
+          "title": "Thread Time by Source and Stage",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Thread-seconds per second, stacked: the total height is how many threads' worth of work the analyzer is doing for certificate activity, each band one (source, stage). ingest is the single consumer thread (cannot exceed 1.0); background is the probe/parse pool; scanner is one periodic_scan pass including the directory walk; retry_queue is the rate-limit replay drainer.",
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 151
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "expr": "sum by (source, stage) (rate(tls_certificate_source_processing_seconds_total{node_name=~\"$node\"}[5m]))",
+              "legendFormat": "{{source}} / {{stage}}"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "decimals": 3,
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 40,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "axisLabel": "threads busy"
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 61,
+          "title": "Background Pool: Active Threads vs Cap",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Instantaneous slots held in the background pool against the configured cap, with the rate of work refused because the pool was full on the right axis. Active hugging the cap while refusals are non-zero means max_concurrent_background_threads is the bottleneck - or that a burst source (usually tcp_connect) needs its probe rate limit tightened.",
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 151
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "expr": "cert_analyzer_background_threads_active{node_name=~\"$node\"}",
+              "legendFormat": "active {{node_name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "B",
+              "expr": "cert_analyzer_background_threads_max{node_name=~\"$node\"}",
+              "legendFormat": "cap {{node_name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "refId": "C",
+              "expr": "sum by (node_name) (rate(tls_certificate_analysis_errors_total{error_type=\"background_thread_cap_reached\", node_name=~\"$node\"}[5m]))",
+              "legendFormat": "refused/s {{node_name}}"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "decimals": 0,
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "stepAfter",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^cap .*"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^refused/s .*"
+                },
+                "properties": [
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "reqps"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "bars"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 60
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "title": "Network Event Rates (optional \u2014 enable event_rate_metrics_enabled)",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 160
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
+          },
+          "id": 43,
+          "title": "Socket Bind Event Rate by Process",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 161
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{process}} @ {{node_name}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
+          },
+          "id": 44,
+          "title": "TCP Connect Event Rate by Process",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 161
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{process}} @ {{node_name}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 45,
+          "title": "Top Processes by TLS Event Rate",
+          "type": "table",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 169
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sort_desc(sum by (process, node_name) (rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])))",
+              "instant": true,
+              "format": "table",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sort_desc(sum by (process, node_name) (rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])))",
+              "instant": true,
+              "format": "table",
+              "refId": "B"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "process",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "node_name 1": true
+                },
+                "indexByName": {
+                  "node_name": 0,
+                  "process": 1,
+                  "Value #A": 2,
+                  "Value #B": 3
+                },
+                "renameByName": {
+                  "node_name": "Node",
+                  "node_name 2": "Node",
+                  "process": "Process",
+                  "Value #A": "Bind/s",
+                  "Value #B": "Connect/s"
+                }
+              }
+            }
+          ],
+          "options": {
+            "showHeader": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "align": "auto",
+                "displayMode": "auto",
+                "filterable": true
+              }
+            },
+            "overrides": []
+          }
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "title": "TLS Port Probes (optional \u2014 enable bind_probe_enabled/connect_probe_enabled)",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 177
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "id": 50,
+          "title": "TLS Probe Results",
+          "description": "Protocol version and cipher suite negotiated during a TLS port probe. The server's ceiling with a modern client, not necessarily what every real client gets.",
+          "type": "table",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 178
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "tls_certificate_negotiated_protocol{node_name=~\"$node\"}",
+              "instant": true,
+              "format": "table",
+              "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "instance": true,
+                  "job": true,
+                  "Value": true
+                },
+                "indexByName": {
+                  "node_name": 0,
+                  "process": 1,
+                  "cert_path": 2,
+                  "cert_index": 3,
+                  "serial": 4,
+                  "protocol": 5,
+                  "cipher": 6
+                },
+                "renameByName": {
+                  "node_name": "Node",
+                  "process": "Process",
+                  "cert_path": "Path",
+                  "cert_index": "Cert #",
+                  "serial": "Serial",
+                  "protocol": "Protocol",
+                  "cipher": "Cipher"
+                }
+              }
+            }
+          ],
+          "options": {
+            "showHeader": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "displayMode": "auto",
+                "filterable": true
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "id": 52,
+          "title": "TLS Probe Outcome Rate",
+          "description": "Rate of TLS port probe attempts triggered by bind/connect events, by outcome and node.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 186
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(tls_port_probes_total{node_name=~\"$node\"}[5m])",
+              "legendFormat": "{{status}} @ {{node_name}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "legend": {
+              "calcs": [
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "auto"
+              }
+            },
+            "overrides": []
+          }
+        }
+      ]
+    },
+    {
       "id": 28,
       "title": "Tetragon",
       "type": "row",
@@ -3485,7 +4464,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 124
+        "y": 194
       },
       "panels": [
         {
@@ -3500,7 +4479,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 125
+            "y": 195
           },
           "targets": [
             {
@@ -3641,354 +4620,6 @@
                 ]
               }
             ]
-          }
-        }
-      ]
-    },
-    {
-      "id": 42,
-      "title": "Network Event Rates (optional \u2014 enable event_rate_metrics_enabled)",
-      "type": "row",
-      "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 133
-      },
-      "panels": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            },
-            "legend": {
-              "calcs": [
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            }
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps",
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "showPoints": "auto"
-              }
-            },
-            "overrides": []
-          },
-          "id": 43,
-          "title": "Socket Bind Event Rate by Process",
-          "type": "timeseries",
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 128
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])",
-              "legendFormat": "{{process}} @ {{node_name}}",
-              "refId": "A"
-            }
-          ]
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            },
-            "legend": {
-              "calcs": [
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            }
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps",
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "showPoints": "auto"
-              }
-            },
-            "overrides": []
-          },
-          "id": 44,
-          "title": "TCP Connect Event Rate by Process",
-          "type": "timeseries",
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 128
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])",
-              "legendFormat": "{{process}} @ {{node_name}}",
-              "refId": "A"
-            }
-          ]
-        },
-        {
-          "id": 45,
-          "title": "Top Processes by TLS Event Rate",
-          "type": "table",
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 136
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "sort_desc(sum by (process, node_name) (rate(tls_socket_bind_events_total{node_name=~\"$node\"}[5m])))",
-              "instant": true,
-              "format": "table",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "sort_desc(sum by (process, node_name) (rate(tls_tcp_connect_events_total{node_name=~\"$node\"}[5m])))",
-              "instant": true,
-              "format": "table",
-              "refId": "B"
-            }
-          ],
-          "transformations": [
-            {
-              "id": "joinByField",
-              "options": {
-                "byField": "process",
-                "mode": "outer"
-              }
-            },
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "Time 1": true,
-                  "Time 2": true,
-                  "node_name 1": true
-                },
-                "indexByName": {
-                  "node_name": 0,
-                  "process": 1,
-                  "Value #A": 2,
-                  "Value #B": 3
-                },
-                "renameByName": {
-                  "node_name": "Node",
-                  "node_name 2": "Node",
-                  "process": "Process",
-                  "Value #A": "Bind/s",
-                  "Value #B": "Connect/s"
-                }
-              }
-            }
-          ],
-          "options": {
-            "showHeader": true
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps",
-              "custom": {
-                "align": "auto",
-                "displayMode": "auto",
-                "filterable": true
-              }
-            },
-            "overrides": []
-          }
-        }
-      ]
-    },
-    {
-      "id": 48,
-      "title": "TLS Port Probes (optional \u2014 enable bind_probe_enabled/connect_probe_enabled)",
-      "type": "row",
-      "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 134
-      },
-      "panels": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "id": 50,
-          "title": "TLS Probe Results",
-          "description": "Protocol version and cipher suite negotiated during a TLS port probe. The server's ceiling with a modern client, not necessarily what every real client gets.",
-          "type": "table",
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 129
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "tls_certificate_negotiated_protocol{node_name=~\"$node\"}",
-              "instant": true,
-              "format": "table",
-              "refId": "A"
-            }
-          ],
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "__name__": true,
-                  "instance": true,
-                  "job": true,
-                  "Value": true
-                },
-                "indexByName": {
-                  "node_name": 0,
-                  "process": 1,
-                  "cert_path": 2,
-                  "cert_index": 3,
-                  "serial": 4,
-                  "protocol": 5,
-                  "cipher": 6
-                },
-                "renameByName": {
-                  "node_name": "Node",
-                  "process": "Process",
-                  "cert_path": "Path",
-                  "cert_index": "Cert #",
-                  "serial": "Serial",
-                  "protocol": "Protocol",
-                  "cipher": "Cipher"
-                }
-              }
-            }
-          ],
-          "options": {
-            "showHeader": true
-          },
-          "fieldConfig": {
-            "defaults": {
-              "custom": {
-                "align": "auto",
-                "displayMode": "auto",
-                "filterable": true
-              }
-            },
-            "overrides": []
-          }
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "id": 52,
-          "title": "TLS Probe Outcome Rate",
-          "description": "Rate of TLS port probe attempts triggered by bind/connect events, by outcome and node.",
-          "type": "timeseries",
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 137
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "expr": "rate(tls_port_probes_total{node_name=~\"$node\"}[5m])",
-              "legendFormat": "{{status}} @ {{node_name}}",
-              "refId": "A"
-            }
-          ],
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            },
-            "legend": {
-              "calcs": [
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            }
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps",
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "showPoints": "auto"
-              }
-            },
-            "overrides": []
           }
         }
       ]

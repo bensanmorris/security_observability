@@ -1068,7 +1068,7 @@ class TestPeriodicScan:
         analyzer._new_file_in_flight.add(cert_path)  # simulate the sync path already claiming it
         analyzer._start_background_thread = Mock(return_value=True)
 
-        analyzer._process_certificate_file_async(cert_path, "test", 1, "", None, "", 0, "")
+        analyzer._process_certificate_file_async(cert_path, "test", 1, "", None, "", 0, "", source="file_access")
 
         analyzer._start_background_thread.assert_not_called()
 
@@ -10762,3 +10762,484 @@ class TestMainEntryPoint:
             main()
 
         mocks['thread_cls'].assert_not_called()
+
+
+class TestEventSourceCounter:
+    """Tests for tls_certificate_source_events_total (per-source ingest counter).
+
+    Covers:
+      classification of every mapped kprobe / uprobe hook
+      unrecognised hooks collapsing into the catch-all buckets
+      counting at ingest -- before the self-event filter and before dedup
+      always-on (no config flag), and zero-initialised for known sources
+      periodic_scan counted per processed file, not per walked file
+    """
+
+    @pytest.fixture
+    def src_analyzer(self):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(tetragon_address='unix:///dev/null')
+        yield a
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _make_kprobe_event(fn, binary='/usr/bin/cat', pid=1234, args=None):
+        from unittest.mock import MagicMock
+        kprobe = MagicMock()
+        kprobe.function_name = fn
+        kprobe.process.binary = binary
+        kprobe.process.pid.value = pid
+        kprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        kprobe.HasField.return_value = False
+        kprobe.args = args if args is not None else []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_kprobe'
+        event.process_kprobe = kprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _make_uprobe_event(symbol, binary='/usr/bin/openssl', pid=5678):
+        from unittest.mock import MagicMock
+        uprobe = MagicMock()
+        uprobe.symbol = symbol
+        uprobe.process.binary = binary
+        uprobe.process.pid.value = pid
+        uprobe.process.HasField.side_effect = lambda f: f == 'pid'
+        uprobe.HasField.return_value = False
+        uprobe.args = []
+        event = MagicMock()
+        event.HasField.side_effect = lambda f: f == 'process_uprobe'
+        event.process_uprobe = uprobe
+        event.node_name = 'test-node'
+        return event
+
+    @staticmethod
+    def _count(analyzer, source):
+        return analyzer.metrics.cert_source_events_total.labels(
+            source=source, node_name=analyzer.metrics._node_name)._value.get()
+
+    # --- classification ---------------------------------------------------
+
+    @pytest.mark.parametrize('fn,expected', [
+        ('fd_install', 'file_access'),
+        ('security_socket_bind', 'socket_bind'),
+        ('sys_bind', 'socket_bind'),
+        ('tcp_connect', 'tcp_connect'),
+    ])
+    def test_kprobe_sources_classified(self, src_analyzer, fn, expected):
+        event = self._make_kprobe_event(fn)
+        before = self._count(src_analyzer, expected)
+        src_analyzer.process_event(event)
+        assert self._count(src_analyzer, expected) == before + 1
+
+    @pytest.mark.parametrize('symbol,expected', [
+        ('SSL_CTX_use_certificate_file', 'openssl_file'),
+        ('SSL_CTX_use_certificate_chain_file', 'openssl_file'),
+        ('SSL_CTX_use_certificate_ASN1', 'openssl_asn1'),
+        ('java_cert_agent_write', 'java_jca'),
+        ('NSC_CreateObject', 'pkcs11_create'),
+        ('NSC_FindObjectsInit', 'pkcs11_find'),
+        ('SSL_ctrl', 'sni_capture'),
+    ])
+    def test_uprobe_sources_classified(self, src_analyzer, symbol, expected):
+        event = self._make_uprobe_event(symbol)
+        before = self._count(src_analyzer, expected)
+        src_analyzer.process_event(event)
+        assert self._count(src_analyzer, expected) == before + 1
+
+    def test_unknown_kprobe_collapses_to_catch_all(self, src_analyzer):
+        """An unmapped hook must not mint a new series -- that's the cardinality guard."""
+        before = self._count(src_analyzer, 'kprobe_other')
+        src_analyzer.process_event(self._make_kprobe_event('some_future_hook'))
+        src_analyzer.process_event(self._make_kprobe_event('another_new_hook'))
+        assert self._count(src_analyzer, 'kprobe_other') == before + 2
+
+    def test_unknown_uprobe_collapses_to_catch_all(self, src_analyzer):
+        before = self._count(src_analyzer, 'uprobe_other')
+        src_analyzer.process_event(self._make_uprobe_event('SSL_some_new_symbol'))
+        assert self._count(src_analyzer, 'uprobe_other') == before + 1
+
+    def test_event_with_neither_probe_type_counted_as_other(self, src_analyzer):
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        event.HasField.return_value = False
+        event.node_name = 'test-node'
+        before = self._count(src_analyzer, 'other')
+        src_analyzer.process_event(event)
+        assert self._count(src_analyzer, 'other') == before + 1
+
+    # --- counted at ingest, not at outcome --------------------------------
+
+    def test_counted_even_when_event_is_self_filtered(self, src_analyzer):
+        """A dropped event still cost a hook + a gRPC message, so it still counts."""
+        from unittest.mock import MagicMock, patch
+        arg = MagicMock()
+        arg.HasField.side_effect = lambda f: f == 'file_arg'
+        arg.file_arg.path = '/etc/pki/tls/certs/self.pem'
+        event = self._make_kprobe_event('fd_install', args=[arg])
+        src_analyzer.filter_self_events = True
+        with patch.object(src_analyzer, '_is_self_event', return_value=True):
+            before = self._count(src_analyzer, 'file_access')
+            src_analyzer.process_event(event)
+        assert self._count(src_analyzer, 'file_access') == before + 1
+
+    def test_counted_even_when_probe_disabled(self, src_analyzer):
+        """bind/connect events count on arrival regardless of the probe flags."""
+        src_analyzer._bind_probe_enabled = False
+        src_analyzer._connect_probe_enabled = False
+        before_bind = self._count(src_analyzer, 'socket_bind')
+        before_conn = self._count(src_analyzer, 'tcp_connect')
+        src_analyzer.process_event(self._make_kprobe_event('security_socket_bind'))
+        src_analyzer.process_event(self._make_kprobe_event('tcp_connect'))
+        assert self._count(src_analyzer, 'socket_bind') == before_bind + 1
+        assert self._count(src_analyzer, 'tcp_connect') == before_conn + 1
+
+    def test_counted_without_event_rate_metrics_flag(self, src_analyzer):
+        """Unlike the per-process counters, this one needs no opt-in."""
+        assert src_analyzer._event_rate_metrics_enabled is False
+        before = self._count(src_analyzer, 'socket_bind')
+        src_analyzer.process_event(self._make_kprobe_event('security_socket_bind'))
+        assert self._count(src_analyzer, 'socket_bind') == before + 1
+
+    # --- registry shape ---------------------------------------------------
+
+    def test_known_sources_zero_initialised(self, src_analyzer):
+        """A configured-but-quiet source must read 0, not be absent from the panel."""
+        from agent.constants import EVENT_SOURCE_KNOWN_LABELS
+        for source in EVENT_SOURCE_KNOWN_LABELS:
+            value = REGISTRY.get_sample_value(
+                'tls_certificate_source_events_total',
+                {'source': source, 'node_name': src_analyzer.metrics._node_name},
+            )
+            assert value == 0, f"{source} should be zero-initialised, got {value}"
+
+    def test_catch_alls_not_zero_initialised(self, src_analyzer):
+        """Catch-alls appear only once something unrecognised actually fires."""
+        for source in ('kprobe_other', 'uprobe_other', 'other'):
+            assert REGISTRY.get_sample_value(
+                'tls_certificate_source_events_total',
+                {'source': source, 'node_name': src_analyzer.metrics._node_name},
+            ) is None
+
+    def test_label_taxonomy_is_bounded_and_complete(self):
+        """Every mapped value must be declared in EVENT_SOURCE_LABELS."""
+        from agent.constants import (
+            EVENT_SOURCE_BY_KPROBE, EVENT_SOURCE_BY_UPROBE, EVENT_SOURCE_LABELS,
+        )
+        mapped = set(EVENT_SOURCE_BY_KPROBE.values()) | set(EVENT_SOURCE_BY_UPROBE.values())
+        assert mapped <= set(EVENT_SOURCE_LABELS)
+        assert len(EVENT_SOURCE_LABELS) == len(set(EVENT_SOURCE_LABELS))
+
+    # --- periodic scan ----------------------------------------------------
+
+    def test_periodic_scan_counts_processed_files_only(self, src_analyzer, temp_dir):
+        """Counted per file the scan decides to parse, not per file it walks."""
+        cert, _ = TestCertificateGeneration.generate_certificate('scanned.example.com', 365)
+        cert_file = os.path.join(temp_dir, 'scanned.pem')
+        with open(cert_file, 'wb') as f:
+            f.write(cert.public_bytes(Encoding.PEM))
+        # A non-cert file in the same directory must not be counted.
+        with open(os.path.join(temp_dir, 'notes.txt'), 'w') as f:
+            f.write('not a certificate')
+
+        before = self._count(src_analyzer, 'periodic_scan')
+        src_analyzer.periodic_scan([temp_dir])
+        assert self._count(src_analyzer, 'periodic_scan') == before + 1
+
+        # Second pass: the file is now known, so it is skipped and not recounted.
+        src_analyzer.periodic_scan([temp_dir])
+        assert self._count(src_analyzer, 'periodic_scan') == before + 1
+
+
+from unittest.mock import patch as _patch  # noqa: E402
+
+
+class TestProcessingSecondsAndPoolOccupancy:
+    """Tests for tls_certificate_source_processing_seconds_total and the
+    cert_analyzer_background_threads_{active,max} gauges -- the thread-
+    occupancy complement to the per-source event counter.
+
+    Covers:
+      ingest stage charged to the event's source, even when processing raises
+      background stage charged to the *originating* source (probe mechanism,
+        large-file parse from an event, large-file parse from the scanner)
+      scanner stage covers a whole periodic_scan pass
+      retry_queue stage attributed to the retry_queue pseudo-source
+      pool gauges: max set from config, active tracks slot lifetime and
+        never goes negative on a cap-reached refusal
+      ingest stage zero-initialised for every Tetragon-side source only
+    """
+
+    @pytest.fixture
+    def occ_analyzer(self):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(tetragon_address='unix:///dev/null',
+                                max_concurrent_background_threads=3)
+        yield a
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _seconds(analyzer, source, stage):
+        return REGISTRY.get_sample_value(
+            'tls_certificate_source_processing_seconds_total',
+            {'source': source, 'stage': stage, 'node_name': analyzer.metrics._node_name},
+        )
+
+    @staticmethod
+    def _active(analyzer):
+        return REGISTRY.get_sample_value(
+            'cert_analyzer_background_threads_active',
+            {'node_name': analyzer.metrics._node_name},
+        )
+
+    # --- ingest -----------------------------------------------------------
+
+    def test_ingest_time_charged_to_event_source(self, occ_analyzer):
+        event = TestEventSourceCounter._make_kprobe_event('tcp_connect')
+        before = self._seconds(occ_analyzer, 'tcp_connect', 'ingest')
+        with _patch.object(occ_analyzer, '_process_event_inner',
+                          side_effect=lambda e, s: time.sleep(0.01)):
+            occ_analyzer.process_event(event)
+        after = self._seconds(occ_analyzer, 'tcp_connect', 'ingest')
+        assert after - before >= 0.01
+        # Nothing landed on any other stage for this source.
+        assert self._seconds(occ_analyzer, 'tcp_connect', 'background') == 0
+
+    def test_ingest_time_charged_even_when_processing_raises(self, occ_analyzer):
+        """A crashing event still occupied the thread; the finally must record it."""
+        event = TestEventSourceCounter._make_uprobe_event('SSL_CTX_use_certificate_file')
+        before = self._seconds(occ_analyzer, 'openssl_file', 'ingest')
+        with _patch.object(occ_analyzer, '_process_event_inner', side_effect=RuntimeError('boom')):
+            with pytest.raises(RuntimeError):
+                occ_analyzer.process_event(event)
+        assert self._seconds(occ_analyzer, 'openssl_file', 'ingest') > before
+
+    def test_every_reachable_source_stage_pair_zero_initialised(self, occ_analyzer):
+        """A series born mid-burst loses that burst to rate(), so all pairs start at 0."""
+        from agent.constants import (
+            EVENT_SOURCE_STAGE_PAIRS, EVENT_SOURCE_KNOWN_LABELS, EVENT_SOURCE_PERIODIC_SCAN,
+        )
+        for source, stage in EVENT_SOURCE_STAGE_PAIRS:
+            assert self._seconds(occ_analyzer, source, stage) == 0, (source, stage)
+        # periodic_scan never touches the ingest thread; it has no ingest series.
+        assert self._seconds(occ_analyzer, EVENT_SOURCE_PERIODIC_SCAN, 'ingest') is None
+        # Every Tetragon source can reach the pool (probe or large-file parse).
+        for source in EVENT_SOURCE_KNOWN_LABELS:
+            assert (source, 'background') in EVENT_SOURCE_STAGE_PAIRS
+        # The pairs the drainer and scanner use are declared, and nothing else.
+        assert ('retry_queue', 'retry_queue') in EVENT_SOURCE_STAGE_PAIRS
+        assert (EVENT_SOURCE_PERIODIC_SCAN, 'scanner') in EVENT_SOURCE_STAGE_PAIRS
+        assert len(EVENT_SOURCE_STAGE_PAIRS) == len(set(EVENT_SOURCE_STAGE_PAIRS))
+
+    # --- background pool --------------------------------------------------
+
+    def test_background_max_gauge_reflects_config(self, occ_analyzer):
+        assert REGISTRY.get_sample_value(
+            'cert_analyzer_background_threads_max',
+            {'node_name': occ_analyzer.metrics._node_name},
+        ) == 3
+
+    def test_background_time_and_active_gauge_track_thread_lifetime(self, occ_analyzer):
+        release = threading.Event()
+        started = threading.Event()
+
+        def work():
+            started.set()
+            release.wait(5)
+
+        assert self._active(occ_analyzer) == 0
+        assert occ_analyzer._start_background_thread(work, name='t', source='socket_bind')
+        assert started.wait(5)
+        assert self._active(occ_analyzer) == 1
+        assert self._seconds(occ_analyzer, 'socket_bind', 'background') == 0
+        time.sleep(0.02)
+        release.set()
+        deadline = time.time() + 5
+        while self._active(occ_analyzer) != 0 and time.time() < deadline:
+            time.sleep(0.005)
+        assert self._active(occ_analyzer) == 0
+        assert self._seconds(occ_analyzer, 'socket_bind', 'background') >= 0.02
+
+    def test_cap_reached_refusal_does_not_touch_active_gauge(self, occ_analyzer):
+        release = threading.Event()
+        started = [threading.Event() for _ in range(3)]
+
+        def make(i):
+            def work():
+                started[i].set()
+                release.wait(5)
+            return work
+
+        for i in range(3):
+            assert occ_analyzer._start_background_thread(make(i), name=f't{i}', source='tcp_connect')
+        for ev in started:
+            assert ev.wait(5)
+        assert self._active(occ_analyzer) == 3
+        # Fourth is refused: no slot, no gauge change, no time recorded.
+        assert occ_analyzer._start_background_thread(lambda: None, name='t3', source='file_access') is False
+        assert self._active(occ_analyzer) == 3
+        assert self._seconds(occ_analyzer, 'file_access', 'background') == 0
+        release.set()
+        deadline = time.time() + 5
+        while self._active(occ_analyzer) != 0 and time.time() < deadline:
+            time.sleep(0.005)
+        assert self._active(occ_analyzer) == 0
+
+    def test_probe_thread_charged_to_originating_kprobe_source(self, occ_analyzer):
+        """A connect probe's wall time lands on tcp_connect, a bind probe's on socket_bind."""
+        with _patch.object(occ_analyzer, '_probe_tls_endpoint', side_effect=lambda *a, **k: time.sleep(0.01)):
+            occ_analyzer._schedule_tls_probe('connect', '10.0.0.1', 443, 'curl', 1, 'n', None)
+            occ_analyzer._schedule_tls_probe('bind', '10.0.0.2', 8443, 'nginx', 2, 'n', None)
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'tcp_connect', 'background') >= 0.01
+        assert self._seconds(occ_analyzer, 'socket_bind', 'background') >= 0.01
+
+    def test_large_file_from_event_charged_to_event_source(self, occ_analyzer, temp_dir):
+        cert_path = os.path.join(temp_dir, 'big.pem')
+        with open(cert_path, 'w') as f:
+            f.write('placeholder')
+        with _patch.object(occ_analyzer, '_analyze_and_finish_new_certificate_file',
+                          side_effect=lambda *a, **k: time.sleep(0.01)):
+            occ_analyzer._process_certificate_file_async(
+                cert_path, 'proc', 1, '', None, '', 0, 'n', source='openssl_file')
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'openssl_file', 'background') >= 0.01
+
+    # --- scanner ----------------------------------------------------------
+
+    def test_periodic_scan_pass_charged_to_scanner_stage(self, occ_analyzer, temp_dir):
+        """The whole pass -- walk included -- counts, even when it parses nothing."""
+        with open(os.path.join(temp_dir, 'notes.txt'), 'w') as f:
+            f.write('not a certificate')
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'scanner') == 0
+        occ_analyzer.periodic_scan([temp_dir])
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'scanner') > 0
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'ingest') is None
+
+    def test_periodic_scan_large_file_charged_to_periodic_scan_in_background(self, occ_analyzer, temp_dir):
+        cert_path = os.path.join(temp_dir, 'bundle.pem')
+        cert, _ = TestCertificateGeneration.generate_certificate('bundle.example.com', 365)
+        with open(cert_path, 'wb') as f:
+            f.write(cert.public_bytes(Encoding.PEM))
+        with _patch.object(occ_analyzer, '_is_large_certificate_file', return_value=True), \
+             _patch.object(occ_analyzer, '_analyze_and_finish_new_certificate_file',
+                          side_effect=lambda *a, **k: time.sleep(0.01)):
+            occ_analyzer.periodic_scan([temp_dir])
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'background') >= 0.01
+
+    # --- retry queue ------------------------------------------------------
+
+    def test_retry_replay_charged_to_retry_queue_pseudo_source(self, occ_analyzer):
+        from agent.retry_queue import _RetryEntry
+        entry = _RetryEntry('/etc/pki/tls/certs/queued.pem', 'proc', 1, '', None, '', 0, 'n')
+        occ_analyzer._retry_queue.append(entry)
+        occ_analyzer._retry_queue_paths.add(entry.cert_path)
+        replayed = threading.Event()
+
+        def fake_try(*a, **k):
+            time.sleep(0.01)
+            replayed.set()
+            return []
+
+        with _patch.object(occ_analyzer, '_path_has_live_known_cert', return_value=False), \
+             _patch.object(occ_analyzer, '_try_process_new_certificate_file', side_effect=fake_try):
+            occ_analyzer._start_retry_queue_drainer()
+            assert replayed.wait(5)
+            deadline = time.time() + 5
+            while (self._seconds(occ_analyzer, 'retry_queue', 'retry_queue') or 0) < 0.01 \
+                    and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'retry_queue', 'retry_queue') >= 0.01
+
+    # --- review fixes -----------------------------------------------------
+
+    def test_thread_start_failure_releases_slot_and_gauge(self, occ_analyzer):
+        """Thread.start() raising (thread limit) must not leak the slot or the gauge."""
+        sem = occ_analyzer._background_thread_semaphore
+        with _patch('agent.analyzer.threading.Thread') as thread_cls:
+            thread_cls.return_value.start.side_effect = RuntimeError("can't start new thread")
+            assert occ_analyzer._start_background_thread(lambda: None, name='t', source='tcp_connect') is False
+        assert self._active(occ_analyzer) == 0
+        # All 3 slots still available: acquire them all without blocking.
+        for _ in range(3):
+            assert sem.acquire(blocking=False)
+        for _ in range(3):
+            sem.release()
+        assert self._seconds(occ_analyzer, 'tcp_connect', 'background') == 0
+
+    def test_unknown_probe_mechanism_collapses_to_catch_all_and_does_not_leak(self, occ_analyzer):
+        """A mechanism missing from the map must not raise after the in-flight marker is set."""
+        with _patch.object(occ_analyzer, '_probe_tls_endpoint', side_effect=lambda *a, **k: None):
+            occ_analyzer._schedule_tls_probe('future-mechanism', '10.0.0.9', 443, 'x', 1, 'n', None)
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert 'future-mechanism:10.0.0.9:443' not in occ_analyzer._probe_in_flight
+        assert 'future-mechanism:10.0.0.9:443' in occ_analyzer._probed_endpoints
+        assert self._seconds(occ_analyzer, 'kprobe_other', 'background') is not None
+
+
+class TestDashboardConventions:
+    """Guards for extras/examples/grafana-dashboard.json that were only ever caught live."""
+
+    @pytest.fixture(scope='class')
+    def dashboard(self):
+        import json
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'extras', 'examples', 'grafana-dashboard.json')
+        with open(path) as f:
+            return json.load(f)
+
+    @staticmethod
+    def _all_panels(dashboard):
+        for p in dashboard['panels']:
+            yield p
+            yield from p.get('panels', [])
+
+    def test_no_panel_uses_rate_interval(self, dashboard):
+        """The analyzer is scraped every 60s; $__rate_interval resolves to 60s unless the
+        datasource declares its scrape interval, and a 60s window holds one sample.
+        Every rate panel hardcodes [5m] for this reason."""
+        offenders = [
+            (p['id'], p.get('title'))
+            for p in self._all_panels(dashboard)
+            for t in p.get('targets', [])
+            if '$__rate_interval' in t.get('expr', '')
+        ]
+        assert offenders == []
+
+    def test_panel_ids_unique(self, dashboard):
+        ids = [p['id'] for p in self._all_panels(dashboard)]
+        assert len(ids) == len(set(ids))
+
+    def test_rows_ordered_by_grid_y(self, dashboard):
+        ys = [p['gridPos']['y'] for p in dashboard['panels'] if p['type'] == 'row']
+        assert ys == sorted(ys)
