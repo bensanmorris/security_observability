@@ -80,6 +80,14 @@ EVENT_SOURCE_BY_UPROBE: Dict[str, str] = {
     'SSL_ctrl': 'sni_capture',
 }
 
+# TLS probe mechanism (_schedule_tls_probe's `mechanism`) -> the kprobe
+# source whose event asked for the probe, so the probe thread's time is
+# charged back to the policy that caused it.
+EVENT_SOURCE_BY_PROBE_MECHANISM: Dict[str, str] = {
+    'bind': EVENT_SOURCE_BY_KPROBE['security_socket_bind'],
+    'connect': EVENT_SOURCE_BY_KPROBE['tcp_connect'],
+}
+
 # Non-Tetragon sources — the analyzer generates these itself.
 EVENT_SOURCE_PERIODIC_SCAN = 'periodic_scan'
 
@@ -109,4 +117,62 @@ EVENT_SOURCE_LABELS = sorted(
         EVENT_SOURCE_OTHER_UPROBE,
         EVENT_SOURCE_OTHER,
     }
+)
+
+# ---------------------------------------------------------------------------
+# Processing-stage classification
+#
+# tls_certificate_source_events_total says how *many* events each source
+# produces. tls_certificate_source_processing_seconds_total says how much
+# thread time each source *costs*, split by which thread did the work -- the
+# two together are what make the source row a tuning tool, since cost per
+# event differs by orders of magnitude between sources (a dedup hit on a
+# known path vs. a TLS handshake vs. parsing a CA bundle).
+# ---------------------------------------------------------------------------
+
+# The single gRPC consumer thread. Its busy fraction is the saturation
+# signal: as sum(rate(...{stage="ingest"})) approaches 1.0 the stream backs
+# up into Tetragon and events start being lost upstream.
+PROCESSING_STAGE_INGEST = 'ingest'
+# The bounded background pool (max_concurrent_background_threads): TLS
+# probes and large-file parses. Wall-clock, so a probe's pre-handshake
+# delay/sleep counts -- it is holding a pool slot the whole time.
+PROCESSING_STAGE_BACKGROUND = 'background'
+# The periodic scanner thread, one pass of periodic_scan() including the
+# directory walk itself.
+PROCESSING_STAGE_SCANNER = 'scanner'
+# The rate-limit retry drainer thread replaying queued files.
+PROCESSING_STAGE_RETRY_QUEUE = 'retry_queue'
+
+PROCESSING_STAGES = (
+    PROCESSING_STAGE_INGEST,
+    PROCESSING_STAGE_BACKGROUND,
+    PROCESSING_STAGE_SCANNER,
+    PROCESSING_STAGE_RETRY_QUEUE,
+)
+
+# Retry-queue replays have lost their originating source by the time they
+# run (the entry only carries the path), so they are attributed to their own
+# value rather than guessed. Only ever paired with PROCESSING_STAGE_RETRY_QUEUE
+# and only ever on the seconds metric -- it is not an event source.
+EVENT_SOURCE_RETRY_QUEUE = 'retry_queue'
+
+# Sources whose time lands on the ingest thread -- every Tetragon-delivered
+# source, i.e. everything except the analyzer's own periodic scan.
+EVENT_SOURCE_INGEST_LABELS = [
+    s for s in EVENT_SOURCE_KNOWN_LABELS if s != EVENT_SOURCE_PERIODIC_SCAN
+]
+
+# Every (source, stage) pair the code can charge time to. All are zero-
+# initialised at startup, not just the ingest ones: a Prometheus counter's
+# first sample is its baseline, so a series born mid-burst (a probe thread
+# that ran to completion before the first scrape saw the series) has that
+# entire burst invisible to rate()/increase(). Seen live on first deploy --
+# tcp_connect/background sat at 0.7s with rate() reporting 0. 21 series
+# per node, so cheap enough to just declare them all.
+EVENT_SOURCE_STAGE_PAIRS = (
+    [(s, PROCESSING_STAGE_INGEST) for s in EVENT_SOURCE_INGEST_LABELS]
+    + [(s, PROCESSING_STAGE_BACKGROUND) for s in EVENT_SOURCE_KNOWN_LABELS]
+    + [(EVENT_SOURCE_PERIODIC_SCAN, PROCESSING_STAGE_SCANNER),
+       (EVENT_SOURCE_RETRY_QUEUE, PROCESSING_STAGE_RETRY_QUEUE)]
 )

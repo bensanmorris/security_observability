@@ -13,6 +13,7 @@ self._probe_rate_limiter, self._probe_rate_limit_logger, self.metrics,
 self.last_event_time) and methods/constants from its sibling mixins and the
 core class (self._resolve_process_binary, self.extract_certificate_info,
 self._finish_single_certificate, self._start_background_thread,
+self._record_processing_seconds,
 self._SNI_CAPTURE_POLL_INTERVAL_SECONDS, self._SNI_CAPTURE_POLL_MAX_SECONDS).
 """
 import logging
@@ -25,6 +26,8 @@ from typing import Optional
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+
+from .constants import EVENT_SOURCE_BY_PROBE_MECHANISM
 
 # Logger name is hardcoded (not __name__) so log records from this mixin keep
 # reporting under "agent.analyzer" -- see the identical note in java_fips.py.
@@ -302,7 +305,9 @@ class _TlsProbeMixin:
                     self._probe_in_flight.discard(endpoint_key)
                     self._probed_endpoints.add(endpoint_key)
 
-        started = self._start_background_thread(_probe, name=f'tls-{mechanism}-probe-{host}-{port}')
+        started = self._start_background_thread(
+            _probe, name=f'tls-{mechanism}-probe-{host}-{port}',
+            source=EVENT_SOURCE_BY_PROBE_MECHANISM[mechanism])
         if not started:
             # _probe's finally never ran, so undo the in-flight marker here —
             # this endpoint will be retried on its next qualifying event.

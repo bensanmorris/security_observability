@@ -96,7 +96,8 @@ binary running in several different pods shows up as several distinct series her
 |---|---|---|---|
 | `tls_certificate_events_total` | Counter | `event_type`, `status` | Total certificate events processed. `event_type=analysis`, `status=success\|failed` |
 | `tls_certificate_analysis_errors_total` | Counter | `error_type` | Parse and extraction failures. See error types below |
-| `tls_certificate_source_events_total` | Counter | `source`, `node_name` | Total certificate-activity events received, by the mechanism that produced them. Always emitted — the `source` label is a fixed set, so unlike the per-process counters below it carries no cardinality risk. Counted at ingest, *before* self-event filtering, dedup and the new-cert rate limiter, so it measures what each loaded policy actually costs rather than what survived processing. See source values below |
+| `tls_certificate_source_events_total` | Counter | `source`, `node_name` | Total certificate-activity events received, by the mechanism that produced them. Always emitted — the `source` label is a fixed set, so unlike the per-process counters below it carries no cardinality risk. Counted at ingest, *before* self-event filtering, dedup and the new-cert rate limiter, so it measures what each loaded policy delivers to the analyzer rather than what survived processing. Volume, not cost — pair with `tls_certificate_source_processing_seconds_total` for that. See source values below |
+| `tls_certificate_source_processing_seconds_total` | Counter | `source`, `stage`, `node_name` | Wall-clock thread-seconds spent on certificate activity, by source and by which thread did the work. The complement to the counter above: `rate(seconds)/rate(events)` is the mean cost per event per source, which is what actually ranks tuning candidates — a dedup hit on a known path and a TLS handshake are both one event but differ in cost by orders of magnitude. `sum(rate(...{stage="ingest"}))` is the busy fraction of the single event-consumer thread (approaching 1.0 means events are about to be lost upstream in Tetragon); `sum(rate(...{stage="background"}))` is the mean number of background-pool slots held. Wall-clock, not CPU, deliberately: the pool is bounded by slots, and a probe sleeping through its pre-handshake delay holds one. See stage values below
 
 `source` values for `tls_certificate_source_events_total`:
 
@@ -118,6 +119,23 @@ The ten named sources are zero-initialised at startup, so a source reading `0`
 means "configured but producing nothing" rather than "no data" — itself a
 useful tuning answer. The catch-alls appear only if something unrecognised
 actually fires.
+
+`stage` values for `tls_certificate_source_processing_seconds_total`:
+
+| Value | Thread | What is charged |
+|---|---|---|
+| `ingest` | The single Tetragon gRPC event-consumer thread | The whole of `process_event()` for each event, including dedup hits, self-filter drops, synchronous small-file parses and the dispatch of background work. |
+| `background` | The bounded pool (`max_concurrent_background_threads`) | A TLS probe (charged to `socket_bind` / `tcp_connect`, whichever kprobe asked for it) or a large-file parse (charged to the source of the event that hit the file, or `periodic_scan`), from thread start to finish |
+| `scanner` | The periodic scanner thread | One whole `periodic_scan()` pass — directory walk included, since the walk is exactly the cost narrowing `[scanning] paths` or lengthening `scan_interval` removes. Always `source=periodic_scan` |
+| `retry_queue` | The rate-limit retry drainer thread | Each replay of a queued file. Always `source=retry_queue` — a pseudo-source used only on this metric, because a queued entry carries no record of what originally produced it |
+
+Every (source, stage) pair the analyzer can charge to is zero-initialised at
+startup — all Tetragon sources under `ingest` and `background`,
+`periodic_scan`/`scanner`, `retry_queue`/`retry_queue`. This matters more
+here than for the counter: a Prometheus counter's first sample is its
+baseline, so a series that first appears mid-burst (a probe thread that ran
+to completion before the first scrape saw it) has that whole burst invisible
+to `rate()`.
 
 `error_type` values for `tls_certificate_analysis_errors_total`:
 
@@ -157,6 +175,8 @@ Only emitted when `bind_probe_enabled=true` or `connect_probe_enabled=true` (bot
 | `cert_analyzer_cache_processed_paths_size` | Gauge | — | Current number of entries in the processed-paths LRU cache |
 | `cert_analyzer_cache_password_failed_size` | Gauge | — | Current number of entries in the password-failed LRU cache |
 | `cert_analyzer_cache_max_size` | Gauge | — | Configured `max_size` for all LRU caches |
+| `cert_analyzer_background_threads_active` | Gauge | `node_name` | Background-pool slots currently held (TLS probes and large-file parses). Pair with `_max` for a saturation ratio and with `tls_certificate_analysis_errors_total{error_type="background_thread_cap_reached"}` for what was refused once full — work refused at the cap is dropped, not queued |
+| `cert_analyzer_background_threads_max` | Gauge | `node_name` | Configured `max_concurrent_background_threads` |
 | `kafka_delivery_errors_total` | Counter | — | Cumulative async Kafka delivery failures |
 | `kafka_connected_at_timestamp_seconds` | Gauge | `node_name` | Unix timestamp of the last successful Kafka producer connection. Absent if Kafka is disabled or has never connected |
 | `kafka_last_published_timestamp_seconds` | Gauge | `node_name` | Unix timestamp of the last message successfully acked by the broker. Absent if Kafka is disabled or nothing has published yet |

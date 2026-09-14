@@ -1068,7 +1068,7 @@ class TestPeriodicScan:
         analyzer._new_file_in_flight.add(cert_path)  # simulate the sync path already claiming it
         analyzer._start_background_thread = Mock(return_value=True)
 
-        analyzer._process_certificate_file_async(cert_path, "test", 1, "", None, "", 0, "")
+        analyzer._process_certificate_file_async(cert_path, "test", 1, "", None, "", 0, "", source="file_access")
 
         analyzer._start_background_thread.assert_not_called()
 
@@ -10960,3 +10960,221 @@ class TestEventSourceCounter:
         # Second pass: the file is now known, so it is skipped and not recounted.
         src_analyzer.periodic_scan([temp_dir])
         assert self._count(src_analyzer, 'periodic_scan') == before + 1
+
+
+from unittest.mock import patch as _patch  # noqa: E402
+
+
+class TestProcessingSecondsAndPoolOccupancy:
+    """Tests for tls_certificate_source_processing_seconds_total and the
+    cert_analyzer_background_threads_{active,max} gauges -- the thread-
+    occupancy complement to the per-source event counter.
+
+    Covers:
+      ingest stage charged to the event's source, even when processing raises
+      background stage charged to the *originating* source (probe mechanism,
+        large-file parse from an event, large-file parse from the scanner)
+      scanner stage covers a whole periodic_scan pass
+      retry_queue stage attributed to the retry_queue pseudo-source
+      pool gauges: max set from config, active tracks slot lifetime and
+        never goes negative on a cap-reached refusal
+      ingest stage zero-initialised for every Tetragon-side source only
+    """
+
+    @pytest.fixture
+    def occ_analyzer(self):
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+        a = CertificateAnalyzer(tetragon_address='unix:///dev/null',
+                                max_concurrent_background_threads=3)
+        yield a
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for c in collectors:
+            try:
+                REGISTRY.unregister(c)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _seconds(analyzer, source, stage):
+        return REGISTRY.get_sample_value(
+            'tls_certificate_source_processing_seconds_total',
+            {'source': source, 'stage': stage, 'node_name': analyzer.metrics._node_name},
+        )
+
+    @staticmethod
+    def _active(analyzer):
+        return REGISTRY.get_sample_value(
+            'cert_analyzer_background_threads_active',
+            {'node_name': analyzer.metrics._node_name},
+        )
+
+    # --- ingest -----------------------------------------------------------
+
+    def test_ingest_time_charged_to_event_source(self, occ_analyzer):
+        event = TestEventSourceCounter._make_kprobe_event('tcp_connect')
+        before = self._seconds(occ_analyzer, 'tcp_connect', 'ingest')
+        with _patch.object(occ_analyzer, '_process_event_inner',
+                          side_effect=lambda e, s: time.sleep(0.01)):
+            occ_analyzer.process_event(event)
+        after = self._seconds(occ_analyzer, 'tcp_connect', 'ingest')
+        assert after - before >= 0.01
+        # Nothing landed on any other stage for this source.
+        assert self._seconds(occ_analyzer, 'tcp_connect', 'background') == 0
+
+    def test_ingest_time_charged_even_when_processing_raises(self, occ_analyzer):
+        """A crashing event still occupied the thread; the finally must record it."""
+        event = TestEventSourceCounter._make_uprobe_event('SSL_CTX_use_certificate_file')
+        before = self._seconds(occ_analyzer, 'openssl_file', 'ingest')
+        with _patch.object(occ_analyzer, '_process_event_inner', side_effect=RuntimeError('boom')):
+            with pytest.raises(RuntimeError):
+                occ_analyzer.process_event(event)
+        assert self._seconds(occ_analyzer, 'openssl_file', 'ingest') > before
+
+    def test_every_reachable_source_stage_pair_zero_initialised(self, occ_analyzer):
+        """A series born mid-burst loses that burst to rate(), so all pairs start at 0."""
+        from agent.constants import (
+            EVENT_SOURCE_STAGE_PAIRS, EVENT_SOURCE_KNOWN_LABELS, EVENT_SOURCE_PERIODIC_SCAN,
+        )
+        for source, stage in EVENT_SOURCE_STAGE_PAIRS:
+            assert self._seconds(occ_analyzer, source, stage) == 0, (source, stage)
+        # periodic_scan never touches the ingest thread; it has no ingest series.
+        assert self._seconds(occ_analyzer, EVENT_SOURCE_PERIODIC_SCAN, 'ingest') is None
+        # Every Tetragon source can reach the pool (probe or large-file parse).
+        for source in EVENT_SOURCE_KNOWN_LABELS:
+            assert (source, 'background') in EVENT_SOURCE_STAGE_PAIRS
+        # The pairs the drainer and scanner use are declared, and nothing else.
+        assert ('retry_queue', 'retry_queue') in EVENT_SOURCE_STAGE_PAIRS
+        assert (EVENT_SOURCE_PERIODIC_SCAN, 'scanner') in EVENT_SOURCE_STAGE_PAIRS
+        assert len(EVENT_SOURCE_STAGE_PAIRS) == len(set(EVENT_SOURCE_STAGE_PAIRS))
+
+    # --- background pool --------------------------------------------------
+
+    def test_background_max_gauge_reflects_config(self, occ_analyzer):
+        assert REGISTRY.get_sample_value(
+            'cert_analyzer_background_threads_max',
+            {'node_name': occ_analyzer.metrics._node_name},
+        ) == 3
+
+    def test_background_time_and_active_gauge_track_thread_lifetime(self, occ_analyzer):
+        release = threading.Event()
+        started = threading.Event()
+
+        def work():
+            started.set()
+            release.wait(5)
+
+        assert self._active(occ_analyzer) == 0
+        assert occ_analyzer._start_background_thread(work, name='t', source='socket_bind')
+        assert started.wait(5)
+        assert self._active(occ_analyzer) == 1
+        assert self._seconds(occ_analyzer, 'socket_bind', 'background') == 0
+        time.sleep(0.02)
+        release.set()
+        deadline = time.time() + 5
+        while self._active(occ_analyzer) != 0 and time.time() < deadline:
+            time.sleep(0.005)
+        assert self._active(occ_analyzer) == 0
+        assert self._seconds(occ_analyzer, 'socket_bind', 'background') >= 0.02
+
+    def test_cap_reached_refusal_does_not_touch_active_gauge(self, occ_analyzer):
+        release = threading.Event()
+        started = [threading.Event() for _ in range(3)]
+
+        def make(i):
+            def work():
+                started[i].set()
+                release.wait(5)
+            return work
+
+        for i in range(3):
+            assert occ_analyzer._start_background_thread(make(i), name=f't{i}', source='tcp_connect')
+        for ev in started:
+            assert ev.wait(5)
+        assert self._active(occ_analyzer) == 3
+        # Fourth is refused: no slot, no gauge change, no time recorded.
+        assert occ_analyzer._start_background_thread(lambda: None, name='t3', source='file_access') is False
+        assert self._active(occ_analyzer) == 3
+        assert self._seconds(occ_analyzer, 'file_access', 'background') == 0
+        release.set()
+        deadline = time.time() + 5
+        while self._active(occ_analyzer) != 0 and time.time() < deadline:
+            time.sleep(0.005)
+        assert self._active(occ_analyzer) == 0
+
+    def test_probe_thread_charged_to_originating_kprobe_source(self, occ_analyzer):
+        """A connect probe's wall time lands on tcp_connect, a bind probe's on socket_bind."""
+        with _patch.object(occ_analyzer, '_probe_tls_endpoint', side_effect=lambda *a, **k: time.sleep(0.01)):
+            occ_analyzer._schedule_tls_probe('connect', '10.0.0.1', 443, 'curl', 1, 'n', None)
+            occ_analyzer._schedule_tls_probe('bind', '10.0.0.2', 8443, 'nginx', 2, 'n', None)
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'tcp_connect', 'background') >= 0.01
+        assert self._seconds(occ_analyzer, 'socket_bind', 'background') >= 0.01
+
+    def test_large_file_from_event_charged_to_event_source(self, occ_analyzer, temp_dir):
+        cert_path = os.path.join(temp_dir, 'big.pem')
+        with open(cert_path, 'w') as f:
+            f.write('placeholder')
+        with _patch.object(occ_analyzer, '_analyze_and_finish_new_certificate_file',
+                          side_effect=lambda *a, **k: time.sleep(0.01)):
+            occ_analyzer._process_certificate_file_async(
+                cert_path, 'proc', 1, '', None, '', 0, 'n', source='openssl_file')
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'openssl_file', 'background') >= 0.01
+
+    # --- scanner ----------------------------------------------------------
+
+    def test_periodic_scan_pass_charged_to_scanner_stage(self, occ_analyzer, temp_dir):
+        """The whole pass -- walk included -- counts, even when it parses nothing."""
+        with open(os.path.join(temp_dir, 'notes.txt'), 'w') as f:
+            f.write('not a certificate')
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'scanner') == 0
+        occ_analyzer.periodic_scan([temp_dir])
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'scanner') > 0
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'ingest') is None
+
+    def test_periodic_scan_large_file_charged_to_periodic_scan_in_background(self, occ_analyzer, temp_dir):
+        cert_path = os.path.join(temp_dir, 'bundle.pem')
+        cert, _ = TestCertificateGeneration.generate_certificate('bundle.example.com', 365)
+        with open(cert_path, 'wb') as f:
+            f.write(cert.public_bytes(Encoding.PEM))
+        with _patch.object(occ_analyzer, '_is_large_certificate_file', return_value=True), \
+             _patch.object(occ_analyzer, '_analyze_and_finish_new_certificate_file',
+                          side_effect=lambda *a, **k: time.sleep(0.01)):
+            occ_analyzer.periodic_scan([temp_dir])
+            deadline = time.time() + 5
+            while self._active(occ_analyzer) != 0 and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'periodic_scan', 'background') >= 0.01
+
+    # --- retry queue ------------------------------------------------------
+
+    def test_retry_replay_charged_to_retry_queue_pseudo_source(self, occ_analyzer):
+        from agent.retry_queue import _RetryEntry
+        entry = _RetryEntry('/etc/pki/tls/certs/queued.pem', 'proc', 1, '', None, '', 0, 'n')
+        occ_analyzer._retry_queue.append(entry)
+        occ_analyzer._retry_queue_paths.add(entry.cert_path)
+        replayed = threading.Event()
+
+        def fake_try(*a, **k):
+            time.sleep(0.01)
+            replayed.set()
+            return []
+
+        with _patch.object(occ_analyzer, '_path_has_live_known_cert', return_value=False), \
+             _patch.object(occ_analyzer, '_try_process_new_certificate_file', side_effect=fake_try):
+            occ_analyzer._start_retry_queue_drainer()
+            assert replayed.wait(5)
+            deadline = time.time() + 5
+            while (self._seconds(occ_analyzer, 'retry_queue', 'retry_queue') or 0) < 0.01 \
+                    and time.time() < deadline:
+                time.sleep(0.005)
+        assert self._seconds(occ_analyzer, 'retry_queue', 'retry_queue') >= 0.01

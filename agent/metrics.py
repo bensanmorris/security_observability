@@ -15,6 +15,7 @@ from .constants import (
     TETRAGON_BUILD_VERSION,
     CACHE_MAX_SIZE,
     EVENT_SOURCE_KNOWN_LABELS,
+    EVENT_SOURCE_STAGE_PAIRS,
 )
 from .models import CertificateInfo
 
@@ -504,6 +505,61 @@ class PrometheusMetrics:
         # 0 rather than vanishing from the panel.
         for _source in EVENT_SOURCE_KNOWN_LABELS:
             self.cert_source_events_total.labels(source=_source, node_name=self._node_name)
+
+        # Companion to the counter above: thread-seconds spent per source,
+        # split by which thread did the work (see PROCESSING_STAGE_* in
+        # constants.py). The counter answers "how many"; this answers "how
+        # much", which is the question that actually ranks what to tune --
+        # a dedup hit on a known path and a TLS handshake both count as one
+        # event but differ in cost by orders of magnitude.
+        #
+        #   sum(rate(...{stage="ingest"}))   busy fraction of the single gRPC
+        #                                    consumer thread: approaching 1.0
+        #                                    means events are about to be lost
+        #                                    upstream in Tetragon
+        #   sum(rate(...{stage="background"})) mean pool slots in use, out of
+        #                                    max_concurrent_background_threads
+        #   rate(seconds) / rate(events)     mean cost per event, per source
+        #
+        # Wall-clock (perf_counter), not CPU: the pool is bounded by slots,
+        # not cores, and a probe sleeping through its pre-handshake delay is
+        # occupying a slot exactly as much as one that's parsing. A Counter
+        # of seconds rather than a Histogram: the sum/count pair answers the
+        # mean and saturation questions at ~1/10th the series.
+        self.cert_source_processing_seconds_total = Counter(
+            'tls_certificate_source_processing_seconds_total',
+            'Wall-clock seconds spent processing certificate-activity events, by the '
+            'source that produced them and the thread stage that did the work. '
+            'rate() of the ingest stage is the busy fraction of the single Tetragon '
+            'event-consumer thread; of the background stage, the mean number of '
+            'background-pool slots in use',
+            ['source', 'stage', 'node_name'],
+        )
+        # Zero-initialise every pair the code can charge to -- see the note
+        # on EVENT_SOURCE_STAGE_PAIRS for why a series that appears mid-burst
+        # loses that burst to rate().
+        for _source, _stage in EVENT_SOURCE_STAGE_PAIRS:
+            self.cert_source_processing_seconds_total.labels(
+                source=_source, stage=_stage, node_name=self._node_name)
+
+        # Background pool saturation. _active is the number of slots
+        # currently held; _max is the configured cap so a panel can plot the
+        # ratio. Pairs with cert_analysis_errors{error_type=
+        # "background_thread_cap_reached"}, which counts what was dropped once
+        # the pool was full -- this shows how close to full it runs before
+        # that starts happening. _max is set by the analyzer once it knows
+        # its configuration.
+        self.background_threads_active = Gauge(
+            'cert_analyzer_background_threads_active',
+            'Background-pool threads currently running (TLS probes and large-file parses)',
+            ['node_name'],
+        )
+        self.background_threads_active.labels(node_name=self._node_name).set(0)
+        self.background_threads_max = Gauge(
+            'cert_analyzer_background_threads_max',
+            'Configured background-pool cap (max_concurrent_background_threads)',
+            ['node_name'],
+        )
 
         # Tetragon policy tracking
         self.tetragon_policy_info = Gauge(

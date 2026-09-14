@@ -10,13 +10,14 @@ self._retry_queue/_retry_queue_lock/_retry_queue_paths/_retry_queue_max_size)
 and methods from its sibling mixins (self.parse_certificates,
 self.extract_certificate_info, self._finish_single_certificate,
 self._snapshot_pod_context) and the core class (self._update_cache_metrics,
-self._path_has_live_known_cert).
+self._path_has_live_known_cert, self._record_processing_seconds).
 """
 import logging
 import threading
 import time
 from typing import List, NamedTuple, Optional
 
+from .constants import EVENT_SOURCE_RETRY_QUEUE, PROCESSING_STAGE_RETRY_QUEUE
 from .event_context import _PodContextSnapshot
 from .models import CertificateInfo
 
@@ -393,6 +394,9 @@ class _RateLimitRetryQueueMixin:
                             ).set(len(self._retry_queue))
                     continue
 
+                # Charged to the retry_queue pseudo-source: the entry only
+                # carries the path, its originating source is long gone.
+                started = time.perf_counter()
                 try:
                     result = self._try_process_new_certificate_file(
                         entry.cert_path, entry.process_name, entry.pid, entry.namespace,
@@ -402,6 +406,10 @@ class _RateLimitRetryQueueMixin:
                     logger.error(f"Error replaying queued certificate file {entry.cert_path}: {e}",
                                  exc_info=True)
                     result = []  # don't retry an entry that itself errors indefinitely
+                finally:
+                    self._record_processing_seconds(
+                        EVENT_SOURCE_RETRY_QUEUE, PROCESSING_STAGE_RETRY_QUEUE,
+                        time.perf_counter() - started)
 
                 if result is None:
                     time.sleep(0.1)  # no token yet -- back off briefly rather than busy-spin

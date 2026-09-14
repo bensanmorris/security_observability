@@ -51,6 +51,9 @@ from .constants import (
     EVENT_SOURCE_OTHER_KPROBE,
     EVENT_SOURCE_OTHER_UPROBE,
     EVENT_SOURCE_PERIODIC_SCAN,
+    PROCESSING_STAGE_INGEST,
+    PROCESSING_STAGE_BACKGROUND,
+    PROCESSING_STAGE_SCANNER,
 )
 from .models import CertificateInfo
 from .metrics import PrometheusMetrics
@@ -241,6 +244,8 @@ class CertificateAnalyzer(
         self._scan_paths = list(scan_paths) if scan_paths else []
         self._scan_interval_seconds = scan_interval_seconds
         self.metrics = PrometheusMetrics(node_name=_NODE_NAME)
+        self.metrics.background_threads_max.labels(node_name=_NODE_NAME).set(
+            max_concurrent_background_threads)
         self.metrics.config_info.labels(node_name=_NODE_NAME).info({
             'checksum_enabled':                  str(checksum_enabled).lower(),
             'spki_hash_enabled':                 str(spki_hash_enabled).lower(),
@@ -512,7 +517,7 @@ class CertificateAnalyzer(
         )
         return is_new
 
-    def _start_background_thread(self, target, name: str) -> bool:
+    def _start_background_thread(self, target, name: str, source: str) -> bool:
         """
         Start a daemon thread for probe/large-file work, bounded by
         _background_thread_semaphore so a burst of events (many simultaneous
@@ -523,6 +528,11 @@ class CertificateAnalyzer(
         already reached. Callers already de-dupe via their own in-flight
         tracking before calling this, so a dropped attempt just means the
         same work is retried on a later event rather than queuing here.
+
+        `source` is the event source that asked for the work (an
+        EVENT_SOURCE_* value); the thread's wall time is charged to it under
+        stage="background" and the pool's occupancy gauge tracks the slot
+        for the thread's lifetime.
         """
         if not self._background_thread_semaphore.acquire(blocking=False):
             logger.warning(
@@ -531,11 +541,18 @@ class CertificateAnalyzer(
             )
             return False
 
+        active = self.metrics.background_threads_active.labels(node_name=self.metrics._node_name)
+        active.inc()
+
         def _run():
+            started = time.perf_counter()
             try:
                 target()
             finally:
                 self._background_thread_semaphore.release()
+                active.dec()
+                self._record_processing_seconds(
+                    source, PROCESSING_STAGE_BACKGROUND, time.perf_counter() - started)
 
         threading.Thread(target=_run, daemon=True, name=name).start()
         return True
@@ -550,6 +567,7 @@ class CertificateAnalyzer(
         parent_process: str,
         parent_pid: int,
         node_name: str,
+        source: str,
     ) -> None:
         """
         Parse and extract a large multi-cert file on a background thread.
@@ -591,7 +609,8 @@ class CertificateAnalyzer(
                 with self._new_path_lock:
                     self._large_file_in_flight.discard(cert_path)
 
-        started = self._start_background_thread(_worker, name=f'cert-parse-{Path(cert_path).name}')
+        started = self._start_background_thread(
+            _worker, name=f'cert-parse-{Path(cert_path).name}', source=source)
         if not started:
             # _worker's finally never ran, so undo the in-flight marker here —
             # the file will be retried on its next qualifying event.
@@ -629,15 +648,38 @@ class CertificateAnalyzer(
         except Exception:  # pragma: no cover - defensive
             logger.debug("Failed to record event source %s", source, exc_info=True)
 
+    def _record_processing_seconds(self, source: str, stage: str, seconds: float) -> None:
+        """Charge wall-clock time to a (source, stage). Never let metrics break the caller."""
+        try:
+            self.metrics.cert_source_processing_seconds_total.labels(
+                source=source, stage=stage, node_name=self.metrics._node_name).inc(seconds)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to record processing time for %s/%s", source, stage, exc_info=True)
+
     def process_event(self, event):
-        """Process a single Tetragon event"""
+        """Process a single Tetragon event.
+
+        Thin timing wrapper: this runs on the single gRPC consumer thread, so
+        the wall time of everything below is that thread's occupancy, charged
+        to the event's source under stage="ingest". Work handed off to the
+        background pool is charged there instead, by _start_background_thread.
+        """
         logger.debug("Processing event...")
 
         # Counted before any filtering/dedup/rate-limiting below -- see the
         # comment on cert_source_events_total in metrics.py for why ingest,
         # not outcome, is the right place for a tuning metric.
-        self._record_event_source(self._classify_event_source(event))
+        source = self._classify_event_source(event)
+        self._record_event_source(source)
 
+        started = time.perf_counter()
+        try:
+            self._process_event_inner(event, source)
+        finally:
+            self._record_processing_seconds(
+                source, PROCESSING_STAGE_INGEST, time.perf_counter() - started)
+
+    def _process_event_inner(self, event, source: str):
         # Bind and outbound-connect events carry no cert paths — route them to
         # port-probe handlers and return. Other kprobe/uprobe events fall through
         # to the normal cert extraction path below.
@@ -814,6 +856,7 @@ class CertificateAnalyzer(
             self._process_certificate_file_async(
                 cert_path, process_name, pid, namespace,
                 tetragon_pod, parent_process, parent_pid, event.node_name,
+                source=source,
             )
             return
 
@@ -948,7 +991,22 @@ class CertificateAnalyzer(
             channel.close()
 
     def periodic_scan(self, paths: list):
-        """Periodically scan certificate directories for proactive monitoring"""
+        """Periodically scan certificate directories for proactive monitoring.
+
+        One whole pass -- directory walk included -- is charged to
+        periodic_scan under stage="scanner": unlike the per-file event
+        counter, the walk is exactly the cost an operator tunes away by
+        narrowing scan paths or lengthening scan_interval.
+        """
+        started = time.perf_counter()
+        try:
+            self._periodic_scan_inner(paths)
+        finally:
+            self._record_processing_seconds(
+                EVENT_SOURCE_PERIODIC_SCAN, PROCESSING_STAGE_SCANNER,
+                time.perf_counter() - started)
+
+    def _periodic_scan_inner(self, paths: list):
         logger.info(f"Starting periodic scan of {len(paths)} paths")
 
         for base_path in paths:
@@ -1002,6 +1060,7 @@ class CertificateAnalyzer(
                         self._process_certificate_file_async(
                             cert_path, "periodic_scan", 0, "",
                             None, "", 0, _NODE_NAME,
+                            source=EVENT_SOURCE_PERIODIC_SCAN,
                         )
                         continue
 
