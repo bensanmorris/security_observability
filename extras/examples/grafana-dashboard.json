@@ -3511,7 +3511,7 @@
               },
               "instant": true,
               "refId": "A",
-              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[$__rate_interval])))",
+              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[5m])))",
               "legendFormat": "{{source}}"
             }
           ],
@@ -3647,7 +3647,7 @@
                 "uid": "${datasource}"
               },
               "refId": "A",
-              "expr": "sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[$__rate_interval]))",
+              "expr": "sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[5m]))",
               "legendFormat": "{{source}}"
             }
           ],
@@ -3707,7 +3707,7 @@
                 "uid": "${datasource}"
               },
               "refId": "A",
-              "expr": "sum by (node_name) (rate(tls_certificate_source_processing_seconds_total{stage=\"ingest\", node_name=~\"$node\"}[$__rate_interval]))",
+              "expr": "sum by (node_name) (rate(tls_certificate_source_processing_seconds_total{stage=\"ingest\", node_name=~\"$node\"}[5m]))",
               "legendFormat": "{{node_name}}",
               "instant": true
             }
@@ -3777,7 +3777,7 @@
                 "uid": "${datasource}"
               },
               "refId": "A",
-              "expr": "sum by (node_name) (rate(tls_certificate_source_processing_seconds_total{stage=\"background\", node_name=~\"$node\"}[$__rate_interval])) / on (node_name) cert_analyzer_background_threads_max{node_name=~\"$node\"}",
+              "expr": "sum by (node_name) (rate(tls_certificate_source_processing_seconds_total{stage=\"background\", node_name=~\"$node\"}[5m])) / on (node_name) cert_analyzer_background_threads_max{node_name=~\"$node\"}",
               "legendFormat": "{{node_name}}",
               "instant": true
             }
@@ -3847,7 +3847,7 @@
                 "uid": "${datasource}"
               },
               "refId": "A",
-              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_processing_seconds_total{stage=~\"ingest|background\", node_name=~\"$node\"}[$__rate_interval])) / (sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[$__rate_interval])) > 0))",
+              "expr": "sort_desc(sum by (source) (rate(tls_certificate_source_processing_seconds_total{stage=~\"ingest|background\", node_name=~\"$node\"}[5m])) / (sum by (source) (rate(tls_certificate_source_events_total{node_name=~\"$node\"}[5m])) > 0))",
               "legendFormat": "{{source}}",
               "instant": true
             }
@@ -3919,7 +3919,7 @@
                 "uid": "${datasource}"
               },
               "refId": "A",
-              "expr": "sum by (source, stage) (rate(tls_certificate_source_processing_seconds_total{node_name=~\"$node\"}[$__rate_interval]))",
+              "expr": "sum by (source, stage) (rate(tls_certificate_source_processing_seconds_total{node_name=~\"$node\"}[5m]))",
               "legendFormat": "{{source}} / {{stage}}"
             }
           ],
@@ -4000,7 +4000,7 @@
                 "uid": "${datasource}"
               },
               "refId": "C",
-              "expr": "sum by (node_name) (rate(tls_certificate_analysis_errors_total{error_type=\"background_thread_cap_reached\", node_name=~\"$node\"}[$__rate_interval]))",
+              "expr": "sum by (node_name) (rate(tls_certificate_analysis_errors_total{error_type=\"background_thread_cap_reached\", node_name=~\"$node\"}[5m]))",
               "legendFormat": "refused/s {{node_name}}"
             }
           ],
