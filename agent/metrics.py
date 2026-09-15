@@ -577,6 +577,18 @@ class PrometheusMetrics:
             'Number of Tetragon tracing policies by state',
             ['state', 'node_name'],
         )
+        # Fleet control (agent/control.py). Increments each time a recorded
+        # enable/disable decision had to be re-applied because Tetragon came
+        # back with the policy in the other state -- a node that keeps
+        # climbing here is fighting a Tetragon restart loop, or someone is
+        # flipping the policy by hand with `tetra` behind the fleet manager's
+        # back. Bounded by the policy set, so no cardinality concern.
+        self.policy_reconciliations_total = Counter(
+            'cert_analyzer_policy_reconciliations_total',
+            'Times a recorded Tetragon policy enable/disable decision was re-applied '
+            'after the live state was found to differ from it',
+            ['policy', 'node_name'],
+        )
 
     def update_certificate_metrics(self, info: CertificateInfo):
         """Update Prometheus metrics for a certificate"""

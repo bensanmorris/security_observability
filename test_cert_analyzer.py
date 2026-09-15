@@ -6273,6 +6273,501 @@ class TestHealthServerReadiness:
         hs = HealthServer(analyzer=analyzer, port=port)
         assert hs.port == port
 
+# ── Fleet control tests (agent/control.py + /control/* routes) ───────────────
+
+from agent.control import (
+    PolicyDesiredState, set_tracing_policy_enabled, POLICY_NAME_RE,
+)
+
+
+class _MockRpcError(grpc.RpcError):
+    """grpc.RpcError with a controllable status code, as callers see it."""
+    def __init__(self, code):
+        self._code = code
+
+    def code(self):
+        return self._code
+
+    def __str__(self):
+        return f"mock rpc error {self._code.name}"
+
+
+class _MockControlStub(_MockPolicyStub):
+    """
+    Policy stub that also honours ConfigureTracingPolicy by mutating its own
+    policy list, the way a real Tetragon would -- so a toggle followed by a
+    ListTracingPolicies reflects the change, and the reconcile/toggle paths
+    can be asserted end-to-end against observed state.
+    """
+    def __init__(self, policies=None, configure_exc=None, unimplemented=False):
+        super().__init__(policies=policies)
+        self.configure_calls = []
+        self.enable_calls = []
+        self.disable_calls = []
+        self._configure_exc = configure_exc
+        self._unimplemented = unimplemented
+
+    def _apply(self, name, namespace, enabled):
+        for p in self._policies:
+            if p.name == name and (p.namespace or '') == (namespace or ''):
+                p.state = 1 if enabled else 2
+
+    def ConfigureTracingPolicy(self, request, timeout=None):
+        if self._unimplemented:
+            raise _MockRpcError(grpc.StatusCode.UNIMPLEMENTED)
+        if self._configure_exc:
+            raise self._configure_exc
+        self.configure_calls.append((request.name, request.namespace, request.enable))
+        self._apply(request.name, request.namespace, request.enable)
+
+    def EnableTracingPolicy(self, request, timeout=None):
+        self.enable_calls.append((request.name, request.namespace))
+        self._apply(request.name, request.namespace, True)
+
+    def DisableTracingPolicy(self, request, timeout=None):
+        self.disable_calls.append((request.name, request.namespace))
+        self._apply(request.name, request.namespace, False)
+
+
+def _reconciliations(analyzer, policy):
+    return analyzer.metrics.policy_reconciliations_total.labels(
+        policy=policy, node_name=analyzer.metrics._node_name
+    )._value.get()
+
+
+def _request(port, path, method='GET', token=None, body=None):
+    """Return (status, body_dict_or_None, raw_bytes) for a /control request."""
+    data = _json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f'http://localhost:{port}{path}', data=data, method=method)
+    if token is not None:
+        req.add_header('Authorization', f'Bearer {token}')
+    if data is not None:
+        req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=2) as r:
+            raw = r.read()
+            return r.status, (_json.loads(raw) if raw else None), raw
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        return e.code, (_json.loads(raw) if raw else None), raw
+
+
+TOKEN = 'test-token-0123456789abcdef'
+
+
+def _control_analyzer(analyzer, tmp_path, stub):
+    """Attach a desired-state store and a Tetragon stub, as start() would."""
+    analyzer._policy_state = PolicyDesiredState(str(tmp_path / 'policy-state.json'))
+    analyzer._tetragon_stub = stub
+    return analyzer
+
+
+class TestPolicyDesiredState:
+    """The persisted desired-state store behind fleet control."""
+
+    def test_set_get_all_roundtrip(self, tmp_path):
+        state = PolicyDesiredState(str(tmp_path / 'ps.json'))
+        state.set('cert-access', '', False)
+        state.set('tcp-connect', 'kube-system', True)
+        assert state.get('cert-access')['enabled'] is False
+        assert state.get('tcp-connect', 'kube-system')['enabled'] is True
+        assert state.get('missing') is None
+        assert set(state.all()) == {'cert-access', 'kube-system/tcp-connect'}
+
+    def test_persists_and_reloads(self, tmp_path):
+        path = str(tmp_path / 'ps.json')
+        PolicyDesiredState(path).set('cert-access', '', False)
+        reloaded = PolicyDesiredState(path)
+        entry = reloaded.get('cert-access')
+        assert entry['enabled'] is False
+        assert entry['updated_at']
+        # No stray temp file left behind by the atomic write
+        assert not os.path.exists(path + '.tmp')
+
+    def test_malformed_file_starts_empty_without_raising(self, tmp_path):
+        path = tmp_path / 'ps.json'
+        path.write_text('{"policies": "nope"}')
+        assert PolicyDesiredState(str(path)).all() == {}
+        path.write_text('not json at all')
+        assert PolicyDesiredState(str(path)).all() == {}
+
+    def test_malformed_entry_skipped_but_others_kept(self, tmp_path):
+        path = tmp_path / 'ps.json'
+        path.write_text(_json.dumps({'policies': {
+            'good': {'name': 'good', 'namespace': '', 'enabled': False},
+            'bad':  {'name': 'bad', 'enabled': 'false'},
+        }}))
+        state = PolicyDesiredState(str(path))
+        assert set(state.all()) == {'good'}
+
+    def test_unwritable_path_keeps_decision_in_memory(self, tmp_path):
+        """A read-only state dir must not turn a toggle into an exception."""
+        blocker = tmp_path / 'notadir'
+        blocker.write_text('')
+        state = PolicyDesiredState(str(blocker / 'ps.json'))
+        state.set('cert-access', '', False)          # makedirs fails inside
+        assert state.get('cert-access')['enabled'] is False
+
+    def test_none_path_is_memory_only(self):
+        state = PolicyDesiredState(None)
+        state.set('cert-access', '', False)
+        assert state.get('cert-access')['enabled'] is False
+
+
+class TestSetTracingPolicyEnabled:
+    """The gRPC call that applies a decision, incl. the old-Tetragon fallback."""
+
+    def test_uses_configure_rpc(self):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        set_tracing_policy_enabled(stub, 'p', '', False)
+        assert stub.configure_calls == [('p', '', False)]
+        assert stub.disable_calls == []
+
+    def test_falls_back_to_enable_disable_when_unimplemented(self):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)], unimplemented=True)
+        set_tracing_policy_enabled(stub, 'p', '', False)
+        assert stub.disable_calls == [('p', '')]
+        set_tracing_policy_enabled(stub, 'p', '', True)
+        assert stub.enable_calls == [('p', '')]
+
+    def test_other_rpc_errors_propagate(self):
+        stub = _MockControlStub(
+            policies=[_MockPolicyStatus('p', state=1)],
+            configure_exc=_MockRpcError(grpc.StatusCode.UNAVAILABLE),
+        )
+        with pytest.raises(grpc.RpcError):
+            set_tracing_policy_enabled(stub, 'p', '', False)
+        assert stub.disable_calls == []
+
+    def test_policy_name_regex(self):
+        assert POLICY_NAME_RE.match('openssl3-cert-load')
+        assert POLICY_NAME_RE.match('cert.access_v2')
+        assert not POLICY_NAME_RE.match('')
+        assert not POLICY_NAME_RE.match('-leading')
+        assert not POLICY_NAME_RE.match('has space')
+        assert not POLICY_NAME_RE.match('../etc')
+        assert not POLICY_NAME_RE.match('a' * 254)
+
+
+class TestPolicyReconciliation:
+    """check_tetragon_policies() re-applies recorded decisions Tetragon lost."""
+
+    def test_no_state_store_means_no_reconcile(self, analyzer):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == []
+
+    def test_recorded_disable_reapplied_after_tetragon_reload(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', False)
+        analyzer.check_tetragon_policies(stub)      # Tetragon says enabled; we want disabled
+        assert stub.configure_calls == [('p', '', False)]
+        assert _reconciliations(analyzer, 'p') == 1.0
+        # Now in sync: a second check does nothing more
+        analyzer.check_tetragon_policies(stub)
+        assert len(stub.configure_calls) == 1
+        assert _reconciliations(analyzer, 'p') == 1.0
+
+    def test_recorded_enable_reapplied(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=2)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', True)
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == [('p', '', True)]
+
+    def test_matching_state_not_touched(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=2)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', False)
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == []
+
+    @pytest.mark.parametrize('state', [0, 3, 4, 5, 6])
+    def test_error_and_transitional_states_skipped(self, analyzer, tmp_path, state):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=state)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', False)
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == []
+
+    def test_absent_policy_not_touched_but_listed_stale(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('present', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('gone', '', False)
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == []
+        listing = analyzer.list_policies_for_control()['policies']
+        by_name = {p['name']: p for p in listing}
+        assert by_name['gone']['stale'] is True
+        assert by_name['gone']['state'] == 'absent'
+        assert by_name['present']['stale'] is False
+        assert by_name['present']['desired'] is None
+
+    def test_namespaced_policy_matched_by_namespace(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[
+            _MockPolicyStatus('p', state=1, namespace='ns-a'),
+            _MockPolicyStatus('p', state=1, namespace='ns-b'),
+        ])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', 'ns-b', False)
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == [('p', 'ns-b', False)]
+
+    def test_rpc_failure_logged_not_raised(self, analyzer, tmp_path, caplog):
+        stub = _MockControlStub(
+            policies=[_MockPolicyStatus('p', state=1)],
+            configure_exc=_MockRpcError(grpc.StatusCode.UNAVAILABLE),
+        )
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', False)
+        with caplog.at_level(logging.WARNING, logger='agent.analyzer'):
+            analyzer.check_tetragon_policies(stub)
+        assert any('Could not re-apply' in r.message for r in caplog.records)
+        assert _reconciliations(analyzer, 'p') == 0.0
+
+    def test_drift_reported_in_listing(self, analyzer, tmp_path):
+        """A desired state Tetragon isn't honouring shows as drift=True."""
+        stub = _MockControlStub(
+            policies=[_MockPolicyStatus('p', state=1)],
+            configure_exc=_MockRpcError(grpc.StatusCode.UNAVAILABLE),
+        )
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', False)
+        analyzer.check_tetragon_policies(stub)
+        listing = analyzer.list_policies_for_control()['policies']
+        assert listing[0]['drift'] is True
+        assert listing[0]['desired'] is False
+        assert listing[0]['state'] == 'enabled'
+
+
+class TestControlRoutes:
+    """The authenticated /control/* HTTP surface on the health port."""
+
+    def _server(self, analyzer, token=TOKEN):
+        hs = _make_health_server(analyzer)
+        hs.control_token = token
+        hs.start()
+        return hs
+
+    def test_control_routes_absent_when_disabled(self, analyzer):
+        hs = self._server(analyzer, token=None)
+        try:
+            for path in ('/control/info', '/control/policies'):
+                status, _, raw = _request(hs.port, path, token=TOKEN)
+                assert status == 404
+            status, _, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                    token=TOKEN, body={'enabled': False})
+            assert status == 404
+            # And the probes are exactly as before
+            status, body = _get(hs.port, '/healthz')
+            assert status == 200 and body['status'] == 'ok'
+        finally:
+            hs.stop()
+
+    def test_missing_or_wrong_token_is_bodiless_401(self, analyzer):
+        hs = self._server(analyzer)
+        try:
+            for token in (None, '', 'wrong', TOKEN[:-1], TOKEN + 'x'):
+                status, body, raw = _request(hs.port, '/control/info', token=token)
+                assert status == 401
+                assert raw == b''
+            status, _, raw = _request(hs.port, '/control/policies/p', method='PUT',
+                                      token='wrong', body={'enabled': False})
+            assert status == 401 and raw == b''
+        finally:
+            hs.stop()
+
+    def test_probes_never_require_token(self, analyzer):
+        hs = self._server(analyzer)
+        try:
+            status, body = _get(hs.port, '/healthz')
+            assert status == 200
+            status, body = _get(hs.port, '/readyz')
+            assert status == 200
+        finally:
+            hs.stop()
+
+    def test_info(self, analyzer, tmp_path):
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/info', token=TOKEN)
+            assert status == 200
+            assert body['node_name'] == analyzer.metrics._node_name
+            assert body['capabilities'] == ['policies']
+            assert body['platform'] in ('host', 'container', 'k8s')
+            assert body['tetragon_connected'] is True
+            assert body['version']
+        finally:
+            hs.stop()
+
+    def test_list_policies(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[
+            _MockPolicyStatus('a', state=1), _MockPolicyStatus('b', state=2),
+        ])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('b', '', False)
+        analyzer.check_tetragon_policies(stub)
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/policies', token=TOKEN)
+            assert status == 200
+            assert [p['name'] for p in body['policies']] == ['a', 'b']
+            assert body['policies'][0] == {
+                'name': 'a', 'namespace': '', 'state': 'enabled',
+                'desired': None, 'drift': False, 'stale': False,
+            }
+            assert body['policies'][1]['desired'] is False
+        finally:
+            hs.stop()
+
+    def test_put_disable_records_applies_and_reports(self, analyzer, tmp_path, caplog):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            with caplog.at_level(logging.WARNING):
+                status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                           token=TOKEN, body={'enabled': False})
+            assert status == 200
+            assert body == {'name': 'p', 'namespace': '', 'desired': False, 'state': 'disabled'}
+            assert stub.configure_calls == [('p', '', False)]
+            # Persisted, so a restart reconciles it
+            assert PolicyDesiredState(str(tmp_path / 'policy-state.json')).get('p')['enabled'] is False
+            # Audit line in the journal
+            assert any("Fleet control" in r.message and "'p' -> disabled: HTTP 200" in r.message
+                       for r in caplog.records)
+            # Re-enable
+            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                       token=TOKEN, body={'enabled': True})
+            assert status == 200 and body['state'] == 'enabled'
+        finally:
+            hs.stop()
+
+    def test_put_matching_state_is_recorded_without_rpc(self, analyzer, tmp_path):
+        """
+        Tetragon 1.7 errors on a no-op transition ("policy X is not
+        disabled"), so re-PUTting the current state must not reach it --
+        but the decision is still recorded so it outlives a restart.
+        """
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                       token=TOKEN, body={'enabled': True})
+            assert status == 200 and body['state'] == 'enabled'
+            assert stub.configure_calls == []
+            assert analyzer._policy_state.get('p')['enabled'] is True
+        finally:
+            hs.stop()
+
+    def test_put_namespaced_policy(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1, namespace='ns')])
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                       token=TOKEN, body={'enabled': False})
+            assert status == 404                       # cluster-scoped 'p' doesn't exist
+            status, body, _ = _request(hs.port, '/control/policies/p?namespace=ns', method='PUT',
+                                       token=TOKEN, body={'enabled': False})
+            assert status == 200 and body['namespace'] == 'ns'
+            assert stub.configure_calls == [('p', 'ns', False)]
+        finally:
+            hs.stop()
+
+    def test_put_unknown_policy_404_and_not_recorded(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/policies/nope', method='PUT',
+                                       token=TOKEN, body={'enabled': False})
+            assert status == 404 and body['error'] == 'unknown_policy'
+            assert analyzer._policy_state.get('nope') is None
+            assert stub.configure_calls == []
+        finally:
+            hs.stop()
+
+    @pytest.mark.parametrize('path,body', [
+        ('/control/policies/p', {'enabled': 'false'}),
+        ('/control/policies/p', {'enabled': 1}),
+        ('/control/policies/p', {}),
+        ('/control/policies/p', None),
+        ('/control/policies/-bad', {'enabled': False}),
+        ('/control/policies/p?namespace=bad%20ns', {'enabled': False}),
+    ])
+    def test_put_bad_request_400(self, analyzer, tmp_path, path, body):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            status, resp, _ = _request(hs.port, path, method='PUT', token=TOKEN, body=body)
+            assert status == 400
+            assert stub.configure_calls == []
+        finally:
+            hs.stop()
+
+    def test_put_oversized_body_400(self, analyzer, tmp_path):
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            status, _, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                    token=TOKEN, body={'enabled': False, 'pad': 'x' * 5000})
+            assert status == 400
+        finally:
+            hs.stop()
+
+    def test_put_unknown_control_path_404(self, analyzer, tmp_path):
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        hs = self._server(analyzer)
+        try:
+            status, _, _ = _request(hs.port, '/control/restart', method='PUT',
+                                    token=TOKEN, body={})
+            assert status == 404
+        finally:
+            hs.stop()
+
+    def test_put_before_tetragon_connected_503(self, analyzer, tmp_path):
+        analyzer._policy_state = PolicyDesiredState(str(tmp_path / 'ps.json'))
+        analyzer._tetragon_stub = None
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                       token=TOKEN, body={'enabled': False})
+            assert status == 503 and body['error'] == 'tetragon_not_connected'
+        finally:
+            hs.stop()
+
+    def test_put_tetragon_rpc_failure_502_but_decision_recorded(self, analyzer, tmp_path):
+        """
+        Tetragon mid-restart must not lose the operator's intent: the
+        decision is persisted before the RPC so the reconcile loop applies
+        it once Tetragon is back.
+        """
+        stub = _MockControlStub(
+            policies=[_MockPolicyStatus('p', state=1)],
+            configure_exc=_MockRpcError(grpc.StatusCode.UNAVAILABLE),
+        )
+        _control_analyzer(analyzer, tmp_path, stub)
+        hs = self._server(analyzer)
+        try:
+            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
+                                       token=TOKEN, body={'enabled': False})
+            assert status == 502 and body['error'] == 'tetragon_rpc_failed'
+            assert analyzer._policy_state.get('p')['enabled'] is False
+        finally:
+            hs.stop()
+        # Tetragon "comes back": next policy check applies it
+        stub._configure_exc = None
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == [('p', '', False)]
+        assert _reconciliations(analyzer, 'p') == 1.0
+
+
 class TestKafkaPublisher:
     """
     Tests for the optional KafkaPublisher class.

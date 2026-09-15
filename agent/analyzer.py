@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from .health import HealthServer
+    from .control import PolicyDesiredState
 
 # _fips_check/_get_algorithm_oids are no longer called directly in this file
 # (their callers moved to agent/cert_parsing.py) but stay imported here too --
@@ -162,7 +163,8 @@ class CertificateAnalyzer(
                  probe_events_per_second: float = 20.0,
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600,
-                 metrics_port: int = 9090):
+                 metrics_port: int = 9090,
+                 policy_state: Optional['PolicyDesiredState'] = None):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -312,6 +314,12 @@ class CertificateAnalyzer(
         self.password_failed_paths: LRUCache = LRUCache()
         self.health_server = health_server
         self._known_policy_labels: Set[Tuple[str, str, str, str]] = set()
+        # Fleet control (agent/control.py): recorded enable/disable decisions
+        # per Tetragon policy, None when [control] is off. The stub is kept
+        # so the /control/* routes can drive Tetragon from the HTTP thread.
+        self._policy_state = policy_state
+        self._last_policy_list: list = []
+        self._tetragon_stub = None
         # Per-endpoint deduplication for TLS port probes.
         # _probed_endpoints: "host:port" strings already probed — O(1) pre-check
         #   prevents thread creation for endpoints whose cert is already known.
@@ -906,6 +914,7 @@ class CertificateAnalyzer(
             channel = grpc.insecure_channel(self.tetragon_address)
 
         stub = sensors_pb2_grpc.FineGuidanceSensorsStub(channel)
+        self._tetragon_stub = stub
 
         # Give the health server a reference to the channel so liveness
         # checks can inspect its connectivity state
@@ -933,11 +942,20 @@ class CertificateAnalyzer(
 
         retry_delay = 5
         max_delay   = 60
+        reconnects  = 0
 
         try:
             while True:
                 try:
                     logger.info("Listening for Tetragon certificate events...")
+                    if reconnects:
+                        # A stream drop usually means Tetragon restarted and
+                        # came back with every policy at its on-disk default.
+                        # Re-check now rather than waiting out the policy
+                        # monitor's interval, so recorded disables are
+                        # re-applied before the first events flow.
+                        self.check_tetragon_policies(stub)
+                    reconnects += 1
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(1)
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(1)
 

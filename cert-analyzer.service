@@ -44,6 +44,11 @@ ReadOnlyPaths=/etc/ssl /etc/pki /var/run/cilium
 ReadOnlyPaths=/etc/cert-analyzer
 # Allow write access only to the log directory
 ReadWritePaths=/var/log/cert-analyzer
+# /var/lib/cert-analyzer, created and owned by systemd for the service user
+# and writable under ProtectSystem=strict. Holds [control]'s recorded policy
+# enable/disable decisions (policy-state.json); harmless when [control] is
+# off.
+StateDirectory=cert-analyzer
 
 # Resource limits
 LimitNOFILE=65536

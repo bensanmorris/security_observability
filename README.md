@@ -190,6 +190,14 @@ sudo systemctl enable --now cert-analyzer
 | `readiness_grace_period_seconds` | `60` | Seconds after startup before readiness checking begins |
 | `readiness_staleness_seconds` | `300` | Max age of last event before pod is marked not-ready |
 
+**[control]**
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Expose authenticated fleet-control routes on the `[health]` port so `certsight-fleet-manager` can enable/disable this node's Tetragon tracing policies. `GET /control/info`, `GET /control/policies`, `PUT /control/policies/<name>` (`{"enabled": true\|false}`, `?namespace=` for namespaced k8s policies). Cannot add or remove policies. Every toggle is logged at WARNING with the caller's address |
+| `token` | _(unset)_ | Shared secret sent as `Authorization: Bearer <token>`; required (≥16 chars) when `enabled`, otherwise control stays off. Generate with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` |
+| `state_path` | `/var/lib/cert-analyzer/policy-state.json` | Recorded enable/disable decisions, re-applied whenever Tetragon reports a policy in the other state (a bare gRPC disable does not survive a Tetragon restart). Re-applications are counted in `cert_analyzer_policy_reconciliations_total` |
+
 **[alerting]**
 
 | Setting | Default | Description |

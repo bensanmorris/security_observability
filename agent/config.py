@@ -12,6 +12,7 @@ from .constants import (
     CACHE_MAX_SIZE, CONFIG_FILE_PATH,
 )
 from .analyzer import CertificateAnalyzer
+from .control import MIN_CONTROL_TOKEN_LENGTH, PolicyDesiredState
 from .health import HealthServer
 from .kafka import KafkaPublisher
 from .metrics import start_metrics_server
@@ -280,6 +281,23 @@ def main():
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
     kafka_sasl_password    = cfg(cp, 'kafka', 'sasl_password',     'KAFKA_SASL_PASSWORD',     '')
 
+    # Fleet control (agent/control.py). Off by default: enabling it exposes
+    # authenticated /control/* routes on the health port that can switch
+    # Tetragon policies off. A missing or too-short token keeps control off
+    # rather than exiting -- losing detection over a control-plane typo
+    # would be the wrong trade -- but it's logged as an error so it can't go
+    # unnoticed.
+    control_enabled    = cfg(cp, 'control', 'enabled',    'CONTROL_ENABLED',    'false').lower() == 'true'
+    control_token      = cfg(cp, 'control', 'token',      'CONTROL_TOKEN',      '').strip()
+    control_state_path = cfg(cp, 'control', 'state_path', 'CONTROL_STATE_PATH', '/var/lib/cert-analyzer/policy-state.json')
+    if control_enabled and len(control_token) < MIN_CONTROL_TOKEN_LENGTH:
+        logger.error(
+            f"[control] enabled but token is missing or shorter than "
+            f"{MIN_CONTROL_TOKEN_LENGTH} characters -- fleet control stays OFF. "
+            f"Generate one with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+        control_enabled = False
+
     logger.info("="*60)
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
     logger.info("="*60)
@@ -302,6 +320,7 @@ def main():
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Min scrape interval: {min_scrape_interval}s (too-frequent scrapes get a cached reply)" if min_scrape_interval > 0 else "Min scrape interval: disabled")
     logger.info(f"Health port:       {health_port}")
+    logger.info(f"Fleet control:     {'enabled (state: ' + control_state_path + ')' if control_enabled else 'disabled'}")
     logger.info(f"Alert threshold:   {alert_threshold} days")
     logger.info(f"Scan paths:        {scan_paths}")
     logger.info(f"Scan interval:     {scan_interval} seconds")
@@ -381,13 +400,15 @@ def main():
                                    probe_events_per_second=port_probe_events_per_second,
                                    scan_paths=scan_paths,
                                    scan_interval_seconds=scan_interval,
-                                   metrics_port=metrics_port)
+                                   metrics_port=metrics_port,
+                                   policy_state=PolicyDesiredState(control_state_path) if control_enabled else None)
 
     health = HealthServer(
         analyzer=analyzer,
         port=health_port,
         grace_period_seconds=grace_period,
         staleness_seconds=staleness,
+        control_token=control_token if control_enabled else None,
     )
     health.start()
 
