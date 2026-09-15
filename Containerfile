@@ -173,6 +173,11 @@ RUN pip install --upgrade pip --no-cache-dir \
 # Copy application code
 COPY cert_analyzer.py ./
 COPY agent/ ./agent/
+# Build-time feature switch, same as cert-analyzer.spec's %bcond: WITH_CONTROL=0
+# produces an image with no fleet-control code at all (no control listener can
+# be enabled; [control] enabled = true is a logged error).
+ARG WITH_CONTROL=1
+RUN if [ "${WITH_CONTROL}" != "1" ]; then rm -f agent/control.py agent/control_server.py; fi
 
 # Copy compiled proto bindings from builder stage (not the compiler)
 COPY --from=proto-builder /build/generated/tetragon ./tetragon

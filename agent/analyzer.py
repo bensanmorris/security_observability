@@ -164,7 +164,8 @@ class CertificateAnalyzer(
                  scan_paths: Optional[list] = None,
                  scan_interval_seconds: int = 3600,
                  metrics_port: int = 9090,
-                 policy_state: Optional['PolicyDesiredState'] = None):
+                 policy_state: Optional['PolicyDesiredState'] = None,
+                 fleet_control: str = 'disabled'):
         self.tetragon_address = tetragon_address
         self.alert_threshold_days = alert_threshold_days
         self.filter_self_events = filter_self_events
@@ -278,6 +279,10 @@ class CertificateAnalyzer(
             'kafka_plain_enabled':                  str(kafka_publisher.plain_enabled).lower() if kafka_publisher is not None else 'false',
             'kafka_connect_enabled':                str(kafka_publisher.connect_enabled).lower() if kafka_publisher is not None else 'false',
             'prometheus_port':                     str(metrics_port),
+            # 'enabled' | 'disabled' | 'unavailable' (package built --without
+            # control). Lets the fleet manager say *why* a node's control
+            # listener isn't answering instead of a blanket "unreachable".
+            'fleet_control':                       fleet_control,
         })
         self.metrics.scan_interval_seconds.labels(node_name=_NODE_NAME).set(scan_interval_seconds)
         # cert_path -> set of known_certs keys for that path. Lets process_event's

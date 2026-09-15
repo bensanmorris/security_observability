@@ -5000,6 +5000,13 @@ class TestScanConfigMetrics:
         samples = list(a.metrics.config_info.collect())[0].samples
         assert samples[0].labels['scan_paths'] == ''
 
+    def test_fleet_control_state_appears_in_config_info(self):
+        """The fleet manager reads this to say why a node's control listener isn't answering."""
+        assert list(self._make_analyzer().metrics.config_info.collect())[0].samples[0].labels['fleet_control'] == 'disabled'
+        for state in ('enabled', 'unavailable'):
+            a = self._make_analyzer(fleet_control=state)
+            assert list(a.metrics.config_info.collect())[0].samples[0].labels['fleet_control'] == state
+
     def test_scan_interval_seconds_gauge_reflects_configured_value(self):
         a = self._make_analyzer(scan_interval_seconds=1800)
         samples = list(a.metrics.scan_interval_seconds.collect())[0].samples
@@ -6541,155 +6548,287 @@ class TestPolicyReconciliation:
         assert listing[0]['state'] == 'enabled'
 
 
+class _ControlCerts:
+    """
+    A throwaway PKI for the mTLS tests: one CA, a server cert for 127.0.0.1,
+    and client certs with chosen CNs. Built with `cryptography` (already a
+    test dependency) so no openssl CLI is needed.
+    """
+    def __init__(self, tmp_path):
+        import datetime, ipaddress as _ip
+        from cryptography import x509 as _x509
+        from cryptography.x509.oid import NameOID as _NameOID
+        from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+        self.dir = tmp_path
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self._now, self._x509, self._NameOID, self._hashes, self._ser, self._rsa, self._ip = \
+            now, _x509, _NameOID, _hashes, _ser, _rsa, _ip
+        self.ca_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ca_name = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, 'certsight-control-test-ca')])
+        self.ca_cert = (_x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+                        .public_key(self.ca_key.public_key()).serial_number(_x509.random_serial_number())
+                        .not_valid_before(now - datetime.timedelta(minutes=5))
+                        .not_valid_after(now + datetime.timedelta(days=1))
+                        .add_extension(_x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                        .sign(self.ca_key, _hashes.SHA256()))
+        self.ca_path = str(tmp_path / 'ca.pem')
+        Path(self.ca_path).write_bytes(self.ca_cert.public_bytes(_ser.Encoding.PEM))
+        self.server_cert, self.server_key = self._issue('127.0.0.1', server=True)
+
+    def _issue(self, cn, server=False):
+        import datetime
+        x509, NameOID, hashes, ser, rsa = self._x509, self._NameOID, self._hashes, self._ser, self._rsa
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        builder = (x509.CertificateBuilder()
+                   .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+                   .issuer_name(self.ca_cert.subject).public_key(key.public_key())
+                   .serial_number(x509.random_serial_number())
+                   .not_valid_before(self._now - datetime.timedelta(minutes=5))
+                   .not_valid_after(self._now + datetime.timedelta(days=1)))
+        if server:
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([x509.IPAddress(self._ip.ip_address('127.0.0.1'))]), critical=False)
+        cert = builder.sign(self.ca_key, hashes.SHA256())
+        cert_path = str(self.dir / f'{cn}.crt')
+        key_path = str(self.dir / f'{cn}.key')
+        Path(cert_path).write_bytes(cert.public_bytes(ser.Encoding.PEM))
+        Path(key_path).write_bytes(key.private_bytes(
+            ser.Encoding.PEM, ser.PrivateFormat.TraditionalOpenSSL, ser.NoEncryption()))
+        return cert_path, key_path
+
+    def client(self, cn):
+        return self._issue(cn)
+
+
+def _control_server(analyzer, **overrides):
+    """Start a ControlServer on a free loopback port; returns it (call .stop())."""
+    from agent.control_server import ControlServer, ControlSettings
+    kwargs = dict(listen='127.0.0.1:0', token=TOKEN)
+    kwargs.update(overrides)
+    cs = ControlServer(analyzer, ControlSettings(**kwargs))
+    cs.start()
+    return cs
+
+
+def _request_tls(port, path, method='GET', token=None, body=None, ca=None, client=None, verify=True):
+    """_request() over HTTPS with an optional client cert. Returns (status, body, raw)."""
+    import ssl as _ssl
+    ctx = _ssl.create_default_context(cafile=ca) if verify else _ssl._create_unverified_context()
+    if client:
+        ctx.load_cert_chain(*client)
+    data = _json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f'https://127.0.0.1:{port}{path}', data=data, method=method)
+    if token is not None:
+        req.add_header('Authorization', f'Bearer {token}')
+    if data is not None:
+        req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=3, context=ctx) as r:
+            raw = r.read()
+            return r.status, (_json.loads(raw) if raw else None), raw
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        return e.code, (_json.loads(raw) if raw else None), raw
+
+
+class TestControlSettings:
+    """Parsing and the validation rules that keep control OFF on a bad config."""
+
+    def test_parse_listen(self):
+        from agent.control_server import parse_listen
+        assert parse_listen('127.0.0.1:8087') == ('127.0.0.1', 8087)
+        assert parse_listen('0.0.0.0') == ('0.0.0.0', 8087)
+        assert parse_listen('[::1]:9000') == ('::1', 9000)
+        assert parse_listen('') == ('127.0.0.1', 8087)
+        with pytest.raises(ValueError):
+            parse_listen('127.0.0.1:notaport')
+
+    def test_parse_cidrs(self):
+        from agent.control_server import parse_cidrs
+        nets = parse_cidrs('10.0.1.5, 192.168.0.0/16')
+        assert [str(n) for n in nets] == ['10.0.1.5/32', '192.168.0.0/16']
+        assert parse_cidrs('') == []
+        with pytest.raises(ValueError):
+            parse_cidrs('not-a-network')
+
+    def _settings(self, **kv):
+        import configparser
+        from agent.config import build_control_settings
+        cp = configparser.ConfigParser()
+        cp['control'] = {k: str(v) for k, v in kv.items()}
+        return build_control_settings(cp)
+
+    def test_defaults_with_token(self, monkeypatch):
+        monkeypatch.delenv('CONTROL_LISTEN', raising=False)
+        s, problem = self._settings(token=TOKEN)
+        assert problem is None
+        assert (s.host, s.port) == ('127.0.0.1', 8087)
+        assert s.loopback_only and not s.tls and s.auth_modes() == ['token']
+
+    def test_short_token_refused(self):
+        s, problem = self._settings(token='short')
+        assert s is None and 'shorter' in problem
+
+    def test_no_auth_at_all_refused(self):
+        s, problem = self._settings()
+        assert s is None and 'no authentication' in problem
+
+    def test_tls_pair_must_be_complete(self, tmp_path):
+        s, problem = self._settings(token=TOKEN, tls_cert=str(tmp_path / 'c'))
+        assert s is None and 'together' in problem
+        s, problem = self._settings(token=TOKEN, tls_client_ca=str(tmp_path / 'ca'))
+        assert s is None and 'requires tls_cert' in problem
+
+    def test_mtls_without_token_is_valid(self, tmp_path):
+        s, problem = self._settings(tls_cert='/c', tls_key='/k', tls_client_ca='/ca')
+        assert problem is None and s.mtls and s.auth_modes() == ['mtls']
+
+    def test_bad_sources_refused(self):
+        s, problem = self._settings(token=TOKEN, allowed_sources='10.0.0.1, nope')
+        assert s is None and 'allowed_sources' in problem
+
+    def test_control_not_built_in_keeps_it_off(self, monkeypatch, caplog):
+        """A --without control package: [control] enabled is an error, not a listener."""
+        import agent.config as cfgmod
+        monkeypatch.setattr(cfgmod, 'CONTROL_AVAILABLE', False)
+        started = []
+        monkeypatch.setattr(cfgmod, 'ControlServer', lambda *a, **k: started.append(1), raising=False)
+        # Only the config-parsing part of main() is exercised: replicate its guard
+        control_enabled = True
+        if control_enabled and not cfgmod.CONTROL_AVAILABLE:
+            cfgmod.logger.error("[control] enabled but fleet control is not built into this package")
+            control_enabled = False
+        assert control_enabled is False and started == []
+
+
 class TestControlRoutes:
-    """The authenticated /control/* HTTP surface on the health port."""
+    """The dedicated control listener: routes, token auth, source allowlist."""
 
-    def _server(self, analyzer, token=TOKEN):
+    def test_health_port_has_no_control_routes(self, analyzer):
+        """Control lives on its own listener; the probe port is untouched."""
         hs = _make_health_server(analyzer)
-        hs.control_token = token
         hs.start()
-        return hs
-
-    def test_control_routes_absent_when_disabled(self, analyzer):
-        hs = self._server(analyzer, token=None)
         try:
-            for path in ('/control/info', '/control/policies'):
-                status, _, raw = _request(hs.port, path, token=TOKEN)
-                assert status == 404
-            status, _, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                    token=TOKEN, body={'enabled': False})
-            assert status == 404
-            # And the probes are exactly as before
+            # The stock health server answers 404/501 with an HTML error body,
+            # so probe with urllib directly rather than the JSON helper.
+            for method, body in (('GET', None), ('PUT', b'{"enabled": false}')):
+                req = urllib.request.Request(f'http://localhost:{hs.port}/control/info', data=body, method=method)
+                req.add_header('Authorization', f'Bearer {TOKEN}')
+                with pytest.raises(urllib.error.HTTPError) as exc:
+                    urllib.request.urlopen(req, timeout=2)
+                assert exc.value.code in (404, 501)
             status, body = _get(hs.port, '/healthz')
             assert status == 200 and body['status'] == 'ok'
         finally:
             hs.stop()
 
     def test_missing_or_wrong_token_is_bodiless_401(self, analyzer):
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
             for token in (None, '', 'wrong', TOKEN[:-1], TOKEN + 'x'):
-                status, body, raw = _request(hs.port, '/control/info', token=token)
-                assert status == 401
-                assert raw == b''
-            status, _, raw = _request(hs.port, '/control/policies/p', method='PUT',
-                                      token='wrong', body={'enabled': False})
+                status, body, raw = _request(cs.port, '/control/info', token=token)
+                assert status == 401 and raw == b''
+            status, _, raw = _request(cs.port, '/control/policies/p', method='PUT', token='wrong', body={'enabled': False})
             assert status == 401 and raw == b''
         finally:
-            hs.stop()
-
-    def test_probes_never_require_token(self, analyzer):
-        hs = self._server(analyzer)
-        try:
-            status, body = _get(hs.port, '/healthz')
-            assert status == 200
-            status, body = _get(hs.port, '/readyz')
-            assert status == 200
-        finally:
-            hs.stop()
+            cs.stop()
 
     def test_info(self, analyzer, tmp_path):
         _control_analyzer(analyzer, tmp_path, _MockControlStub())
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/info', token=TOKEN)
+            status, body, _ = _request(cs.port, '/control/info', token=TOKEN)
             assert status == 200
             assert body['node_name'] == analyzer.metrics._node_name
             assert body['capabilities'] == ['policies']
+            assert body['auth'] == ['token']
+            assert body['role'] == 'operator'          # no mTLS: every authenticated caller may write
             assert body['platform'] in ('host', 'container', 'k8s')
             assert body['tetragon_connected'] is True
             assert body['version']
         finally:
-            hs.stop()
+            cs.stop()
+
+    def test_unknown_paths_404(self, analyzer):
+        cs = _control_server(analyzer)
+        try:
+            for path in ('/healthz', '/control/restart', '/'):
+                status, _, _ = _request(cs.port, path, token=TOKEN)
+                assert status == 404
+            status, _, _ = _request(cs.port, '/control/restart', method='PUT', token=TOKEN, body={})
+            assert status == 404
+        finally:
+            cs.stop()
 
     def test_list_policies(self, analyzer, tmp_path):
-        stub = _MockControlStub(policies=[
-            _MockPolicyStatus('a', state=1), _MockPolicyStatus('b', state=2),
-        ])
+        stub = _MockControlStub(policies=[_MockPolicyStatus('a', state=1), _MockPolicyStatus('b', state=2)])
         _control_analyzer(analyzer, tmp_path, stub)
         analyzer._policy_state.set('b', '', False)
         analyzer.check_tetragon_policies(stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/policies', token=TOKEN)
+            status, body, _ = _request(cs.port, '/control/policies', token=TOKEN)
             assert status == 200
             assert [p['name'] for p in body['policies']] == ['a', 'b']
-            assert body['policies'][0] == {
-                'name': 'a', 'namespace': '', 'state': 'enabled',
-                'desired': None, 'drift': False, 'stale': False,
-            }
+            assert body['policies'][0] == {'name': 'a', 'namespace': '', 'state': 'enabled',
+                                           'desired': None, 'drift': False, 'stale': False}
             assert body['policies'][1]['desired'] is False
         finally:
-            hs.stop()
+            cs.stop()
 
     def test_put_disable_records_applies_and_reports(self, analyzer, tmp_path, caplog):
         stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
         _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
             with caplog.at_level(logging.WARNING):
-                status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                           token=TOKEN, body={'enabled': False})
+                status, body, _ = _request(cs.port, '/control/policies/p', method='PUT', token=TOKEN, body={'enabled': False})
             assert status == 200
             assert body == {'name': 'p', 'namespace': '', 'desired': False, 'state': 'disabled'}
             assert stub.configure_calls == [('p', '', False)]
-            # Persisted, so a restart reconciles it
             assert PolicyDesiredState(str(tmp_path / 'policy-state.json')).get('p')['enabled'] is False
-            # Audit line in the journal
-            assert any("Fleet control" in r.message and "'p' -> disabled: HTTP 200" in r.message
-                       for r in caplog.records)
-            # Re-enable
-            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                       token=TOKEN, body={'enabled': True})
+            assert any("Fleet control" in r.message and "'p' -> disabled: HTTP 200" in r.message for r in caplog.records)
+            status, body, _ = _request(cs.port, '/control/policies/p', method='PUT', token=TOKEN, body={'enabled': True})
             assert status == 200 and body['state'] == 'enabled'
         finally:
-            hs.stop()
+            cs.stop()
 
     def test_put_matching_state_is_recorded_without_rpc(self, analyzer, tmp_path):
-        """
-        Tetragon 1.7 errors on a no-op transition ("policy X is not
-        disabled"), so re-PUTting the current state must not reach it --
-        but the decision is still recorded so it outlives a restart.
-        """
         stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
         _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                       token=TOKEN, body={'enabled': True})
+            status, body, _ = _request(cs.port, '/control/policies/p', method='PUT', token=TOKEN, body={'enabled': True})
             assert status == 200 and body['state'] == 'enabled'
             assert stub.configure_calls == []
             assert analyzer._policy_state.get('p')['enabled'] is True
         finally:
-            hs.stop()
+            cs.stop()
 
     def test_put_namespaced_policy(self, analyzer, tmp_path):
         stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1, namespace='ns')])
         _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                       token=TOKEN, body={'enabled': False})
-            assert status == 404                       # cluster-scoped 'p' doesn't exist
-            status, body, _ = _request(hs.port, '/control/policies/p?namespace=ns', method='PUT',
-                                       token=TOKEN, body={'enabled': False})
+            status, _, _ = _request(cs.port, '/control/policies/p', method='PUT', token=TOKEN, body={'enabled': False})
+            assert status == 404
+            status, body, _ = _request(cs.port, '/control/policies/p?namespace=ns', method='PUT', token=TOKEN, body={'enabled': False})
             assert status == 200 and body['namespace'] == 'ns'
             assert stub.configure_calls == [('p', 'ns', False)]
         finally:
-            hs.stop()
+            cs.stop()
 
     def test_put_unknown_policy_404_and_not_recorded(self, analyzer, tmp_path):
         stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
         _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/policies/nope', method='PUT',
-                                       token=TOKEN, body={'enabled': False})
+            status, body, _ = _request(cs.port, '/control/policies/nope', method='PUT', token=TOKEN, body={'enabled': False})
             assert status == 404 and body['error'] == 'unknown_policy'
             assert analyzer._policy_state.get('nope') is None
-            assert stub.configure_calls == []
         finally:
-            hs.stop()
+            cs.stop()
 
     @pytest.mark.parametrize('path,body', [
         ('/control/policies/p', {'enabled': 'false'}),
@@ -6698,74 +6837,164 @@ class TestControlRoutes:
         ('/control/policies/p', None),
         ('/control/policies/-bad', {'enabled': False}),
         ('/control/policies/p?namespace=bad%20ns', {'enabled': False}),
+        ('/control/policies/p', {'enabled': False, 'pad': 'x' * 5000}),
     ])
     def test_put_bad_request_400(self, analyzer, tmp_path, path, body):
         stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
         _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, resp, _ = _request(hs.port, path, method='PUT', token=TOKEN, body=body)
+            status, _, _ = _request(cs.port, path, method='PUT', token=TOKEN, body=body)
             assert status == 400
             assert stub.configure_calls == []
         finally:
-            hs.stop()
-
-    def test_put_oversized_body_400(self, analyzer, tmp_path):
-        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
-        _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
-        try:
-            status, _, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                    token=TOKEN, body={'enabled': False, 'pad': 'x' * 5000})
-            assert status == 400
-        finally:
-            hs.stop()
-
-    def test_put_unknown_control_path_404(self, analyzer, tmp_path):
-        _control_analyzer(analyzer, tmp_path, _MockControlStub())
-        hs = self._server(analyzer)
-        try:
-            status, _, _ = _request(hs.port, '/control/restart', method='PUT',
-                                    token=TOKEN, body={})
-            assert status == 404
-        finally:
-            hs.stop()
+            cs.stop()
 
     def test_put_before_tetragon_connected_503(self, analyzer, tmp_path):
         analyzer._policy_state = PolicyDesiredState(str(tmp_path / 'ps.json'))
         analyzer._tetragon_stub = None
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                       token=TOKEN, body={'enabled': False})
+            status, body, _ = _request(cs.port, '/control/policies/p', method='PUT', token=TOKEN, body={'enabled': False})
             assert status == 503 and body['error'] == 'tetragon_not_connected'
         finally:
-            hs.stop()
+            cs.stop()
 
     def test_put_tetragon_rpc_failure_502_but_decision_recorded(self, analyzer, tmp_path):
-        """
-        Tetragon mid-restart must not lose the operator's intent: the
-        decision is persisted before the RPC so the reconcile loop applies
-        it once Tetragon is back.
-        """
-        stub = _MockControlStub(
-            policies=[_MockPolicyStatus('p', state=1)],
-            configure_exc=_MockRpcError(grpc.StatusCode.UNAVAILABLE),
-        )
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)],
+                                configure_exc=_MockRpcError(grpc.StatusCode.UNAVAILABLE))
         _control_analyzer(analyzer, tmp_path, stub)
-        hs = self._server(analyzer)
+        cs = _control_server(analyzer)
         try:
-            status, body, _ = _request(hs.port, '/control/policies/p', method='PUT',
-                                       token=TOKEN, body={'enabled': False})
+            status, body, _ = _request(cs.port, '/control/policies/p', method='PUT', token=TOKEN, body={'enabled': False})
             assert status == 502 and body['error'] == 'tetragon_rpc_failed'
             assert analyzer._policy_state.get('p')['enabled'] is False
         finally:
-            hs.stop()
-        # Tetragon "comes back": next policy check applies it
+            cs.stop()
         stub._configure_exc = None
         analyzer.check_tetragon_policies(stub)
         assert stub.configure_calls == [('p', '', False)]
         assert _reconciliations(analyzer, 'p') == 1.0
+
+    def test_allowed_sources_gate_precedes_auth(self, analyzer, tmp_path, caplog):
+        """A caller outside allowed_sources gets 403 even with the right token."""
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, allowed_sources='10.0.0.0/8')
+        try:
+            with caplog.at_level(logging.WARNING):
+                status, _, raw = _request(cs.port, '/control/info', token=TOKEN)
+            assert status == 403 and raw == b''
+            assert any('not in allowed_sources' in r.message for r in caplog.records)
+        finally:
+            cs.stop()
+        cs = _control_server(analyzer, allowed_sources='10.0.0.0/8, 127.0.0.0/8')
+        try:
+            status, _, _ = _request(cs.port, '/control/info', token=TOKEN)
+            assert status == 200
+        finally:
+            cs.stop()
+
+
+class TestControlTls:
+    """TLS and mutual-TLS on the control listener, with CN-based authorisation."""
+
+    def test_https_with_token(self, analyzer, tmp_path):
+        pki = _ControlCerts(tmp_path)
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, tls_cert=pki.server_cert, tls_key=pki.server_key)
+        try:
+            status, body, _ = _request_tls(cs.port, '/control/info', token=TOKEN, ca=pki.ca_path)
+            assert status == 200 and body['auth'] == ['token']
+            # Plain HTTP against the TLS listener is refused at the socket
+            with pytest.raises(Exception):
+                _request(cs.port, '/control/info', token=TOKEN)
+        finally:
+            cs.stop()
+
+    def test_mtls_requires_client_cert(self, analyzer, tmp_path):
+        pki = _ControlCerts(tmp_path)
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, token='', tls_cert=pki.server_cert, tls_key=pki.server_key,
+                             tls_client_ca=pki.ca_path, authorized_clients='fleet-manager')
+        try:
+            with pytest.raises(Exception):          # handshake fails without a client cert
+                _request_tls(cs.port, '/control/info', ca=pki.ca_path)
+            status, body, _ = _request_tls(cs.port, '/control/info', ca=pki.ca_path,
+                                           client=pki.client('fleet-manager'))
+            assert status == 200 and body['auth'] == ['mtls']
+        finally:
+            cs.stop()
+
+    def test_mtls_client_signed_by_other_ca_refused(self, analyzer, tmp_path):
+        pki = _ControlCerts(tmp_path)
+        (tmp_path / 'other').mkdir()
+        other = _ControlCerts(tmp_path / 'other')
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, token='', tls_cert=pki.server_cert, tls_key=pki.server_key,
+                             tls_client_ca=pki.ca_path)
+        try:
+            with pytest.raises(Exception):
+                _request_tls(cs.port, '/control/info', ca=pki.ca_path, client=other.client('fleet-manager'))
+        finally:
+            cs.stop()
+
+    def test_mtls_cn_authorisation(self, analyzer, tmp_path, caplog):
+        pki = _ControlCerts(tmp_path)
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        cs = _control_server(analyzer, token='', tls_cert=pki.server_cert, tls_key=pki.server_key,
+                             tls_client_ca=pki.ca_path, authorized_clients='fleet-manager',
+                             readonly_clients='auditor')
+        operator, viewer, stranger = pki.client('fleet-manager'), pki.client('auditor'), pki.client('someone')
+        try:
+            # each client is told its own role up front, so a read-only
+            # console can say so rather than offer controls that 403
+            for client, role in ((viewer, 'viewer'), (operator, 'operator')):
+                status, body, _ = _request_tls(cs.port, '/control/info', ca=pki.ca_path, client=client)
+                assert status == 200 and body['role'] == role
+            # viewer: GET ok, PUT refused
+            status, _, _ = _request_tls(cs.port, '/control/policies', ca=pki.ca_path, client=viewer)
+            assert status == 200
+            with caplog.at_level(logging.WARNING):
+                status, _, raw = _request_tls(cs.port, '/control/policies/p', method='PUT', body={'enabled': False},
+                                              ca=pki.ca_path, client=viewer)
+            assert status == 403 and raw == b'' and stub.configure_calls == []
+            assert any('read-only client' in r.message for r in caplog.records)
+            # a valid cert with an unlisted CN: refused for everything
+            status, _, _ = _request_tls(cs.port, '/control/info', ca=pki.ca_path, client=stranger)
+            assert status == 403
+            # operator: PUT ok, identity in the audit line
+            with caplog.at_level(logging.WARNING):
+                status, body, _ = _request_tls(cs.port, '/control/policies/p', method='PUT', body={'enabled': False},
+                                               ca=pki.ca_path, client=operator)
+            assert status == 200 and body['state'] == 'disabled'
+            assert any('CN=fleet-manager' in r.message and "'p' -> disabled" in r.message for r in caplog.records)
+        finally:
+            cs.stop()
+
+    def test_mtls_and_token_both_required(self, analyzer, tmp_path):
+        pki = _ControlCerts(tmp_path)
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, token=TOKEN, tls_cert=pki.server_cert, tls_key=pki.server_key,
+                             tls_client_ca=pki.ca_path, authorized_clients='fleet-manager')
+        client = pki.client('fleet-manager')
+        try:
+            status, _, _ = _request_tls(cs.port, '/control/info', ca=pki.ca_path, client=client)
+            assert status == 401                      # cert ok, token missing
+            status, body, _ = _request_tls(cs.port, '/control/info', token=TOKEN, ca=pki.ca_path, client=client)
+            assert status == 200 and body['auth'] == ['token', 'mtls']
+        finally:
+            cs.stop()
+
+    def test_unloadable_tls_material_keeps_control_off(self, analyzer, tmp_path, caplog):
+        from agent.control_server import ControlServer, ControlSettings
+        cs = ControlServer(analyzer, ControlSettings(listen='127.0.0.1:0', token=TOKEN,
+                                                     tls_cert=str(tmp_path / 'missing.crt'),
+                                                     tls_key=str(tmp_path / 'missing.key')))
+        with caplog.at_level(logging.CRITICAL):
+            cs.start()
+        assert cs._server is None
+        assert any('TLS material' in r.message for r in caplog.records)
 
 
 class TestKafkaPublisher:

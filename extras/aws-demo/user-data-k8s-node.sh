@@ -9,6 +9,8 @@
 #   __MAIN_PRIVATE_IP__      -- the main demo instance's private IP (Kafka target)
 #   __CERTSIGHT_GIT_REF__    -- git ref to clone this repo at (branch or tag)
 #   __K8S_ANALYZER_IMAGE_TAG__ -- image tag for cert-analyzer/cert-test-server
+#   __CONTROL_TOKEN__        -- the main box's [control] token, so the fleet
+#                               manager there can drive this node (empty = off)
 #
 # Progress/errors: /var/log/certsight-k8s-node-install.log
 
@@ -26,6 +28,7 @@ CERTSIGHT_GIT_REF="__CERTSIGHT_GIT_REF__"
 # you actually want (e.g. sha-f5c492d-ubi9 for v0.97 -- confirm via
 # `git rev-parse vX.Y` which commit a version tag maps to).
 K8S_ANALYZER_IMAGE_TAG="__K8S_ANALYZER_IMAGE_TAG__"
+CONTROL_TOKEN="__CONTROL_TOKEN__"
 REPO_URL="https://github.com/bensanmorris/security_observability.git"
 WORKDIR="/opt/certsight-k8s-install"
 mkdir -p "${WORKDIR}"
@@ -106,9 +109,22 @@ IMAGE_TAG_ARGS=()
 if [[ -n "${K8S_ANALYZER_IMAGE_TAG}" ]]; then
     IMAGE_TAG_ARGS=(--set "image.tag=${K8S_ANALYZER_IMAGE_TAG}" --set "demo.testServer.image.tag=${K8S_ANALYZER_IMAGE_TAG}")
 fi
+# Fleet control (see the chart README's "Fleet control" section): on when
+# deploy-k8s-node.sh could read the main box's token. The listener is on
+# the node IP (hostNetwork) but only the main box may connect
+# (allowedSources + the SG + the firewalld rule below). Token auth over
+# plain http inside the VPC for the demo; production should add
+# control.tls.existingSecret. State stays on the chart's default emptyDir
+# -- a demo node is replaced, not nursed.
+CONTROL_ARGS=()
+if [[ -n "${CONTROL_TOKEN}" ]]; then
+    CONTROL_ARGS=(--set control.enabled=true --set "control.token=${CONTROL_TOKEN}"
+                  --set "control.allowedSources=${MAIN_PRIVATE_IP}/32")
+fi
 helm install cert-analyzer "${WORKDIR}/certsight-src/extras/helm/cert-analyzer" \
     -n certsight --create-namespace \
     "${IMAGE_TAG_ARGS[@]}" \
+    "${CONTROL_ARGS[@]}" \
     --set scc.hostaccess.enabled=false \
     --set route.enabled=false \
     --set monitoring.serviceMonitor.enabled=false \
@@ -210,6 +226,13 @@ semanage port -l | grep -qw 30090 || semanage port -a -t http_port_t -p tcp 3009
 # not in the security group either.
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-port=30090/tcp
+    # cert-analyzer's [control] listener, to the main box only (the fleet
+    # manager runs there). The security group already restricts it to the
+    # main box's SG; this is the same belt-and-braces the main box needed
+    # for 9091/9092 (SG alone wasn't enough with firewalld active).
+    if [[ -n "${CONTROL_TOKEN}" ]]; then
+        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${MAIN_PRIVATE_IP}/32 port port=8087 protocol=tcp accept"
+    fi
     firewall-cmd --reload
 fi
 systemctl enable --now nginx

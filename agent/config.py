@@ -12,8 +12,17 @@ from .constants import (
     CACHE_MAX_SIZE, CONFIG_FILE_PATH,
 )
 from .analyzer import CertificateAnalyzer
-from .control import MIN_CONTROL_TOKEN_LENGTH, PolicyDesiredState
 from .health import HealthServer
+# Fleet control is optional at build time -- see cert-analyzer.spec's
+# %bcond and agent/control_server.py. A package built without it has no
+# agent/control.py, and [control] enabled = true is then a logged error,
+# not a listener.
+try:
+    from .control import MIN_CONTROL_TOKEN_LENGTH, PolicyDesiredState
+    from .control_server import ControlServer, ControlSettings
+    CONTROL_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised by the --without control package
+    CONTROL_AVAILABLE = False
 from .kafka import KafkaPublisher
 from .metrics import start_metrics_server
 
@@ -131,6 +140,42 @@ def cfg_float(
             f"{raw!r} — using default {default!r}"
         )
         return float(default)
+
+
+def build_control_settings(cp: configparser.ConfigParser):
+    """
+    Parse + validate [control]. Returns (ControlSettings, None) or
+    (None, problem). The rules, each of which keeps control OFF:
+      - a token shorter than MIN_CONTROL_TOKEN_LENGTH
+      - neither a token nor a client CA (nothing would authenticate callers)
+      - tls_cert without tls_key or vice versa; tls_client_ca without TLS
+      - an unparseable listen address or allowed_sources entry
+    """
+    token = cfg(cp, 'control', 'token', 'CONTROL_TOKEN', '').strip()
+    kwargs = dict(
+        listen=cfg(cp, 'control', 'listen', 'CONTROL_LISTEN', '127.0.0.1:8087'),
+        token=token,
+        allowed_sources=cfg(cp, 'control', 'allowed_sources', 'CONTROL_ALLOWED_SOURCES', ''),
+        tls_cert=cfg(cp, 'control', 'tls_cert', 'CONTROL_TLS_CERT', ''),
+        tls_key=cfg(cp, 'control', 'tls_key', 'CONTROL_TLS_KEY', ''),
+        tls_client_ca=cfg(cp, 'control', 'tls_client_ca', 'CONTROL_TLS_CLIENT_CA', ''),
+        authorized_clients=cfg(cp, 'control', 'authorized_clients', 'CONTROL_AUTHORIZED_CLIENTS', ''),
+        readonly_clients=cfg(cp, 'control', 'readonly_clients', 'CONTROL_READONLY_CLIENTS', ''),
+    )
+    try:
+        settings = ControlSettings(**kwargs)
+    except ValueError as e:
+        return None, f"invalid listen address or allowed_sources entry: {e}"
+    if token and len(token) < MIN_CONTROL_TOKEN_LENGTH:
+        return None, (f"token is shorter than {MIN_CONTROL_TOKEN_LENGTH} characters; generate one with: "
+                      f"python3 -c 'import secrets; print(secrets.token_urlsafe(32))'")
+    if bool(settings.tls_cert) != bool(settings.tls_key):
+        return None, "tls_cert and tls_key must be set together"
+    if settings.tls_client_ca and not settings.tls:
+        return None, "tls_client_ca requires tls_cert and tls_key"
+    if not token and not settings.mtls:
+        return None, "no authentication configured: set a token, or tls_client_ca for mutual TLS"
+    return settings, None
 
 
 def _raise_keyboard_interrupt(signum, frame):
@@ -281,22 +326,23 @@ def main():
     kafka_sasl_username    = cfg(cp, 'kafka', 'sasl_username',     'KAFKA_SASL_USERNAME',     '')
     kafka_sasl_password    = cfg(cp, 'kafka', 'sasl_password',     'KAFKA_SASL_PASSWORD',     '')
 
-    # Fleet control (agent/control.py). Off by default: enabling it exposes
-    # authenticated /control/* routes on the health port that can switch
-    # Tetragon policies off. A missing or too-short token keeps control off
-    # rather than exiting -- losing detection over a control-plane typo
-    # would be the wrong trade -- but it's logged as an error so it can't go
-    # unnoticed.
+    # Fleet control (agent/control_server.py): a separate, loopback-by-default
+    # listener that lets certsight-fleet-manager switch Tetragon policies.
+    # Off by default. Any misconfiguration keeps it off rather than exiting
+    # -- losing detection over a control-plane typo would be the wrong trade
+    # -- but each is logged as an error so it can't go unnoticed.
     control_enabled    = cfg(cp, 'control', 'enabled',    'CONTROL_ENABLED',    'false').lower() == 'true'
-    control_token      = cfg(cp, 'control', 'token',      'CONTROL_TOKEN',      '').strip()
     control_state_path = cfg(cp, 'control', 'state_path', 'CONTROL_STATE_PATH', '/var/lib/cert-analyzer/policy-state.json')
-    if control_enabled and len(control_token) < MIN_CONTROL_TOKEN_LENGTH:
-        logger.error(
-            f"[control] enabled but token is missing or shorter than "
-            f"{MIN_CONTROL_TOKEN_LENGTH} characters -- fleet control stays OFF. "
-            f"Generate one with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
-        )
+    control_settings = None
+    if control_enabled and not CONTROL_AVAILABLE:
+        logger.error("[control] enabled but fleet control is not built into this package (built --without control) -- staying OFF")
         control_enabled = False
+    if control_enabled:
+        control_settings, control_problem = build_control_settings(cp)
+        if control_problem:
+            logger.error(f"[control] {control_problem} -- fleet control stays OFF")
+            control_enabled = False
+            control_settings = None
 
     logger.info("="*60)
     logger.info("TLS Certificate Expiry Monitor (Multi-Cert + K8s Enrichment)")
@@ -320,7 +366,14 @@ def main():
     logger.info(f"Metrics port:      {metrics_port}")
     logger.info(f"Min scrape interval: {min_scrape_interval}s (too-frequent scrapes get a cached reply)" if min_scrape_interval > 0 else "Min scrape interval: disabled")
     logger.info(f"Health port:       {health_port}")
-    logger.info(f"Fleet control:     {'enabled (state: ' + control_state_path + ')' if control_enabled else 'disabled'}")
+    if control_enabled:
+        logger.info(
+            f"Fleet control:     enabled on {'https' if control_settings.tls else 'http'}://"
+            f"{control_settings.host}:{control_settings.port} "
+            f"(auth: {', '.join(control_settings.auth_modes())}; state: {control_state_path})"
+        )
+    else:
+        logger.info("Fleet control:     disabled")
     logger.info(f"Alert threshold:   {alert_threshold} days")
     logger.info(f"Scan paths:        {scan_paths}")
     logger.info(f"Scan interval:     {scan_interval} seconds")
@@ -401,16 +454,20 @@ def main():
                                    scan_paths=scan_paths,
                                    scan_interval_seconds=scan_interval,
                                    metrics_port=metrics_port,
-                                   policy_state=PolicyDesiredState(control_state_path) if control_enabled else None)
+                                   policy_state=PolicyDesiredState(control_state_path) if control_enabled else None,
+                                   fleet_control='enabled' if control_enabled
+                                                 else ('disabled' if CONTROL_AVAILABLE else 'unavailable'))
 
     health = HealthServer(
         analyzer=analyzer,
         port=health_port,
         grace_period_seconds=grace_period,
         staleness_seconds=staleness,
-        control_token=control_token if control_enabled else None,
     )
     health.start()
+
+    if control_enabled:
+        ControlServer(analyzer, control_settings).start()
 
     analyzer.health_server = health
 

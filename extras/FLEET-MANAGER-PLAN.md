@@ -1,6 +1,14 @@
 # certsight-fleet-manager — design plan
 
-Status: proposal, 2026-09-15. Nothing here is implemented.
+Status: 2026-09-15 — steps 1 (cert-analyzer `[control]`), 2 (the
+fleet-manager service, `extras/fleet-manager/`) and the packaging half of
+3 (RPM spec + CI job, Helm `control.*`, AWS demo scripts) are in the
+working tree; steps 1–2 verified live on the dev box. The step-3 exit
+criteria run on the two-node AWS demo has not been done. Also in the tree
+(same day): the console-side `viewer` role and anonymous-viewer mode, the
+per-node honesty work (below), and CI building the `nocontrol` variant of
+every cert-analyzer artifact — the variant expected to be offered first,
+since a control port on every node is the hard sell.
 
 ## Problem
 
@@ -174,10 +182,13 @@ shouldn't gate this. Note it in the README; do it when the third consumer
 
 UI behaviour that matters:
 
-- The matrix cell shows *observed* state (Prometheus) and flags drift
-  against *desired* state (node). A cell that's been toggled but hasn't
-  reported back yet shows a pending spinner, then reads back from the node —
-  never assumes success.
+- The matrix cell shows the node's *live* state when its control endpoint
+  is reachable (its `/control/policies` is a fresh `ListTracingPolicies`;
+  Prometheus lags by a policy-monitor interval plus a scrape, which right
+  after a toggle would show the old state next to a new desired flag), and
+  Prometheus's last-scraped state otherwise. Drift is flagged from the
+  node's recorded decision. A cell that's been toggled shows a pending
+  spinner, then the whole matrix is re-read — never assumes success.
 - Bulk toggles confirm with the node count before firing and stream results
   per node. Partial failure is normal (a node mid-upgrade) and is shown, not
   collapsed into a red banner.
@@ -185,6 +196,47 @@ UI behaviour that matters:
   *node-local* override of a cluster-wide CR, and the operator should know
   that's what they're doing.
 - Explorers open in the same shell (nav bar + page), not as bare pages.
+
+### Node-side hardening (added 2026-09-15 after CSO-style review)
+
+The v1 floor below was raised before anything shipped: the control routes
+moved off the health port onto a dedicated `ControlServer` (`[control]
+listen`, loopback by default); `allowed_sources` CIDRs are checked before
+auth; `tls_cert`/`tls_key` give HTTPS and `tls_client_ca` mutual TLS with
+CN-based `authorized_clients` / `readonly_clients`; and the whole feature
+can be compiled out (`rpmbuild --without control`, `WITH_CONTROL=0`) so a
+package contains no control code at all. `gen-control-certs.sh` in the
+fleet manager builds a matching PKI. See the `[control]` table in the
+main README.
+
+### Roles and honesty (added 2026-09-15)
+
+Console side: two roles, `admin` (may write) and `viewer` (read only),
+enforced on every write route (`403 read_only`). A viewer is either a
+second local account (`FLEET_MANAGER_VIEWER_PASSWORD_HASH`) or every
+visitor (`FLEET_MANAGER_ANONYMOUS_VIEWER=1`, used on the AWS demo). The
+landing page is the administrator sign-in; read-only access is a
+separate link under it (*Read-only viewer access →* asks for the viewer
+account's password as an access code; *Continue as read-only viewer →*
+enters with no credentials) — never a role picker in the form, and never
+a session minted just for arriving. A deployment with viewers and
+no admin hash is provably read-only — the shape to offer a security
+review that will allow a fleet *view* long before fleet *control*.
+
+Node side: `/control/info` tells each caller its own role (`operator` /
+`viewer`, from the mTLS CN lists), and `cert_analyzer_config_info` gained
+`fleet_control="enabled"|"disabled"|"unavailable"`.
+
+Together these let the UI say, per node, exactly why a cell can't be
+toggled rather than showing a button that fails: *read-only account*,
+*read-only client* (our CN is in the node's `readonly_clients`), *no
+control (built without)*, *control off*, *unreachable* (listener on, but
+not from here), *unauthorized* (401), *refused* (403). The old
+"bodiless 404 = disabled" heuristic was dropped — with a dedicated
+listener, a disabled node is connection-refused, and only Prometheus can
+say why. Bulk buttons carry the count of nodes they will actually touch
+and are disabled at zero; an admin on a console with no node credentials
+gets a warning banner up front.
 
 ### Security posture (v1 is the first CertSight component that writes)
 
@@ -289,8 +341,10 @@ that node until someone starts it again.
   issue and rotate the pair itself; and it'd be odd for a cert tool to
   leave this on a shared token forever).
 - Per-action authorisation: `viewer` / `operator` (policies) / `admin`
-  (config, lifecycle). Still a local user table; no OIDC until someone
-  asks.
+  (config, lifecycle). `viewer` vs `admin` exists on the console since
+  2026-09-15 (and `operator` vs `viewer` per node, keyed on client CN);
+  the three-way split arrives with the first v2 action. Still a local
+  user table; no OIDC until someone asks.
 
 ## MCP server
 

@@ -17,9 +17,16 @@ from typing import Dict, Set, Tuple
 from tetragon import sensors_pb2
 
 from .constants import _POLICY_STATE_NAMES
-from .control import (
-    POLICY_NAME_RE, observed_matches_desired, policy_key, set_tracing_policy_enabled,
-)
+# Fleet control is optional at build time (cert-analyzer.spec --without
+# control ships no agent/control.py). Everything below that needs it checks
+# CONTROL_AVAILABLE; the policy check itself never depends on it.
+try:
+    from .control import (
+        POLICY_NAME_RE, observed_matches_desired, policy_key, set_tracing_policy_enabled,
+    )
+    CONTROL_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised by the --without control package
+    CONTROL_AVAILABLE = False
 
 # Logger name is hardcoded (not __name__) so log records from this mixin keep
 # reporting under "agent.analyzer" -- see the identical note in java_fips.py.
@@ -234,7 +241,7 @@ class _TetragonMonitorMixin:
         can do for them.
         """
         state = getattr(self, '_policy_state', None)
-        if state is None:
+        if state is None or not CONTROL_AVAILABLE:
             return
         desired = state.all()
         if not desired:

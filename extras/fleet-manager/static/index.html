@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CertSight fleet manager</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <h1>CertSight fleet manager</h1>
+      <div class="header-right">
+        <span id="whoami" class="whoami" hidden></span>
+        <button id="signin-btn" class="btn btn-quiet" hidden>Sign in</button>
+        <button id="logout-btn" class="btn btn-quiet" hidden>Log out</button>
+        <a class="powered-by" href="https://github.com/bensanmorris/security_observability" target="_blank" rel="noopener">Powered by CertSight &#8599;</a>
+      </div>
+    </div>
+    <nav id="nav" hidden>
+      <button class="nav-btn" data-view="nodes">Nodes</button>
+      <button class="nav-btn" data-view="policies">Policies</button>
+      <button class="nav-btn" data-view="explorers">Explorers</button>
+      <button class="nav-btn" data-view="audit">Audit</button>
+      <span class="nav-spacer"></span>
+      <button id="refresh-btn" class="btn btn-quiet" title="Re-read Prometheus and every node">Refresh</button>
+      <span id="status" class="status"></span>
+    </nav>
+  </header>
+
+  <main>
+    <div id="viewer-banner" class="banner" hidden>
+      <strong>Read-only view.</strong> <span id="viewer-banner-text"></span>
+    </div>
+
+    <section id="view-login" class="view" hidden>
+      <h2 id="login-title">Administrator sign in</h2>
+      <form id="login-form" autocomplete="on">
+        <label id="login-username-label">Username <input name="username" autocomplete="username" required></label>
+        <label><span id="login-password-label">Password</span> <input name="password" type="password" autocomplete="current-password" required></label>
+        <div class="row-actions">
+          <button id="login-submit" class="btn btn-primary" type="submit">Sign in</button>
+          <button id="login-cancel" class="btn btn-quiet" type="button" hidden>Back to read-only view</button>
+        </div>
+        <div id="login-error" class="error" hidden></div>
+      </form>
+      <p id="login-hint" class="muted">Administrators can change which Tetragon policies run on each node. Every action taken here is recorded in the audit log with your username and address.</p>
+      <div id="viewer-entry" class="viewer-entry" hidden>
+        <a href="#" id="viewer-link"></a>
+        <span id="viewer-entry-note" class="muted"></span>
+      </div>
+    </section>
+
+    <section id="view-nodes" class="view" hidden>
+      <h2>Nodes</h2>
+      <p class="muted">One row per cert-analyzer node Prometheus is scraping. <em>Control</em> says what this console can do on that node and, when it can't change anything, why: the node's package was built without control, its <code>[control]</code> is off, the listener is on but unreachable from here, or the node accepts this console as a read-only client only. Hover a badge for the detail. Every node shows regardless.</p>
+      <div class="table-wrap"><table id="nodes-table"></table></div>
+    </section>
+
+    <section id="view-policies" class="view" hidden>
+      <h2>Tetragon tracing policies</h2>
+      <p class="muted">Rows are policies, columns are nodes. Each cell shows the state Tetragon reports on that node with an <strong>Enable</strong>/<strong>Disable</strong> button that acts on that node only; the row's <strong>All nodes</strong> buttons apply to every node in the row this console can change (the count is on the button; the rest are skipped and named in the result). <em>Drift</em> means the node's recorded decision and Tetragon disagree (the node will re-apply on its own). On a <code>k8s</code> node a change is a node-local override of the cluster-wide policy object.</p>
+      <div class="table-wrap"><table id="policies-table"></table></div>
+    </section>
+
+    <section id="view-explorers" class="view" hidden>
+      <h2>Fleet explorers</h2>
+      <div id="explorer-tabs" class="subnav"></div>
+      <iframe id="explorer-frame" title="Fleet explorer"></iframe>
+    </section>
+
+    <section id="view-audit" class="view" hidden>
+      <h2>Audit log</h2>
+      <p class="muted">Newest first. Bulk actions record one line per node.</p>
+      <div class="table-wrap"><table id="audit-table"></table></div>
+    </section>
+  </main>
+
+  <div id="confirm" class="modal" hidden>
+    <div class="modal-box">
+      <p id="confirm-text"></p>
+      <div class="modal-actions">
+        <button id="confirm-no" class="btn btn-quiet">Cancel</button>
+        <button id="confirm-yes" class="btn btn-primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

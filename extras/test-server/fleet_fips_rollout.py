@@ -319,7 +319,7 @@ def _render_page(all_certs, nodes):
 <style>{blast_radius.PAGE_CSS}{EXTRA_CSS}</style>
 </head>
 <body>
-<p><a href="/">&larr; Back to test console</a></p>
+<p><a href="/" target="_top">&larr; Back to console</a></p>
 <h1>Fleet FIPS Rollout</h1>
 <p class="subtitle">Grouped by node &mdash; click a node to see every certificate's FIPS judgement and, where captured, the actual negotiated TLS protocol/cipher</p>
 <p class="summary-bar">{summary}</p>

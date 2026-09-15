@@ -42,6 +42,7 @@ if systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-port=3000/tcp   # Grafana dashboard
     firewall-cmd --permanent --add-port=8090/tcp   # test console
     firewall-cmd --permanent --add-port=8092/tcp   # MCP server (rate-limited by nginx)
+    firewall-cmd --permanent --add-port=8094/tcp   # fleet manager (login-protected, nginx in front)
     firewall-cmd --reload
 fi
 
@@ -67,11 +68,17 @@ tar -xzf tetragon-policies.tar.gz
 # legitimately fail on a stock image -- don't let that abort the whole install.
 ./tetragon-policies/apply-policies.sh || true
 
-echo "=== [6/9] CertSight RPMs (cert-analyzer, Java cert-agent, test console, MCP server) ==="
+echo "=== [6/9] CertSight RPMs (cert-analyzer, Java cert-agent, test console, MCP server, fleet manager) ==="
 mkdir -p rpms && cd rpms
 for pkg in cert-analyzer cert-agent-jni cert-agent-deployer certsight-test-server certsight-mcp; do
     curl -fsSL -O "${RELEASE_BASE}/${pkg}-${CERTSIGHT_VERSION#v}-1.el9.x86_64.rpm"
 done
+# The fleet manager is noarch and first shipped after v0.99 -- tolerate a
+# release that predates it so an older CERTSIGHT_VERSION still deploys; the
+# fleet-manager section further down is skipped when the package isn't
+# installed.
+curl -fsSL -O "${RELEASE_BASE}/certsight-fleet-manager-${CERTSIGHT_VERSION#v}-1.el9.noarch.rpm" \
+    || echo "    no certsight-fleet-manager RPM in ${CERTSIGHT_VERSION} -- skipping the fleet manager"
 # Installed together so dnf can resolve the local inter-package deps in one
 # transaction -- certsight-mcp Requires certsight-test-server (it imports
 # that package's blast_radius.py/fleet_blast_radius.py/chain_explorer.py/
@@ -84,11 +91,22 @@ systemctl restart tetragon
 sleep 5
 
 CONF=/etc/cert-analyzer/cert-analyzer.conf
+# The first sed flips every section's bare "enabled = false" -- [kafka] and,
+# since the fleet manager landed, [control] too. [control] additionally
+# needs a token or cert-analyzer leaves control off; it's generated here and
+# saved for deploy-k8s-node.sh to hand to the k8s node (both nodes must
+# share it) and for the fleet manager's own config below. The listener
+# keeps its loopback default (127.0.0.1:8087): the fleet manager runs on
+# this same box, so nothing control-related is reachable from outside it.
+CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+install -m 0600 /dev/null /root/certsight-control-token
+echo "${CONTROL_TOKEN}" > /root/certsight-control-token
 sed -i \
     -e 's/^enabled = false/enabled = true/' \
     -e 's/^bind_probe_enabled = false/bind_probe_enabled = true/' \
     -e 's/^connect_probe_enabled = false/connect_probe_enabled = true/' \
     -e 's/^event_rate_metrics_enabled = false/event_rate_metrics_enabled = true/' \
+    -e "s|^#token =.*|token = ${CONTROL_TOKEN}|" \
     "${CONF}"
 
 echo "=== [8/9] Kafka (single-node, throwaway, KRaft mode) ==="
@@ -305,6 +323,79 @@ restorecon -v /etc/nginx/conf.d/certsight-mcp.conf || true
 # 8092 needs the same explicit SELinux port label 8090 needed above.
 semanage port -l | grep -qw 8092 || semanage port -a -t http_port_t -p tcp 8092 || true
 nginx -t && systemctl reload nginx
+
+if rpm -q certsight-fleet-manager >/dev/null 2>&1; then
+echo "=== Fleet manager (policy control console -- read-only for visitors, admin login for changes, nginx in front) ==="
+# The landing page is the admin sign-in with a "Continue as read-only
+# viewer" link (FLEET_MANAGER_ANONYMOUS_VIEWER) -- so the console is as
+# open as the dashboard/console/MCP server for looking, but unlike those,
+# this one can switch detection off, so *changing* anything needs the admin
+# login. Viewer sessions are refused every write server-side; the UI shows
+# the controls disabled with the reason. The admin password is generated
+# here and saved root-only; deploy-demo.sh prints where to find it. The
+# node token is the one [control] above was given, so this console can
+# drive this node's cert-analyzer (and the k8s node's, once
+# deploy-k8s-node.sh has passed it the same token). Bound to 127.0.0.1:8095;
+# nginx below is the public side on 8094, same split as the MCP server.
+# This box's own node is reached on its loopback [control] listener; the
+# k8s node on its node IP (see deploy-k8s-node.sh / user-data-k8s-node.sh).
+FM_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(12))')"
+install -m 0600 /dev/null /root/certsight-fleet-manager-password
+echo "${FM_PASSWORD}" > /root/certsight-fleet-manager-password
+FM_HASH="$(echo "${FM_PASSWORD}" | certsight-fleet-manager --hash-password)"
+cat <<FMEOF > /etc/certsight-fleet-manager/fleet-manager.conf
+FLEET_MANAGER_ADMIN_PASSWORD_HASH=${FM_HASH}
+FLEET_MANAGER_ANONYMOUS_VIEWER=1
+FLEET_MANAGER_READ_ONLY_NOTE=Public demo: anyone may look; changing a policy needs the admin login.
+FLEET_MANAGER_NODE_TOKEN=${CONTROL_TOKEN}
+FLEET_MANAGER_PROMETHEUS_URL=http://127.0.0.1:9091
+FLEET_MANAGER_BIND=127.0.0.1
+FLEET_MANAGER_PORT=8095
+FLEET_MANAGER_AUDIT_LOG=/var/lib/certsight-fleet-manager/audit.jsonl
+FMEOF
+chown root:certsight-fleet-manager /etc/certsight-fleet-manager/fleet-manager.conf
+chmod 640 /etc/certsight-fleet-manager/fleet-manager.conf
+systemctl reset-failed certsight-fleet-manager || true
+systemctl enable --now certsight-fleet-manager
+
+echo "=== nginx reverse proxy in front of the fleet manager ==="
+# The app does its own auth; nginx here rate-limits (a tight per-IP budget
+# on /api/login on top of the app's own limiter) and forwards the headers
+# the app needs: Host unchanged so its Origin/Host CSRF comparison holds,
+# X-Forwarded-For (only trusted from loopback, which this is) so audit
+# entries carry the real client, and X-Forwarded-Proto so the session
+# cookie turns Secure once enable-mcp-https.sh adds TLS to this block.
+cat <<'NGEOF' > /etc/nginx/conf.d/certsight-fleet-manager.conf
+limit_req_zone $binary_remote_addr zone=fm_general:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=fm_login:10m rate=6r/m;
+
+server {
+    listen 8094 default_server;
+    server_name _;
+
+    location = /api/login {
+        limit_req zone=fm_login burst=4 nodelay;
+        proxy_pass http://127.0.0.1:8095;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location / {
+        limit_req zone=fm_general burst=40 nodelay;
+        proxy_pass http://127.0.0.1:8095;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+}
+NGEOF
+restorecon -v /etc/nginx/conf.d/certsight-fleet-manager.conf || true
+semanage port -l | grep -qw 8094 || semanage port -a -t http_port_t -p tcp 8094 || true
+nginx -t && systemctl reload nginx
+fi
 
 echo "=== Java JCA warm-up (fixes policy-load-timing issue on the java-non-fips-cert uprobe) ==="
 # Tetragon only attaches the java-non-fips-cert uprobe to libcert_agent_stub.so

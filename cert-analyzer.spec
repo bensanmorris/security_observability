@@ -7,6 +7,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024 Your Organisation
 
+# ── Build-time feature switch: fleet control ─────────────────────────────────
+# Included by default. `rpmbuild --without control` (extras/build-rpm.sh
+# --without-control) ships a package with no agent/control.py and no
+# agent/control_server.py at all: there is then no control listener to
+# enable -- [control] enabled = true is a logged error -- and no code path
+# that can change a Tetragon policy on request. For deployments whose
+# security review rules out any control surface on the node, this is the
+# variant to build; the health/metrics ports are unaffected either way.
+%bcond_without control
+
 # ── Suppress rpmbuild post-processing that breaks bundled venvs ───────────────
 
 # Do not mangle shebangs inside the bundled virtualenv — third-party packages
@@ -126,6 +136,11 @@ install -d %{buildroot}%{ana_log}
 # Main analyzer script and agent package
 install -m 0755 cert_analyzer.py          %{buildroot}%{ana_home}/cert_analyzer.py
 cp -r agent %{buildroot}%{ana_home}/agent
+%if %{without control}
+# See the %%bcond at the top: strip the fleet-control modules entirely.
+rm -f %{buildroot}%{ana_home}/agent/control.py \
+      %{buildroot}%{ana_home}/agent/control_server.py
+%endif
 
 # Generated Tetragon protos — pre-built and included in the source tarball
 cp -r tetragon %{buildroot}%{ana_home}/tetragon

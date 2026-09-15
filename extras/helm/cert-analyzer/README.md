@@ -81,6 +81,34 @@ To use a locally built image rather than the published GHCR release:
 `global.imageRegistry` once instead of `image.registry` (and the demo ones, if enabled)
 separately -- see "Air-gapped install" below.
 
+### Fleet control (certsight-fleet-manager)
+
+Off by default. To let the [fleet manager](../../fleet-manager/FLEET-MANAGER-README.md)
+enable/disable this release's Tetragon tracing policies per node, cert-analyzer's dedicated
+`[control]` listener (separate from the probe port) is started on each node:
+
+```bash
+--set control.enabled=true \
+--set control.allowedSources=10.0.1.5/32 \
+--set control.token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+The same token goes in the fleet manager's `FLEET_MANAGER_NODE_TOKEN`. Because the DaemonSet
+runs with `hostNetwork: true`, `control.listen` (default `0.0.0.0:8087`) binds on the node
+itself, so restrict it with `control.allowedSources` and the node firewall to the fleet
+manager's host. For mutual TLS instead of (or as well as) the token, create a Secret with
+`tls.crt`/`tls.key` (this node's server cert, SAN covering the node IP) and `ca.crt` (the CA
+that signed the fleet manager's client cert) and set `control.tls.existingSecret`;
+`extras/fleet-manager/gen-control-certs.sh` produces a matching set. Images built with
+`WITH_CONTROL=0` contain no control code at all.
+
+A toggle made through the fleet manager is a node-local override of the cluster-wide
+TracingPolicy CR: Tetragon reloads the CR as enabled when *its* pod restarts, and cert-analyzer
+re-applies the recorded decision on its next policy check. Recorded decisions live on an
+`emptyDir` by default (survives container restarts, not pod deletion); set
+`control.state.hostPath` to a node directory writable by UID 1001 to keep them across pod
+replacement.
+
 See `values.yaml` for every other setting (alert threshold, log level, scan paths, resource
 limits, which TracingPolicies/monitoring resources to install, etc).
 
