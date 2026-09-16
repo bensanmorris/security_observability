@@ -38,8 +38,9 @@ Design and roadmap: [`extras/FLEET-MANAGER-PLAN.md`](../FLEET-MANAGER-PLAN.md).
   node you want to control (`/etc/cert-analyzer/cert-analyzer.conf`).
   Nodes without it still appear, read-only, and the Control column says
   which case it is: **control off** (`[control]` disabled in config),
-  **no control (built without)** (the `nocontrol` package variant — there
-  is nothing to enable), **unreachable** (the node says its listener is
+  **no control (not installed)** (the node has the base `cert-analyzer`
+  only, not `cert-analyzer-control` — there is nothing to enable),
+  **unreachable** (the node says its listener is
   on but this host can't reach it), **unauthorized** / **refused** (the
   node answered 401 / 403), or **read-only client** (the node accepts
   this console's certificate for reads only). The node reports the first
@@ -65,21 +66,25 @@ for the explorer pages. Nothing else on that host changes.
 
 ### 1. Decide which cert-analyzer package your nodes run
 
-Every release ships cert-analyzer in two variants (same package name and
-version, different RPM release / image tag):
+Fleet control is a separate, opt-in package on each node. The base
+`cert-analyzer` RPM and the default container image contain **no
+fleet-control code at all** — nothing to enable, `[control] enabled = true`
+is a logged error — so upgrading an existing node adds no control surface.
 
-| Variant | RPM / image | What it contains |
-|---|---|---|
-| default | `cert-analyzer-<ver>-1.el9.x86_64.rpm`, `…:<tag>-ubi9` | The optional `[control]` listener, **off by default**, loopback by default |
-| `nocontrol` | `cert-analyzer-<ver>-1.nocontrol.el9.x86_64.rpm`, `…:<tag>-ubi9-nocontrol` | **No fleet-control code at all** — nothing to enable, `[control] enabled = true` is a logged error |
+| Package / image | What it adds |
+|---|---|
+| `cert-analyzer-<ver>-1.el9.x86_64.rpm`, `…:<tag>-ubi9` | The monitor. No `[control]` code |
+| `cert-analyzer-control-<ver>-1.el9.x86_64.rpm` (`Requires: cert-analyzer = <ver>`), `…:<tag>-ubi9-control` | The two `[control]` modules: the listener, **off by default**, loopback by default, until `[control] enabled = true` |
 
-The fleet manager works with either. Against `nocontrol` nodes it is a
-read-only fleet console (nodes, matrix, explorers, audit) and says so per
-node — *no control (built without)* — which is the right first deployment
-where a security review has not yet accepted a control surface on nodes.
-Moving a host from `nocontrol` to the default later is
-`dnf downgrade ./cert-analyzer-<ver>-1.el9.x86_64.rpm` (RPM orders
-`1.nocontrol` after `1`); the other direction is a plain `dnf install`.
+The fleet manager works with either. Against nodes without the control
+package it is a read-only fleet console (nodes, matrix, explorers, audit)
+and says so per node — *no control (not installed)* — which is the right
+first deployment where a security review has not yet accepted a control
+surface on nodes. Adding control to a host later is
+`dnf install ./cert-analyzer-control-<ver>-1.el9.x86_64.rpm` (cert-analyzer
+restarts and picks the modules up); `dnf remove cert-analyzer-control`
+withdraws it again. On Kubernetes, switch `image.tag` to the `-control`
+variant (see the chart README).
 
 ### 2. Install the console
 
@@ -122,7 +127,7 @@ FLEET_MANAGER_NODE_TOKEN=<the nodes' [control] token>    # token auth
 
 Without either the console still starts, but every node shows
 *unauthorized* and a warning banner tells the admin so. For a read-only
-console (a `nocontrol` fleet, or a viewer-only deployment) simply leave
+console (a fleet without `cert-analyzer-control`, or a viewer-only deployment) simply leave
 them unset.
 
 The file is annotated; the remaining settings (bind/port, viewer access,
@@ -138,7 +143,7 @@ sudo journalctl -u certsight-fleet-manager -n 5      # "serving on http://127.0.
 Open `http://127.0.0.1:8094` (an SSH tunnel from your workstation is the
 simplest way while it is on loopback). Sign in as `admin`. The **Nodes**
 page should list every node Prometheus is scraping, with the Control
-column saying *control off* or *no control (built without)* — expected,
+column saying *control off* or *no control (not installed)* — expected,
 nothing is enabled on the nodes yet.
 
 The console binds loopback by default. To expose it further, put nginx
@@ -247,7 +252,7 @@ beneath. Anything else names the problem:
 | Badge | Meaning | Fix |
 |---|---|---|
 | *control off* | node reports `[control] enabled = false` | step 5 on that node |
-| *no control (built without)* | node runs the `nocontrol` package | install the default variant, or accept read-only |
+| *no control (not installed)* | node has `cert-analyzer` only | `dnf install cert-analyzer-control` (or the `-control` image), or accept read-only |
 | *unreachable* | node says its listener is on, console can't connect | firewall, `allowed_sources`, tunnel/override URL, wrong port |
 | *unauthorized* | node answered 401 | `FLEET_MANAGER_NODE_TOKEN` ≠ the node's `token` |
 | *refused* | node answered 403 | console address not in `allowed_sources`, or client CN in neither list |
@@ -296,7 +301,8 @@ are enforced server-side (every write route answers `403 read_only`):
   With anonymous viewers and **no** `FLEET_MANAGER_ADMIN_PASSWORD_HASH` at
   all, the console is provably read-only — the process holds no
   credential that can produce a write — and its banner and startup log
-  say so. That, on a `nocontrol` fleet, is the least-privilege deployment.
+  say so. That, on a fleet without `cert-analyzer-control`, is the
+  least-privilege deployment.
 
 This is how the AWS demo is set up (`extras/aws-demo/user-data.sh`):
 anonymous viewers behind nginx on port 8094, admin password generated at
@@ -359,7 +365,7 @@ console says so in its banner, and warns at startup.
 The console is equally plain about what it can do on each node. The
 Nodes page's Control column and the matrix header carry one of:
 `host`/`k8s`/`container` (reachable, writable), `read-only client`, `no
-control (built without)`, `control off`, `unreachable`, `unauthorized`,
+control (not installed)`, `control off`, `unreachable`, `unauthorized`,
 `refused`, `not a control port` — each with the cause in its tooltip. An
 admin on a console with neither a node token nor a client certificate
 gets a warning banner up front rather than a refusal per click, and the
@@ -423,8 +429,9 @@ stance:
 - Node side: the control listener is separate from the probe port, off by
   default, loopback by default, gated by a source allowlist, a bearer
   token and/or mutual TLS with CN-based read/write authorisation — and a
-  package built `--without control` has no listener at all. See the
-  `[control]` section of the main README.
+  node without the `cert-analyzer-control` package has no listener at all,
+  because the code isn't there. See the `[control]` section of the main
+  README.
 
 ## HTTP API
 

@@ -77,7 +77,7 @@ class FakePrometheus:
 
     def add_node(self, node_name, port, version="1.0.0", healthy=1, connected=1, last_event=None, control="enabled"):
         """control: the node's cert_analyzer_config_info{fleet_control} -- 'enabled' |
-        'disabled' | 'unavailable' (built --without control) | None (too old to report it)."""
+        'disabled' | 'unavailable' (cert-analyzer-control not installed) | None (too old to report it)."""
         inst = f"127.0.0.1:{port}"
         self.series.setdefault("cert_analyzer_build_info", []).append(
             {"metric": {"node_name": node_name, "instance": inst, "job": "cert-analyzer",
@@ -112,7 +112,7 @@ class FakeNode:
     """
     A cert-analyzer [control] listener: bearer auth, in-memory policy
     states, and the same response shapes as agent/control_server.py. mode:
-    'ok' | 'disabled' (no listener at all -- [control] off or built without,
+    'ok' | 'disabled' (no listener at all -- [control] off or control package absent,
     exactly what the real thing looks like: connection refused) |
     'forbidden' (bodiless 403 to everything: allowed_sources / unknown CN) |
     'rpc_fail' (PUT answers 502). role is what the node tells the caller it
@@ -1052,7 +1052,7 @@ class TestViewerRole:
             fm.build_config(fm.parse_args([]))
 
     def test_no_control_node_is_reported_not_faulted(self, prom, tmp_path):
-        """A node built --without control has no listener: the console shows it unreachable
+        """A node without cert-analyzer-control has no listener: the console shows it unreachable
         *and* says why (configured = unavailable), every cell read-only, never an error."""
         node = FakeNode("alpha", {"cert-access": "enabled"}, prom=prom, mode="disabled")
         prom.add_node("alpha", node.port, control="unavailable"); prom.set_policies("alpha", node.policies)

@@ -8,9 +8,9 @@ port has to be reachable by kubelet (and so binds every interface) and has
 to stay unauthenticated. Control should be the opposite -- off by default,
 bound to loopback by default, and gated. Keeping it on its own socket
 means an operator can reason about it as one thing: "port 8087, loopback,
-mTLS, these two client CNs", and a package built --without control has no
-listener at all (see agent/control.py's module docstring and
-cert-analyzer.spec's %bcond).
+mTLS, these two client CNs", and a node without the cert-analyzer-control
+subpackage (or the -control image) has no listener at all -- this module
+isn't there (see cert-analyzer.spec).
 
 Gates, in the order a request meets them:
 
@@ -39,6 +39,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import ssl
 import sys
 import threading
@@ -56,6 +57,15 @@ logger = logging.getLogger(__name__)
 
 # Largest request body accepted. A policy toggle is ~20 bytes.
 _MAX_BODY_BYTES = 4096
+
+# Per-connection budgets. The handshake one bounds how long a worker thread
+# waits for a client that connected but never speaks TLS; the request one
+# (applied by the handler's setup()) bounds the request line, headers and
+# body reads, so a client that declares Content-Length: 4096 and sends one
+# byte can't pin a worker. Both are generous for the fleet manager, which
+# is on the same host or one hop away.
+_HANDSHAKE_TIMEOUT_SECONDS = 10
+_REQUEST_TIMEOUT_SECONDS = 10
 
 CAPABILITIES = ['policies']
 
@@ -125,6 +135,54 @@ class ControlSettings:
         if self.mtls:
             modes.append('mtls')
         return modes
+
+
+class _ControlHTTPServer(ThreadingHTTPServer):
+    """
+    ThreadingHTTPServer that does the TLS handshake on the per-connection
+    worker thread, not the acceptor.
+
+    The obvious way to make an HTTPServer speak TLS -- wrap the *listening*
+    socket -- makes SSLSocket.accept() handshake synchronously inside
+    serve_forever(), before the connection is handed to a thread. One peer
+    that connects and then sends nothing holds the acceptor until it hangs
+    up, and nobody else gets in; the allowed_sources check can't help
+    because it runs in the handler, after the handshake. So the listener
+    stays plain, and finish_request() (which ThreadingMixIn already runs on
+    the worker) wraps the accepted socket with a handshake timeout.
+    """
+
+    def __init__(self, address, handler, ssl_context: Optional[ssl.SSLContext] = None):
+        super().__init__(address, handler)
+        self._ssl_context = ssl_context
+
+    def finish_request(self, request, client_address):
+        if self._ssl_context is None:
+            super().finish_request(request, client_address)
+            return
+        request.settimeout(_HANDSHAKE_TIMEOUT_SECONDS)
+        try:
+            tls = self._ssl_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+        except OSError as e:
+            logger.debug(f"Fleet control: could not wrap connection from {client_address[0]}: {e}")
+            return
+        # wrap_socket detached the fd from `request`; from here on `tls` owns
+        # it and ThreadingMixIn's shutdown_request(request) is a no-op, so
+        # this method has to close it on every path.
+        try:
+            tls.do_handshake()
+        except OSError as e:  # ssl.SSLError and socket.timeout are both OSError
+            logger.debug(f"Fleet control: TLS handshake with {client_address[0]} failed: {e}")
+            tls.close()
+            return
+        try:
+            super().finish_request(tls, client_address)
+        finally:
+            try:
+                tls.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            tls.close()
 
 
 class ControlServer:
@@ -201,6 +259,8 @@ class ControlServer:
 
         class _Handler(BaseHTTPRequestHandler):
             server_version = 'cert-analyzer-control'
+            sys_version = ''                      # don't advertise the Python version
+            timeout = _REQUEST_TIMEOUT_SECONDS    # applied to the connection by setup()
 
             def _send_json(self, status: int, body: dict) -> None:
                 body_bytes = (json.dumps(body) + '\n').encode()
@@ -330,7 +390,7 @@ class ControlServer:
             logger.critical(f"Cannot load [control] TLS material: {e}. Fleet control stays OFF.")
             return
         try:
-            self._server = ThreadingHTTPServer((s.host, s.port), self._make_handler())
+            self._server = _ControlHTTPServer((s.host, s.port), self._make_handler(), ssl_context=ctx)
         except OSError as e:
             logger.critical(
                 f"Cannot bind fleet-control listener to {s.host}:{s.port}: {e}. "
@@ -338,8 +398,6 @@ class ControlServer:
             )
             sys.exit(1)
         self._server.daemon_threads = True
-        if ctx is not None:
-            self._server.socket = ctx.wrap_socket(self._server.socket, server_side=True)
         thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         thread.name = 'control-server'
         thread.start()

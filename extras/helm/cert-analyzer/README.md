@@ -99,8 +99,14 @@ itself, so restrict it with `control.allowedSources` and the node firewall to th
 manager's host. For mutual TLS instead of (or as well as) the token, create a Secret with
 `tls.crt`/`tls.key` (this node's server cert, SAN covering the node IP) and `ca.crt` (the CA
 that signed the fleet manager's client cert) and set `control.tls.existingSecret`;
-`extras/fleet-manager/gen-control-certs.sh` produces a matching set. Images built with
-`WITH_CONTROL=0` contain no control code at all.
+`extras/fleet-manager/gen-control-certs.sh` produces a matching set.
+
+The default cert-analyzer image contains **no control code** (it is the container equivalent
+of the base `cert-analyzer` RPM); with `control.enabled=true` you must run the `-control`
+image variant -- `image.tag: <tag>-ubi9-control` (e.g. `latest-ubi9-control`,
+`sha-<commit>-ubi9-control`), the equivalent of also installing the `cert-analyzer-control`
+RPM. On the default image, `control.enabled=true` is a logged error and the node reports
+`fleet_control="unavailable"`; the chart can't detect the mismatch for you.
 
 A toggle made through the fleet manager is a node-local override of the cluster-wide
 TracingPolicy CR: Tetragon reloads the CR as enabled when *its* pod restarts, and cert-analyzer

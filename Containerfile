@@ -173,10 +173,13 @@ RUN pip install --upgrade pip --no-cache-dir \
 # Copy application code
 COPY cert_analyzer.py ./
 COPY agent/ ./agent/
-# Build-time feature switch, same as cert-analyzer.spec's %bcond: WITH_CONTROL=0
-# produces an image with no fleet-control code at all (no control listener can
-# be enabled; [control] enabled = true is a logged error).
-ARG WITH_CONTROL=1
+# Fleet control is opt-in, mirroring the RPM split (cert-analyzer vs the
+# cert-analyzer-control subpackage): the default image has no fleet-control
+# code at all -- no control listener can be enabled, [control] enabled = true
+# is a logged error. WITH_CONTROL=1 keeps the two modules and is what CI
+# publishes under the -control tag suffix; run that image when the Helm
+# chart's control.enabled=true.
+ARG WITH_CONTROL=0
 RUN if [ "${WITH_CONTROL}" != "1" ]; then rm -f agent/control.py agent/control_server.py; fi
 
 # Copy compiled proto bindings from builder stage (not the compiler)

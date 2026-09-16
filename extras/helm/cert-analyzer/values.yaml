@@ -113,8 +113,11 @@ checksumEnabled: true
 # ports.health; off by default upstream). Because the DaemonSet runs with hostNetwork:
 # true, `listen` binds on the node itself: the 0.0.0.0 default here makes it reachable
 # on the node IP, so pair it with `allowedSources` (the fleet manager's address) and the
-# node firewall, and put TLS on it via `tls.existingSecret`. Images built with
-# WITH_CONTROL=0 contain no control code; enabling this there is a logged error.
+# node firewall, and put TLS on it via `tls.existingSecret`.
+#
+# Needs the "-control" image variant (image.tag: <tag>-ubi9-control): the default
+# cert-analyzer image has no control code at all, exactly like the base RPM without the
+# cert-analyzer-control subpackage, and enabling this on it is a logged error.
 #
 # A change made through the fleet manager is a *node-local* override: Tetragon reloads the
 # TracingPolicy CR as enabled whenever its own pod restarts, and cert-analyzer re-applies

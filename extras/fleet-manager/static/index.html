@@ -53,7 +53,7 @@
 
     <section id="view-nodes" class="view" hidden>
       <h2>Nodes</h2>
-      <p class="muted">One row per cert-analyzer node Prometheus is scraping. <em>Control</em> says what this console can do on that node and, when it can't change anything, why: the node's package was built without control, its <code>[control]</code> is off, the listener is on but unreachable from here, or the node accepts this console as a read-only client only. Hover a badge for the detail. Every node shows regardless.</p>
+      <p class="muted">One row per cert-analyzer node Prometheus is scraping. <em>Control</em> says what this console can do on that node and, when it can't change anything, why: the node has no fleet-control code installed (<code>cert-analyzer-control</code> / the <code>-control</code> image), its <code>[control]</code> is off, the listener is on but unreachable from here, or the node accepts this console as a read-only client only. Hover a badge for the detail. Every node shows regardless.</p>
       <div class="table-wrap"><table id="nodes-table"></table></div>
     </section>
 

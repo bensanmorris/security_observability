@@ -13,15 +13,15 @@ from .constants import (
 )
 from .analyzer import CertificateAnalyzer
 from .health import HealthServer
-# Fleet control is optional at build time -- see cert-analyzer.spec's
-# %bcond and agent/control_server.py. A package built without it has no
-# agent/control.py, and [control] enabled = true is then a logged error,
-# not a listener.
+# Fleet control is a separate package: cert-analyzer-control (RPM) or the
+# -control image tag -- see cert-analyzer.spec and agent/control_server.py.
+# The base package has no agent/control.py, and [control] enabled = true is
+# then a logged error, not a listener.
 try:
     from .control import MIN_CONTROL_TOKEN_LENGTH, PolicyDesiredState
     from .control_server import ControlServer, ControlSettings
     CONTROL_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised by the --without control package
+except ImportError:  # pragma: no cover - exercised by the base package
     CONTROL_AVAILABLE = False
 from .kafka import KafkaPublisher
 from .metrics import start_metrics_server
@@ -335,7 +335,8 @@ def main():
     control_state_path = cfg(cp, 'control', 'state_path', 'CONTROL_STATE_PATH', '/var/lib/cert-analyzer/policy-state.json')
     control_settings = None
     if control_enabled and not CONTROL_AVAILABLE:
-        logger.error("[control] enabled but fleet control is not built into this package (built --without control) -- staying OFF")
+        logger.error("[control] enabled but the fleet-control modules are not installed "
+                     "(install cert-analyzer-control, or use the -control image) -- staying OFF")
         control_enabled = False
     if control_enabled:
         control_settings, control_problem = build_control_settings(cp)

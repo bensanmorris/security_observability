@@ -89,7 +89,7 @@
     }
     switch (c.configured) {
       case "unavailable":
-        return wrap("no control (built without)", "muted", "This node's cert-analyzer package was built --without control: there is no listener to enable. Read-only by construction.");
+        return wrap("no control (not installed)", "muted", "This node has no fleet-control code: the cert-analyzer-control package isn't installed (or it runs the default image, not the -control variant). There is no listener to enable; read-only by construction.");
       case "disabled":
         return wrap("control off", "muted", "This node has [control] enabled = false (the default). Read-only until an operator turns it on in cert-analyzer.conf.");
       case "enabled":
@@ -104,7 +104,7 @@
   function cellReason(c, n) {
     if (isViewer()) return "read-only account: shown for illustration, the server refuses every change";
     if (!n.reachable) {
-      if (n.configured === "unavailable") return "this node's cert-analyzer was built without control: nothing can toggle it remotely";
+      if (n.configured === "unavailable") return "this node has no fleet-control code (cert-analyzer-control not installed / default image): nothing can toggle it remotely";
       if (n.configured === "disabled") return "this node has [control] disabled; enable it in cert-analyzer.conf first";
       if (n.error === "unauthorized") return "this console's node token isn't accepted by this node";
       if (n.error === "forbidden") return "this node refuses this console (allowed_sources / client CN)";

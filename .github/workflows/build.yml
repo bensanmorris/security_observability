@@ -87,10 +87,12 @@ jobs:
       contents: read
       packages: write
 
-    # Two variants per UBI base: the default build, and "-nocontrol" built
-    # with WITH_CONTROL=0 -- an image with no fleet-control code at all (see
-    # the Containerfile / cert-analyzer.spec's %bcond). Tagged and archived
-    # with a -nocontrol suffix so the two never collide.
+    # Two variants per UBI base. The default image has no fleet-control code
+    # at all (the container equivalent of the base cert-analyzer RPM); the
+    # "-control" image is built with WITH_CONTROL=1 and is the one to run
+    # when the Helm chart's control.enabled=true (the equivalent of also
+    # installing cert-analyzer-control). Tagged and archived with a -control
+    # suffix so the two never collide.
     strategy:
       fail-fast: false
       matrix:
@@ -98,19 +100,19 @@ jobs:
           - ubi-version: "8"
             python-version: "311"
             variant: ""
-            with-control: "1"
+            with-control: "0"
           - ubi-version: "9"
             python-version: "311"
             variant: ""
-            with-control: "1"
+            with-control: "0"
           - ubi-version: "8"
             python-version: "311"
-            variant: "-nocontrol"
-            with-control: "0"
+            variant: "-control"
+            with-control: "1"
           - ubi-version: "9"
             python-version: "311"
-            variant: "-nocontrol"
-            with-control: "0"
+            variant: "-control"
+            with-control: "1"
 
     steps:
     - name: Checkout code
@@ -210,7 +212,7 @@ jobs:
         echo '```' >> $GITHUB_STEP_SUMMARY
 
   build-rpm:
-    name: Build RPM (RHEL ${{ matrix.ubi-version }}${{ matrix.variant }})
+    name: Build RPM (RHEL ${{ matrix.ubi-version }})
     runs-on: ubuntu-latest
     needs: changes
     # Always run on tags and PRs; on branch pushes only run if relevant files changed
@@ -222,15 +224,13 @@ jobs:
       image: registry.access.redhat.com/ubi${{ matrix.ubi-version }}/ubi:latest
     permissions:
       contents: read
-    # Two variants per RHEL base, distinguished by the RPM Release field:
-    # "1" (default) and "1.nocontrol" (rpmbuild --without control: no
-    # fleet-control code in the package at all). Same package name, so the
-    # nocontrol build installs and upgrades exactly like the default one.
+    # One build per RHEL base produces two packages from the one spec:
+    # cert-analyzer (no fleet-control code) and cert-analyzer-control (the
+    # two [control] modules, Requires: cert-analyzer = same version-release).
     strategy:
       fail-fast: false
       matrix:
         ubi-version: ["8", "9"]
-        variant: ["", "-nocontrol"]
 
     steps:
     - name: Install build prerequisites
@@ -315,33 +315,30 @@ jobs:
 
     - name: Build RPM
       run: |
-        EXTRA=()
-        RELEASE="${{ steps.version.outputs.release }}"
-        if [[ "${{ matrix.variant }}" == "-nocontrol" ]]; then
-          EXTRA=(--without control)
-          RELEASE="${RELEASE}.nocontrol"
-        fi
         rpmbuild -ba \
           --define "_topdir ${HOME}/rpmbuild" \
           --define "_version ${{ steps.version.outputs.value }}" \
-          --define "_release ${RELEASE}" \
+          --define "_release ${{ steps.version.outputs.release }}" \
           --define "_tetragon_version ${{ env.TETRAGON_VERSION }}" \
-          "${EXTRA[@]}" \
           "${HOME}/rpmbuild/SPECS/cert-analyzer.spec"
-        # The variant must really be stripped -- fail the build if not.
-        RPM=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" | head -1)
-        if [[ "${{ matrix.variant }}" == "-nocontrol" ]]; then
-          ! rpm -qlp "${RPM}" | grep -q "agent/control"
-        else
-          rpm -qlp "${RPM}" | grep -q "agent/control_server.py"
-        fi
+        # The split must really hold -- fail the build if the base package
+        # carries any control code, or the subpackage lacks it.
+        BASE=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-[0-9]*.rpm" | head -1)
+        CONTROL=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-control-*.rpm" | head -1)
+        test -n "${BASE}" && test -n "${CONTROL}"
+        ! rpm -qlp "${BASE}" | grep -q "agent/control"
+        rpm -qlp "${CONTROL}" | grep -q "agent/control_server.py"
+        rpm -qpR "${CONTROL}" | grep -q "^cert-analyzer = "
 
     - name: Locate built RPMs
       id: rpm
       run: |
-        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" | head -1)
-        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+        BASE_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-[0-9]*.rpm" | head -1)
+        CONTROL_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-control-*.rpm" | head -1)
+        echo "path=${BASE_PATH}" >> $GITHUB_OUTPUT
+        echo "name=$(basename ${BASE_PATH})" >> $GITHUB_OUTPUT
+        echo "control_path=${CONTROL_PATH}" >> $GITHUB_OUTPUT
+        echo "control_name=$(basename ${CONTROL_PATH})" >> $GITHUB_OUTPUT
 
     - name: Upload RPM as build artifact
       uses: actions/upload-artifact@v4
@@ -350,14 +347,21 @@ jobs:
         path: ${{ steps.rpm.outputs.path }}
         retention-days: 30
 
+    - name: Upload control subpackage as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.control_name }}
+        path: ${{ steps.rpm.outputs.control_path }}
+        retention-days: 30
+
     - name: Build summary
       run: |
-        echo "## 📦 RPM Build (RHEL ${{ matrix.ubi-version }}${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
+        echo "## 📦 RPM Build (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**RPMs:** \`${{ steps.rpm.outputs.name }}\`, \`${{ steps.rpm.outputs.control_name }}\`" >> $GITHUB_STEP_SUMMARY
 
   build-test-server-rpm:
     name: Build Test Server RPM (RHEL ${{ matrix.ubi-version }})
@@ -1309,13 +1313,13 @@ jobs:
       id: assets
       run: |
         POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
-        CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" ! -name "*-nocontrol-*" | head -1)
-        CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" ! -name "*-nocontrol-*" | head -1)
-        CONTAINER_UBI8_NOCONTROL_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-nocontrol-*.tar.gz" | head -1)
-        CONTAINER_UBI9_NOCONTROL_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-nocontrol-*.tar.gz" | head -1)
-        echo "container_ubi8_nocontrol_path=${CONTAINER_UBI8_NOCONTROL_PATH}" >> $GITHUB_OUTPUT
-        echo "container_ubi9_nocontrol_path=${CONTAINER_UBI9_NOCONTROL_PATH}" >> $GITHUB_OUTPUT
-        echo "container_ubi9_nocontrol_name=$(basename ${CONTAINER_UBI9_NOCONTROL_PATH})" >> $GITHUB_OUTPUT
+        CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" ! -name "*-control-*" | head -1)
+        CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" ! -name "*-control-*" | head -1)
+        CONTAINER_UBI8_CONTROL_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-control-*.tar.gz" | head -1)
+        CONTAINER_UBI9_CONTROL_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-control-*.tar.gz" | head -1)
+        echo "container_ubi8_control_path=${CONTAINER_UBI8_CONTROL_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi9_control_path=${CONTAINER_UBI9_CONTROL_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi9_control_name=$(basename ${CONTAINER_UBI9_CONTROL_PATH})" >> $GITHUB_OUTPUT
         GENERATOR_PATH=$(find ./release-assets -name "cert-test-generator-*.tar.gz" | head -1)
         echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
         echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
@@ -1363,8 +1367,8 @@ jobs:
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
-          ${{ steps.assets.outputs.container_ubi8_nocontrol_path }}
-          ${{ steps.assets.outputs.container_ubi9_nocontrol_path }}
+          ${{ steps.assets.outputs.container_ubi8_control_path }}
+          ${{ steps.assets.outputs.container_ubi9_control_path }}
           ${{ steps.assets.outputs.generator_path }}
           ${{ steps.assets.outputs.probe_tests_path }}
           ${{ steps.assets.outputs.dashboard_path }}
@@ -1374,14 +1378,13 @@ jobs:
         body: |
           ## cert-analyzer ${{ github.ref_name }}
 
-          Every cert-analyzer artifact below comes in two variants. The default includes
-          the optional fleet-control listener (`[control]` in `cert-analyzer.conf`, off by
-          default, loopback by default -- see the README). The **`nocontrol`** variant
-          (`-1.nocontrol` RPM release / `-nocontrol` image tag, built with
-          `rpmbuild --without control` / `WITH_CONTROL=0`) contains **no fleet-control
-          code at all**: there is no listener to enable, and enabling `[control]` there
-          is a logged error. Pick it for hosts whose security review rules out any
-          control surface; the health/metrics ports are identical in both.
+          The `cert-analyzer` RPM and the default container images contain **no
+          fleet-control code**: there is no `[control]` listener to enable, and setting
+          `[control] enabled = true` there is a logged error -- upgrading adds no control
+          surface. Fleet control (for `certsight-fleet-manager`) is a separate opt-in:
+          the **`cert-analyzer-control`** RPM (the two `[control]` modules, version-locked
+          to `cert-analyzer`) or the **`-control`** image tag. Off by default and loopback
+          by default even then -- see the README.
 
           ### Container Images
 
@@ -1389,8 +1392,8 @@ jobs:
           ```
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9
-          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8-nocontrol
-          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9-nocontrol
+          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8-control   # with fleet control
+          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9-control   # with fleet control
           ghcr.io/${{ github.repository_owner }}/cert-test-generator:${{ github.ref_name }}
           ghcr.io/${{ github.repository_owner }}/cert-test-server:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-test-server:${{ github.ref_name }}-ubi9
@@ -1419,9 +1422,9 @@ jobs:
           ```bash
           sudo dnf install ./cert-analyzer-<version>-1.el8.x86_64.rpm             # RHEL 8
           sudo dnf install ./cert-analyzer-<version>-1.el9.x86_64.rpm             # RHEL 9
-          sudo dnf install ./cert-analyzer-<version>-1.nocontrol.el9.x86_64.rpm   # RHEL 9, no fleet-control code (see above)
+          # Only on nodes certsight-fleet-manager should be able to drive:
+          sudo dnf install ./cert-analyzer-control-<version>-1.el9.x86_64.rpm     # adds the [control] modules; `dnf remove cert-analyzer-control` withdraws them
           ```
-          Both variants are the same package name and version; RPM orders `1.nocontrol` after `1`, so default → nocontrol is `dnf install ./<nocontrol file>` and nocontrol → default is `dnf downgrade ./<default file>`. `rpm -q --qf '%{RELEASE}\n' cert-analyzer` shows which is installed.
 
           **Java agent** (JVM certificate interception — install on hosts running JVMs):
           ```bash

@@ -192,7 +192,7 @@ sudo systemctl enable --now cert-analyzer
 
 **[control]**
 
-Fleet control for [`certsight-fleet-manager`](extras/fleet-manager/FLEET-MANAGER-README.md): a *separate* listener from the `[health]` port, off by default, loopback by default. Packages built `--without control` (`extras/build-rpm.sh --without-control`, container `--build-arg WITH_CONTROL=0`) contain no control code at all. Every policy change is logged at WARNING with the caller's address and, under mTLS, certificate CN.
+Fleet control for [`certsight-fleet-manager`](extras/fleet-manager/FLEET-MANAGER-README.md): a *separate* listener from the `[health]` port, off by default, loopback by default. The code behind it is **not in the base package**: the `cert-analyzer` RPM and the default container image contain no control code at all, so upgrading adds no control surface. Install the `cert-analyzer-control` RPM (same version, `Requires: cert-analyzer`) or run the `-control` image tag on the nodes a fleet manager should drive; `dnf remove cert-analyzer-control` withdraws it again. Every policy change is logged at WARNING with the caller's address and, under mTLS, certificate CN.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -206,7 +206,7 @@ Fleet control for [`certsight-fleet-manager`](extras/fleet-manager/FLEET-MANAGER
 | `readonly_clients` | _(unset)_ | Client-certificate CNs allowed to read only. `GET /control/info` tells every caller its own `role` (`operator`/`viewer`) so a read-only fleet manager can show itself as such |
 | `state_path` | `/var/lib/cert-analyzer/policy-state.json` | Recorded enable/disable decisions, re-applied whenever Tetragon reports a policy in the other state (a bare gRPC disable does not survive a Tetragon restart). Re-applications are counted in `cert_analyzer_policy_reconciliations_total` |
 
-Any invalid combination (short token, no authentication at all, half a TLS pair, unparseable `listen`/`allowed_sources`) keeps control **off** and logs an error rather than exiting — losing detection over a control-plane typo would be the wrong trade. Whatever the outcome, the node reports it as `cert_analyzer_config_info{fleet_control="enabled"|"disabled"|"unavailable"}` (`unavailable` = built `--without control`), which is how the fleet manager distinguishes a node that can't be controlled from one it merely can't reach.
+Any invalid combination (short token, no authentication at all, half a TLS pair, unparseable `listen`/`allowed_sources`) keeps control **off** and logs an error rather than exiting — losing detection over a control-plane typo would be the wrong trade. Whatever the outcome, the node reports it as `cert_analyzer_config_info{fleet_control="enabled"|"disabled"|"unavailable"}` (`unavailable` = `cert-analyzer-control` not installed / default image), which is how the fleet manager distinguishes a node that can't be controlled from one it merely can't reach.
 
 **[alerting]**
 
@@ -319,5 +319,5 @@ curl -s http://localhost:9090/metrics | grep tls_certificate_expiry_days
 - [AWS deployment demo](extras/aws-demo/README.md) - Stand up the full CertSight stack on a single EC2 instance with public dashboard and test console URLs
 - [AWS Analyzer + Dashboard deployment](extras/aws-marketplace/README.md) - Deploy CertSight across an AWS fleet as two products (a fleet of Analyzer instances + one Dashboard instance) via a CloudFormation quick-launch template with pre-built AMIs
 - [MCP server](extras/mcp-server/MCP-SERVER-README.md) - Read-only MCP tools (fleet inventory, blast radius, FIPS rollout, chain explorer) for querying CertSight from Claude Desktop/Code
-- [Fleet manager](extras/fleet-manager/FLEET-MANAGER-README.md) - Web console for the fleet: node inventory, a nodes × policies matrix, per-node and fleet-wide Tetragon policy enable/disable that survives Tetragon restarts, the fleet explorers, and an audit log; admin and read-only viewer roles. [Installation guide](extras/fleet-manager/FLEET-MANAGER-README.md#installation) covers the default vs `nocontrol` node packages and the per-node `[control]` setup
+- [Fleet manager](extras/fleet-manager/FLEET-MANAGER-README.md) - Web console for the fleet: node inventory, a nodes × policies matrix, per-node and fleet-wide Tetragon policy enable/disable that survives Tetragon restarts, the fleet explorers, and an audit log; admin and read-only viewer roles. [Installation guide](extras/fleet-manager/FLEET-MANAGER-README.md#installation) covers the opt-in `cert-analyzer-control` node package and the per-node `[control]` setup
 - [Observe Inc integration guide](extras/OBSERVE-INTEGRATION.md) - Pointing an Observe-bound OpenTelemetry Collector's Prometheus receiver at cert-analyzer's metrics endpoint

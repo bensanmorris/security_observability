@@ -28,11 +28,13 @@ What gets installed on the instance:
   audit log, every toggle disabled and refused server-side); **changing**
   a policy needs the admin login, because it can switch a node's Tetragon
   policies off.
-  `[control]` is enabled on this box's cert-analyzer (on its loopback-only
-  listener, since the manager is local), and `deploy-k8s-node.sh` hands the
-  same token to the k8s node (listener on the node IP, restricted to this
-  box by `allowed_sources`, the SG and firewalld), so both nodes appear in
-  its policy matrix. The demo uses token auth inside the VPC; the mutual-TLS
+  Fleet control is opt-in per node: the base `cert-analyzer` RPM has no
+  `[control]` code, so this box additionally installs `cert-analyzer-control`
+  and enables `[control]` on its loopback-only listener (the manager is
+  local); `deploy-k8s-node.sh` hands the same token to the k8s node, whose
+  chart install then uses the `-control` cert-analyzer image tag (listener
+  on the node IP, restricted to this box by `allowed_sources`, the SG and
+  firewalld), so both nodes appear in its policy matrix. The demo uses token auth inside the VPC; the mutual-TLS
   option is documented in the fleet manager README. Only present when the release being deployed ships the
   `certsight-fleet-manager` RPM (first shipped after v0.99).
 

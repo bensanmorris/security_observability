@@ -54,7 +54,9 @@ CERTSIGHT_GIT_REF="${CERTSIGHT_GIT_REF:-k8s-pod-attribution-demo}"
 # on GHCR (known gap), so for a real/live deployment pass the immutable
 # sha-<commit>-ubi9 for the release you want instead, e.g.
 # K8S_ANALYZER_IMAGE_TAG=sha-f5c492d-ubi9 for v0.97 (confirm the mapping via
-# `git rev-parse vX.Y`).
+# `git rev-parse vX.Y`). When the main box hands over a fleet-control token
+# (below), user-data-k8s-node.sh appends "-control" to cert-analyzer's tag
+# for you -- the image variant that carries the [control] modules.
 K8S_ANALYZER_IMAGE_TAG="${K8S_ANALYZER_IMAGE_TAG:-}"
 
 command -v aws >/dev/null || { echo "AWS CLI not found."; exit 1; }

@@ -6,9 +6,14 @@ fleet-manager service, `extras/fleet-manager/`) and the packaging half of
 working tree; steps 1–2 verified live on the dev box. The step-3 exit
 criteria run on the two-node AWS demo has not been done. Also in the tree
 (same day): the console-side `viewer` role and anonymous-viewer mode, the
-per-node honesty work (below), and CI building the `nocontrol` variant of
-every cert-analyzer artifact — the variant expected to be offered first,
-since a control port on every node is the hard sell.
+per-node honesty work (below), and the packaging split (2026-09-16): the
+base `cert-analyzer` RPM / default image carry **no** control code, and
+fleet control is the separate `cert-analyzer-control` subpackage
+(`Requires: cert-analyzer = <ver>`) / `-control` image tag. Chosen over the
+earlier `--without control` build variant so that upgrading an already
+trusted artifact never adds a control surface, "control" is a positive
+opt-in by name, and there is no same-name/two-releases RPM ordering trap
+(rpm sorts `1.nocontrol` *after* `1`).
 
 ## Problem
 
@@ -204,8 +209,9 @@ moved off the health port onto a dedicated `ControlServer` (`[control]
 listen`, loopback by default); `allowed_sources` CIDRs are checked before
 auth; `tls_cert`/`tls_key` give HTTPS and `tls_client_ca` mutual TLS with
 CN-based `authorized_clients` / `readonly_clients`; and the whole feature
-can be compiled out (`rpmbuild --without control`, `WITH_CONTROL=0`) so a
-package contains no control code at all. `gen-control-certs.sh` in the
+lives in its own package (`cert-analyzer-control` RPM; `WITH_CONTROL=1` →
+`-control` image) so the base package contains no control code at all.
+`gen-control-certs.sh` in the
 fleet manager builds a matching PKI. See the `[control]` table in the
 main README.
 
@@ -230,7 +236,7 @@ Node side: `/control/info` tells each caller its own role (`operator` /
 Together these let the UI say, per node, exactly why a cell can't be
 toggled rather than showing a button that fails: *read-only account*,
 *read-only client* (our CN is in the node's `readonly_clients`), *no
-control (built without)*, *control off*, *unreachable* (listener on, but
+control (not installed)*, *control off*, *unreachable* (listener on, but
 not from here), *unauthorized* (401), *refused* (403). The old
 "bodiless 404 = disabled" heuristic was dropped — with a dedicated
 listener, a disabled node is connection-refused, and only Prometheus can

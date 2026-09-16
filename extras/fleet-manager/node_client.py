@@ -48,7 +48,7 @@ class NodeTls:
 
 # Error codes surfaced to the UI. "unreachable" covers everything that
 # never got an HTTP answer: no listener (the node's [control] is off, or
-# the package was built without it), a firewall, a loopback listener with
+# cert-analyzer-control isn't installed), a firewall, a loopback listener with
 # no tunnel, a TLS failure -- fleet_state.py tells those apart with the
 # node's cert_analyzer_config_info{fleet_control=...} from Prometheus.
 # "unauthorized" is a 401 (token mismatch); "forbidden" is a 403 (our

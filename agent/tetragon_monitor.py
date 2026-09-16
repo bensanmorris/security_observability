@@ -17,15 +17,16 @@ from typing import Dict, Set, Tuple
 from tetragon import sensors_pb2
 
 from .constants import _POLICY_STATE_NAMES
-# Fleet control is optional at build time (cert-analyzer.spec --without
-# control ships no agent/control.py). Everything below that needs it checks
-# CONTROL_AVAILABLE; the policy check itself never depends on it.
+# Fleet control is a separate package (cert-analyzer-control, or the
+# -control image): the base cert-analyzer ships no agent/control.py.
+# Everything below that needs it checks CONTROL_AVAILABLE; the policy check
+# itself never depends on it.
 try:
     from .control import (
         POLICY_NAME_RE, observed_matches_desired, policy_key, set_tracing_policy_enabled,
     )
     CONTROL_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised by the --without control package
+except ImportError:  # pragma: no cover - exercised by the base package
     CONTROL_AVAILABLE = False
 
 # Logger name is hardcoded (not __name__) so log records from this mixin keep
@@ -169,7 +170,16 @@ class _TetragonMonitorMixin:
         Stale series are removed when a policy is deleted or changes state,
         so the metrics always reflect the live policy table. Failures are
         logged as warnings and never propagate.
+
+        Callers: the main thread at startup and on each event-stream
+        reconnect, the policy monitor thread, and -- with [control] on --
+        every HTTP worker handling a PUT. One run at a time, under
+        _policy_check_lock (see analyzer.py).
         """
+        with self._policy_check_lock:
+            self._check_tetragon_policies_locked(stub)
+
+    def _check_tetragon_policies_locked(self, stub) -> None:
         if not hasattr(sensors_pb2, 'ListTracingPoliciesRequest'):
             logger.warning(
                 "ListTracingPoliciesRequest not available in Tetragon protobuf "
@@ -277,6 +287,8 @@ class _TetragonMonitorMixin:
         longer lists are included with stale=True so the fleet manager can
         show them rather than have them vanish.
         """
+        if not CONTROL_AVAILABLE:  # base package: no control server can call this, but be safe
+            return {'policies': []}
         state = getattr(self, '_policy_state', None)
         desired = state.all() if state is not None else {}
         observed = list(getattr(self, '_last_policy_list', []) or [])
@@ -323,10 +335,19 @@ class _TetragonMonitorMixin:
         """
         stub = getattr(self, '_tetragon_stub', None)
         state = getattr(self, '_policy_state', None)
-        if stub is None or state is None:
+        if not CONTROL_AVAILABLE or stub is None or state is None:
             return 503, {'error': 'tetragon_not_connected'}
         if not POLICY_NAME_RE.match(name) or (namespace and not POLICY_NAME_RE.match(namespace)):
             return 400, {'error': 'invalid_policy_name'}
+        # Held across refresh -> record -> RPC -> refresh so the policy
+        # monitor's reconcile can't see the new desired flag against the
+        # old observed state mid-way and issue the same RPC first, which
+        # would make Tetragon refuse ours and turn a successful toggle into
+        # a 502. Two concurrent PUTs serialise here for the same reason.
+        with self._policy_check_lock:
+            return self._set_policy_enabled_locked(stub, state, name, namespace, enabled)
+
+    def _set_policy_enabled_locked(self, stub, state, name: str, namespace: str, enabled: bool) -> tuple:
         try:
             self.check_tetragon_policies(stub)
         except Exception as e:  # never expected -- check_tetragon_policies swallows

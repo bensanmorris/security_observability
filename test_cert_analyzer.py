@@ -6689,7 +6689,7 @@ class TestControlSettings:
         assert s is None and 'allowed_sources' in problem
 
     def test_control_not_built_in_keeps_it_off(self, monkeypatch, caplog):
-        """A --without control package: [control] enabled is an error, not a listener."""
+        """Base package (no cert-analyzer-control): [control] enabled is an error, not a listener."""
         import agent.config as cfgmod
         monkeypatch.setattr(cfgmod, 'CONTROL_AVAILABLE', False)
         started = []
@@ -6909,6 +6909,46 @@ class TestControlTls:
             with pytest.raises(Exception):
                 _request(cs.port, '/control/info', token=TOKEN)
         finally:
+            cs.stop()
+
+    def test_idle_tcp_peer_does_not_block_other_clients(self, analyzer, tmp_path):
+        """
+        Regression: the handshake used to run on the acceptor thread (the
+        listening socket was ssl-wrapped), so one peer that connected and
+        sent nothing stalled every other client until it hung up. It must
+        now cost that peer its own worker thread and nothing else.
+        """
+        import socket as _socket
+        pki = _ControlCerts(tmp_path)
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, tls_cert=pki.server_cert, tls_key=pki.server_key)
+        idle = _socket.create_connection(('127.0.0.1', cs.port))
+        try:
+            time.sleep(0.2)                         # let the acceptor hand it off
+            status, body, _ = _request_tls(cs.port, '/control/info', token=TOKEN, ca=pki.ca_path)
+            assert status == 200 and body['auth'] == ['token']
+        finally:
+            idle.close()
+            cs.stop()
+
+    def test_idle_tcp_peer_is_dropped_after_handshake_timeout(self, analyzer, tmp_path, monkeypatch):
+        import socket as _socket
+        import agent.control_server as control_server
+        monkeypatch.setattr(control_server, '_HANDSHAKE_TIMEOUT_SECONDS', 0.5)
+        pki = _ControlCerts(tmp_path)
+        _control_analyzer(analyzer, tmp_path, _MockControlStub())
+        cs = _control_server(analyzer, tls_cert=pki.server_cert, tls_key=pki.server_key)
+        before = threading.active_count()
+        idle = _socket.create_connection(('127.0.0.1', cs.port))
+        try:
+            idle.settimeout(3)
+            assert idle.recv(1) == b''              # server closed on us: EOF, not a hang
+            deadline = time.time() + 3
+            while threading.active_count() > before and time.time() < deadline:
+                time.sleep(0.05)
+            assert threading.active_count() == before, "handshake-timeout worker thread was not reaped"
+        finally:
+            idle.close()
             cs.stop()
 
     def test_mtls_requires_client_cert(self, analyzer, tmp_path):

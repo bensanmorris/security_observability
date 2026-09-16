@@ -68,15 +68,20 @@ tar -xzf tetragon-policies.tar.gz
 # legitimately fail on a stock image -- don't let that abort the whole install.
 ./tetragon-policies/apply-policies.sh || true
 
-echo "=== [6/9] CertSight RPMs (cert-analyzer, Java cert-agent, test console, MCP server, fleet manager) ==="
+echo "=== [6/9] CertSight RPMs (cert-analyzer + control, Java cert-agent, test console, MCP server, fleet manager) ==="
 mkdir -p rpms && cd rpms
 for pkg in cert-analyzer cert-agent-jni cert-agent-deployer certsight-test-server certsight-mcp; do
     curl -fsSL -O "${RELEASE_BASE}/${pkg}-${CERTSIGHT_VERSION#v}-1.el9.x86_64.rpm"
 done
-# The fleet manager is noarch and first shipped after v0.99 -- tolerate a
-# release that predates it so an older CERTSIGHT_VERSION still deploys; the
-# fleet-manager section further down is skipped when the package isn't
-# installed.
+# Fleet control is a separate, deliberately opt-in package: the base
+# cert-analyzer RPM has no [control] code at all. This box runs the fleet
+# manager and is one of the nodes it drives, so it gets cert-analyzer-control
+# too. Both it and the (noarch) fleet manager first shipped after v0.99 --
+# tolerate a release that predates them so an older CERTSIGHT_VERSION still
+# deploys; the [control] and fleet-manager sections further down then find
+# nothing to enable and are skipped.
+curl -fsSL -O "${RELEASE_BASE}/cert-analyzer-control-${CERTSIGHT_VERSION#v}-1.el9.x86_64.rpm" \
+    || echo "    no cert-analyzer-control RPM in ${CERTSIGHT_VERSION} -- this node will not be fleet-controllable"
 curl -fsSL -O "${RELEASE_BASE}/certsight-fleet-manager-${CERTSIGHT_VERSION#v}-1.el9.noarch.rpm" \
     || echo "    no certsight-fleet-manager RPM in ${CERTSIGHT_VERSION} -- skipping the fleet manager"
 # Installed together so dnf can resolve the local inter-package deps in one
@@ -98,6 +103,10 @@ CONF=/etc/cert-analyzer/cert-analyzer.conf
 # share it) and for the fleet manager's own config below. The listener
 # keeps its loopback default (127.0.0.1:8087): the fleet manager runs on
 # this same box, so nothing control-related is reachable from outside it.
+# set +x for the same reason as the Grafana password below: this script's
+# trace goes to a world-readable install log, and the token would otherwise
+# appear in it three times (the assignment, the echo, the sed).
+set +x
 CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 install -m 0600 /dev/null /root/certsight-control-token
 echo "${CONTROL_TOKEN}" > /root/certsight-control-token
@@ -108,6 +117,8 @@ sed -i \
     -e 's/^event_rate_metrics_enabled = false/event_rate_metrics_enabled = true/' \
     -e "s|^#token =.*|token = ${CONTROL_TOKEN}|" \
     "${CONF}"
+set -x
+echo "Fleet-control token generated -- see /root/certsight-control-token (root-only) on this instance"
 
 echo "=== [8/9] Kafka (single-node, throwaway, KRaft mode) ==="
 dnf -y install java-11-openjdk-headless || true
@@ -339,6 +350,9 @@ echo "=== Fleet manager (policy control console -- read-only for visitors, admin
 # nginx below is the public side on 8094, same split as the MCP server.
 # This box's own node is reached on its loopback [control] listener; the
 # k8s node on its node IP (see deploy-k8s-node.sh / user-data-k8s-node.sh).
+# set +x: the password, its hash and the node token all pass through here
+# and none of them belong in the install log (see the Grafana section).
+set +x
 FM_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(12))')"
 install -m 0600 /dev/null /root/certsight-fleet-manager-password
 echo "${FM_PASSWORD}" > /root/certsight-fleet-manager-password
@@ -355,6 +369,9 @@ FLEET_MANAGER_AUDIT_LOG=/var/lib/certsight-fleet-manager/audit.jsonl
 FMEOF
 chown root:certsight-fleet-manager /etc/certsight-fleet-manager/fleet-manager.conf
 chmod 640 /etc/certsight-fleet-manager/fleet-manager.conf
+unset FM_PASSWORD FM_HASH
+set -x
+echo "Fleet manager admin password generated -- see /root/certsight-fleet-manager-password (root-only) on this instance"
 systemctl reset-failed certsight-fleet-manager || true
 systemctl enable --now certsight-fleet-manager
 

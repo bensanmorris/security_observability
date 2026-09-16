@@ -279,9 +279,10 @@ class CertificateAnalyzer(
             'kafka_plain_enabled':                  str(kafka_publisher.plain_enabled).lower() if kafka_publisher is not None else 'false',
             'kafka_connect_enabled':                str(kafka_publisher.connect_enabled).lower() if kafka_publisher is not None else 'false',
             'prometheus_port':                     str(metrics_port),
-            # 'enabled' | 'disabled' | 'unavailable' (package built --without
-            # control). Lets the fleet manager say *why* a node's control
-            # listener isn't answering instead of a blanket "unreachable".
+            # 'enabled' | 'disabled' | 'unavailable' (cert-analyzer-control
+            # not installed / base image). Lets the fleet manager say *why* a
+            # node's control listener isn't answering instead of a blanket
+            # "unreachable".
             'fleet_control':                       fleet_control,
         })
         self.metrics.scan_interval_seconds.labels(node_name=_NODE_NAME).set(scan_interval_seconds)
@@ -325,6 +326,16 @@ class CertificateAnalyzer(
         self._policy_state = policy_state
         self._last_policy_list: list = []
         self._tetragon_stub = None
+        # Serialises check_tetragon_policies() and the control PUT path. The
+        # check is a read-modify-write of _known_policy_labels / the
+        # tetragon_policy_info gauge and used to run from the main thread
+        # (once) and the policy monitor only; with [control] it also runs on
+        # every HTTP worker that handles a PUT, and two interleaved runs
+        # can leave both the old and new state series live and double-issue
+        # the same configure RPC (which Tetragon then rejects). Re-entrant
+        # because set_policy_enabled_for_control holds it across
+        # record -> RPC -> re-check, each of which takes it again.
+        self._policy_check_lock = threading.RLock()
         # Per-endpoint deduplication for TLS port probes.
         # _probed_endpoints: "host:port" strings already probed — O(1) pre-check
         #   prevents thread creation for endpoints whose cert is already known.

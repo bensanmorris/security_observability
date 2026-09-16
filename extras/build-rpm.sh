@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# build-rpm.sh — Build the cert-analyzer RPM on RHEL9
+# build-rpm.sh — Build the cert-analyzer RPMs on RHEL9
 #
 # Usage:
 #   ./build-rpm.sh [--version <version>] [--release <release>]
-#                  [--tetragon-version <version>] [--without-control]
+#                  [--tetragon-version <version>]
 #
-#   --without-control builds the variant with no fleet-control code at all
-#   (see the %bcond in cert-analyzer.spec).
+# Produces two packages from one spec: cert-analyzer (the monitor, with no
+# fleet-control code) and cert-analyzer-control (the two [control] modules,
+# version-locked to it -- the opt-in for certsight-fleet-manager).
 #
 # Defaults:
 #   version          — git tag if on a tag, otherwise short SHA
@@ -21,7 +22,6 @@ set -euo pipefail
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TETRAGON_VERSION="${TETRAGON_VERSION:-v1.7.0}"
 RPM_RELEASE="${RPM_RELEASE:-1}"
-RPMBUILD_EXTRA_ARGS=()
 GRPCIO_VERSION="1.60.1"
 PROTOBUF_VERSION="4.25.3"
 
@@ -40,7 +40,6 @@ while [[ $# -gt 0 ]]; do
         --version)          VERSION="$2";          shift 2 ;;
         --release)          RPM_RELEASE="$2";      shift 2 ;;
         --tetragon-version) TETRAGON_VERSION="$2"; shift 2 ;;
-        --without-control)  RPMBUILD_EXTRA_ARGS+=(--without control); shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -156,7 +155,6 @@ rpmbuild -ba \
     --define "_version $VERSION" \
     --define "_release $RPM_RELEASE" \
     --define "_tetragon_version $TETRAGON_VERSION" \
-    "${RPMBUILD_EXTRA_ARGS[@]}" \
     "$RPMBUILD_ROOT/SPECS/cert-analyzer.spec"
 
 # ── Report output ─────────────────────────────────────────────────────────────
@@ -173,6 +171,8 @@ find "$RPMBUILD_ROOT/SRPMS" -name "cert-analyzer-*.src.rpm" | sort
 echo ""
 echo "To install:"
 echo "  sudo dnf install $RPMBUILD_ROOT/RPMS/$(uname -m)/cert-analyzer-${VERSION}-${RPM_RELEASE}.*.rpm"
+echo "Add fleet control (only on nodes certsight-fleet-manager should drive):"
+echo "  sudo dnf install $RPMBUILD_ROOT/RPMS/$(uname -m)/cert-analyzer-control-${VERSION}-${RPM_RELEASE}.*.rpm"
 echo ""
 echo "After install:"
 echo "  sudo vi /etc/cert-analyzer/cert-analyzer.conf"
