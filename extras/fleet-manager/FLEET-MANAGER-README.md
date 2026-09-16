@@ -287,7 +287,7 @@ are enforced server-side (every write route answers `403 read_only`):
   ```bash
   # add to fleet-manager.conf:
   FLEET_MANAGER_ANONYMOUS_VIEWER=1
-  FLEET_MANAGER_READ_ONLY_NOTE=Public demo: anyone may look; changing a policy needs the admin login.
+  FLEET_MANAGER_READ_ONLY_NOTE=Read-only view: changing a policy needs the admin login.
   sudo systemctl restart certsight-fleet-manager
   ```
 
@@ -301,12 +301,14 @@ are enforced server-side (every write route answers `403 read_only`):
   With anonymous viewers and **no** `FLEET_MANAGER_ADMIN_PASSWORD_HASH` at
   all, the console is provably read-only — the process holds no
   credential that can produce a write — and its banner and startup log
-  say so. That, on a fleet without `cert-analyzer-control`, is the
-  least-privilege deployment.
+  say so. (Strictly: no *session* can; the process still holds the nodes'
+  `[control]` token to read their live state, so keep it on loopback and
+  the conf root-readable.) That, on a fleet without `cert-analyzer-control`,
+  is the least-privilege deployment.
 
-This is how the AWS demo is set up (`extras/aws-demo/user-data.sh`):
-anonymous viewers behind nginx on port 8094, admin password generated at
-install and kept root-only on the instance.
+This is how the public AWS demo is set up (`extras/aws-demo/user-data.sh`):
+anonymous viewers behind nginx on port 8094 and **no admin account** — the
+demo can show the fleet but nothing on it can change a node.
 
 ## Run from a source checkout
 

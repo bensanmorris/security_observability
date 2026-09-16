@@ -336,31 +336,27 @@ semanage port -l | grep -qw 8092 || semanage port -a -t http_port_t -p tcp 8092 
 nginx -t && systemctl reload nginx
 
 if rpm -q certsight-fleet-manager >/dev/null 2>&1; then
-echo "=== Fleet manager (policy control console -- read-only for visitors, admin login for changes, nginx in front) ==="
-# The landing page is the admin sign-in with a "Continue as read-only
-# viewer" link (FLEET_MANAGER_ANONYMOUS_VIEWER) -- so the console is as
-# open as the dashboard/console/MCP server for looking, but unlike those,
-# this one can switch detection off, so *changing* anything needs the admin
-# login. Viewer sessions are refused every write server-side; the UI shows
-# the controls disabled with the reason. The admin password is generated
-# here and saved root-only; deploy-demo.sh prints where to find it. The
-# node token is the one [control] above was given, so this console can
-# drive this node's cert-analyzer (and the k8s node's, once
-# deploy-k8s-node.sh has passed it the same token). Bound to 127.0.0.1:8095;
-# nginx below is the public side on 8094, same split as the MCP server.
-# This box's own node is reached on its loopback [control] listener; the
-# k8s node on its node IP (see deploy-k8s-node.sh / user-data-k8s-node.sh).
-# set +x: the password, its hash and the node token all pass through here
-# and none of them belong in the install log (see the Grafana section).
+echo "=== Fleet manager (policy console -- read-only for everyone, no admin account, nginx in front) ==="
+# Viewer-only, on purpose: FLEET_MANAGER_ANONYMOUS_VIEWER=1 hands every
+# visitor a read-only session and there is *no* FLEET_MANAGER_ADMIN_PASSWORD_HASH,
+# so the console holds no credential that can produce a write -- every
+# write route is refused server-side for viewer sessions and there is no
+# session type that passes. The dashboard/test console/MCP server are just
+# as open for looking; this is the one component that could switch
+# detection off, so the public demo simply doesn't get that capability
+# (nothing to phish, nothing that crosses the internet as a password). Run
+# your own fleet with an admin account to see the toggles work.
+# The node token is the one [control] above was given, so the console can
+# read live policy state from this node's loopback [control] listener and,
+# once deploy-k8s-node.sh has passed it the same token, from the k8s node
+# on its node IP. Bound to 127.0.0.1:8095; nginx below is the public side
+# on 8094, same split as the MCP server.
+# set +x: the node token passes through here and doesn't belong in the
+# install log (see the Grafana section).
 set +x
-FM_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(12))')"
-install -m 0600 /dev/null /root/certsight-fleet-manager-password
-echo "${FM_PASSWORD}" > /root/certsight-fleet-manager-password
-FM_HASH="$(echo "${FM_PASSWORD}" | certsight-fleet-manager --hash-password)"
 cat <<FMEOF > /etc/certsight-fleet-manager/fleet-manager.conf
-FLEET_MANAGER_ADMIN_PASSWORD_HASH=${FM_HASH}
 FLEET_MANAGER_ANONYMOUS_VIEWER=1
-FLEET_MANAGER_READ_ONLY_NOTE=Public demo: anyone may look; changing a policy needs the admin login.
+FLEET_MANAGER_READ_ONLY_NOTE=Public demo: read-only. This console has no admin account, so nothing here can change a node.
 FLEET_MANAGER_NODE_TOKEN=${CONTROL_TOKEN}
 FLEET_MANAGER_PROMETHEUS_URL=http://127.0.0.1:9091
 FLEET_MANAGER_BIND=127.0.0.1
@@ -369,15 +365,14 @@ FLEET_MANAGER_AUDIT_LOG=/var/lib/certsight-fleet-manager/audit.jsonl
 FMEOF
 chown root:certsight-fleet-manager /etc/certsight-fleet-manager/fleet-manager.conf
 chmod 640 /etc/certsight-fleet-manager/fleet-manager.conf
-unset FM_PASSWORD FM_HASH
 set -x
-echo "Fleet manager admin password generated -- see /root/certsight-fleet-manager-password (root-only) on this instance"
 systemctl reset-failed certsight-fleet-manager || true
 systemctl enable --now certsight-fleet-manager
 
 echo "=== nginx reverse proxy in front of the fleet manager ==="
-# The app does its own auth; nginx here rate-limits (a tight per-IP budget
-# on /api/login on top of the app's own limiter) and forwards the headers
+# nginx rate-limits (the tight per-IP budget on /api/login stays in place
+# even though this deployment has no account to log into -- harmless, and
+# right if an admin account is ever added) and forwards the headers
 # the app needs: Host unchanged so its Origin/Host CSRF comparison holds,
 # X-Forwarded-For (only trusted from loopback, which this is) so audit
 # entries carry the real client, and X-Forwarded-Proto so the session

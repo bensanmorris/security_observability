@@ -22,12 +22,15 @@ What gets installed on the instance:
   MCP-capable assistant (e.g. Claude Desktop) can query fleet cert/FIPS/chain
   state live during a demo
 - The [fleet manager](../fleet-manager/FLEET-MANAGER-README.md), bound to
-  `127.0.0.1:8095` behind nginx on `0.0.0.0:8094`. The landing page is the
-  admin sign-in with a *Continue as read-only viewer* link beneath it:
-  visitors get a **read-only** view (nodes, policy matrix, explorers,
-  audit log, every toggle disabled and refused server-side); **changing**
-  a policy needs the admin login, because it can switch a node's Tetragon
-  policies off.
+  `127.0.0.1:8095` behind nginx on `0.0.0.0:8094`, **viewer-only**: the
+  landing page offers *Continue as read-only viewer* and there is no admin
+  account at all (`FLEET_MANAGER_ADMIN_PASSWORD_HASH` unset), so the
+  console holds no credential that can produce a write -- visitors get
+  nodes, the policy matrix with each node's live state, the explorers and
+  the audit log, with every toggle disabled and refused server-side. The
+  one thing this component can do that the others can't -- switch a node's
+  Tetragon policies off -- is deliberately not available on the public
+  demo; run your own fleet with an admin account to use it.
   Fleet control is opt-in per node: the base `cert-analyzer` RPM has no
   `[control]` code, so this box additionally installs `cert-analyzer-control`
   and enables `[control]` on its loopback-only listener (the manager is
@@ -58,15 +61,14 @@ internet with no authentication**, by design, so you can share a link (or a
   every tool is a bounded Prometheus query, so the exposure here is cost/load
   from anyone (or any bot) hitting it, not data mutation. nginx rate-limits
   it the same way it does the test console.
-- The fleet manager is browsable read-only by anyone, but every write needs
-  the admin login (user `admin`, password generated at install and saved
-  root-only on the instance -- `sudo cat /root/certsight-fleet-manager-password`);
-  it rate-limits login attempts both in nginx and in the app, and appends
-  every policy change to `/var/lib/certsight-fleet-manager/audit.jsonl`.
+- The fleet manager is browsable read-only by anyone and has no admin
+  account, so there is no login to brute-force or to send over plain HTTP,
+  and no session that can reach a write route; the process does hold the
+  nodes' `[control]` token (to read their live policy state), which is why
+  it stays on loopback behind nginx and the token is root-only on disk.
   The read-only view does show each node's control URL (private VPC
-  addresses), as Grafana's `instance` labels already do. Until
-  `enable-mcp-https.sh` has been run its login travels over plain HTTP, so
-  run that script before sharing the link.
+  addresses), as Grafana's `instance` labels already do.
+  `enable-mcp-https.sh` adds TLS to its nginx block too if you run it.
 - SSH (port 22) is restricted to your current public IP at deploy time, not
   opened to the internet.
 
@@ -166,13 +168,15 @@ claude mcp add --transport http certsight http://certsight-demo.com:8092/mcp
 ```
 
 The fleet manager is at `http://certsight-demo.com:8094` (*Continue as
-read-only viewer* needs no login; sign in as `admin` to change anything --
-password:
-`ssh ... sudo cat /root/certsight-fleet-manager-password`). It
-lists both nodes once the k8s node is up, and a policy toggled there stays
-toggled across a `systemctl restart tetragon` on the main box or a Tetragon
-pod restart on the k8s node -- the exit criteria in
-`extras/FLEET-MANAGER-PLAN.md`.
+read-only viewer*; there is no admin account on the demo). It lists both
+nodes once the k8s node is up. To exercise a toggle, use a node's
+`[control]` listener directly from the main box with the root-only token
+(`curl -H "Authorization: Bearer $(sudo cat /root/certsight-control-token)"
+-X PUT -d '{"enabled": false}' http://127.0.0.1:8087/control/policies/<name>`);
+a policy disabled that way stays disabled across `systemctl restart tetragon`
+on the main box -- the plan's exit criterion, verified 2026-09-16. The
+equivalent on the k8s node (a Tetragon pod restart) is currently blocked by
+an analyzer reconnect bug tracked separately.
 
 The instance gets an Elastic IP (stays fixed for the life of the instance,
 unlike a plain EC2 public IP which changes on stop/start), and the script

@@ -128,13 +128,19 @@ fi
 # the node IP (hostNetwork) but only the main box may connect
 # (allowedSources + the SG + the firewalld rule below). Token auth over
 # plain http inside the VPC for the demo; production should add
-# control.tls.existingSecret. State stays on the chart's default emptyDir
-# -- a demo node is replaced, not nursed.
+# control.tls.existingSecret. Recorded decisions go on a node-local
+# hostPath rather than the chart's default emptyDir: an emptyDir is wiped
+# whenever the analyzer *pod* is replaced (rollout restart, upgrade), which
+# silently forgets every fleet-manager decision -- found on the live demo
+# 2026-09-16. The container runs as UID 1001, so the directory is created
+# for it here (a hostPath is otherwise created root-owned).
 CONTROL_ARGS=()
 set +x
 if [[ -n "${CONTROL_TOKEN}" ]]; then
+    install -d -m 0750 -o 1001 -g 0 /var/lib/cert-analyzer
     CONTROL_ARGS=(--set control.enabled=true --set "control.token=${CONTROL_TOKEN}"
-                  --set "control.allowedSources=${MAIN_PRIVATE_IP}/32")
+                  --set "control.allowedSources=${MAIN_PRIVATE_IP}/32"
+                  --set control.state.hostPath=/var/lib/cert-analyzer)
     echo "Fleet control: enabled, restricted to ${MAIN_PRIVATE_IP}/32"
 fi
 # Tracing stays off across the helm call so the token isn't echoed as part
