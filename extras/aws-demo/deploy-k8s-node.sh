@@ -54,7 +54,9 @@ CERTSIGHT_GIT_REF="${CERTSIGHT_GIT_REF:-k8s-pod-attribution-demo}"
 # on GHCR (known gap), so for a real/live deployment pass the immutable
 # sha-<commit>-ubi9 for the release you want instead, e.g.
 # K8S_ANALYZER_IMAGE_TAG=sha-f5c492d-ubi9 for v0.97 (confirm the mapping via
-# `git rev-parse vX.Y`).
+# `git rev-parse vX.Y`). When the main box hands over a fleet-control token
+# (below), user-data-k8s-node.sh appends "-control" to cert-analyzer's tag
+# for you -- the image variant that carries the [control] modules.
 K8S_ANALYZER_IMAGE_TAG="${K8S_ANALYZER_IMAGE_TAG:-}"
 
 command -v aws >/dev/null || { echo "AWS CLI not found."; exit 1; }
@@ -114,6 +116,14 @@ aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${
 aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${K8S_SG_ID}" \
     --ip-permissions "IpProtocol=tcp,FromPort=9090,ToPort=9090,UserIdGroupPairs=[{GroupId=${SG_ID},Description='Prometheus scrape from main box'}]" \
     2>/dev/null || true
+# Fleet control: the main box's certsight-fleet-manager drives this node's
+# cert-analyzer through its dedicated [control] listener (8087, on the node
+# IP -- the chart's DaemonSet runs hostNetwork: true). Main-box SG only,
+# never 0.0.0.0/0; the node's own allowed_sources narrows it further to the
+# main box's private IP.
+aws ec2 authorize-security-group-ingress --region "${AWS_REGION}" --group-id "${K8S_SG_ID}" \
+    --ip-permissions "IpProtocol=tcp,FromPort=8087,ToPort=8087,UserIdGroupPairs=[{GroupId=${SG_ID},Description='Fleet manager control from main box'}]" \
+    2>/dev/null || true
 # Prometheus query API: this node's test-server queries it directly for the
 # fleet blast-radius/chain-explorer/FIPS-rollout panels (demo.testServer.
 # prometheusUrl below) -- found missing in testing (those panels errored
@@ -129,11 +139,24 @@ if [[ ! -f "${SCRIPT_DIR}/${KEY_NAME}.pem" ]]; then
     echo "    but it'll still launch fine (same key pair as the main instance)."
 fi
 
+echo "==> Fetching the fleet-control token from the main box (both nodes must share it)..."
+# user-data.sh saved it root-only when it enabled [control] on the main
+# box's cert-analyzer. Empty (older main box that predates the fleet
+# manager, or SSH refused) just means this node comes up with control off
+# -- everything else still works, and it can be enabled later with
+# `helm upgrade --set control.enabled=true --set control.token=...`.
+CONTROL_TOKEN="$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SCRIPT_DIR}/${KEY_NAME}.pem" \
+    "rocky@${PUBLIC_IP}" "sudo cat /root/certsight-control-token 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || true)"
+if [[ -z "${CONTROL_TOKEN}" ]]; then
+    echo "    WARNING: no fleet-control token on the main box -- the k8s node will not be controllable from the fleet manager."
+fi
+
 echo "==> Launching k8s node instance (${K8S_NODE_INSTANCE_TYPE})..."
 USER_DATA_CONTENT="$(sed \
     -e "s/__MAIN_PRIVATE_IP__/${MAIN_PRIVATE_IP}/" \
     -e "s/__CERTSIGHT_GIT_REF__/${CERTSIGHT_GIT_REF}/" \
     -e "s/__K8S_ANALYZER_IMAGE_TAG__/${K8S_ANALYZER_IMAGE_TAG}/" \
+    -e "s/__CONTROL_TOKEN__/${CONTROL_TOKEN}/" \
     "${SCRIPT_DIR}/user-data-k8s-node.sh")"
 
 K8S_NODE_INSTANCE_ID="$(aws ec2 run-instances --region "${AWS_REGION}" \

@@ -62,12 +62,52 @@ spec:
           value: {{ .Values.checksumEnabled | quote }}
         - name: TLS_OUTBOUND_PORTS
           value: {{ join "," .Values.tlsOutboundPorts | quote }}
+        - name: CONTROL_ENABLED
+          value: {{ .Values.control.enabled | quote }}
+        {{- if .Values.control.enabled }}
+        - name: CONTROL_LISTEN
+          value: {{ .Values.control.listen | quote }}
+        - name: CONTROL_ALLOWED_SOURCES
+          value: {{ .Values.control.allowedSources | quote }}
+        {{- if or .Values.control.token .Values.control.existingSecret }}
+        - name: CONTROL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cert-analyzer.controlSecretName" . }}
+              key: token
+        {{- end }}
+        {{- if .Values.control.tls.existingSecret }}
+        - name: CONTROL_TLS_CERT
+          value: /etc/cert-analyzer/control/tls.crt
+        - name: CONTROL_TLS_KEY
+          value: /etc/cert-analyzer/control/tls.key
+        {{- if .Values.control.tls.requireClientCert }}
+        - name: CONTROL_TLS_CLIENT_CA
+          value: /etc/cert-analyzer/control/ca.crt
+        {{- end }}
+        - name: CONTROL_AUTHORIZED_CLIENTS
+          value: {{ .Values.control.tls.authorizedClients | quote }}
+        - name: CONTROL_READONLY_CLIENTS
+          value: {{ .Values.control.tls.readonlyClients | quote }}
+        {{- end }}
+        - name: CONTROL_STATE_PATH
+          value: {{ .Values.control.statePath | quote }}
+        {{- end }}
         volumeMounts:
         - name: tetragon-sock
           mountPath: {{ .Values.tetragon.socketHostPath }}
         - name: host-root
           mountPath: /host
           readOnly: true
+        {{- if .Values.control.enabled }}
+        - name: control-state
+          mountPath: {{ dir .Values.control.statePath }}
+        {{- if .Values.control.tls.existingSecret }}
+        - name: control-tls
+          mountPath: /etc/cert-analyzer/control
+          readOnly: true
+        {{- end }}
+        {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
         ports:
@@ -116,6 +156,22 @@ spec:
         hostPath:
           path: /
           type: Directory
+      {{- if .Values.control.enabled }}
+      - name: control-state
+        {{- if .Values.control.state.hostPath }}
+        hostPath:
+          path: {{ .Values.control.state.hostPath }}
+          type: DirectoryOrCreate
+        {{- else }}
+        emptyDir: {}
+        {{- end }}
+      {{- if .Values.control.tls.existingSecret }}
+      - name: control-tls
+        secret:
+          secretName: {{ .Values.control.tls.existingSecret }}
+          defaultMode: 0440
+      {{- end }}
+      {{- end }}
       tolerations:
       - effect: NoSchedule
         operator: Exists

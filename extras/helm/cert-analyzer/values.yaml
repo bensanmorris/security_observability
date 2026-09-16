@@ -108,6 +108,56 @@ connectProbeEnabled: true
 # cert-event output, used for downstream key-reuse detection (see PR #155).
 checksumEnabled: true
 
+# Fleet control -- lets certsight-fleet-manager enable/disable this node's Tetragon
+# tracing policies through cert-analyzer's dedicated [control] listener (separate from
+# ports.health; off by default upstream). Because the DaemonSet runs with hostNetwork:
+# true, `listen` binds on the node itself: the 0.0.0.0 default here makes it reachable
+# on the node IP, so pair it with `allowedSources` (the fleet manager's address) and the
+# node firewall, and put TLS on it via `tls.existingSecret`.
+#
+# Needs the "-control" image variant (image.tag: <tag>-ubi9-control): the default
+# cert-analyzer image has no control code at all, exactly like the base RPM without the
+# cert-analyzer-control subpackage, and enabling this on it is a logged error.
+#
+# A change made through the fleet manager is a *node-local* override: Tetragon reloads the
+# TracingPolicy CR as enabled whenever its own pod restarts, and cert-analyzer re-applies
+# the recorded decision on its next policy check. The recorded decisions live in
+# control.statePath, on an emptyDir by default -- that survives container restarts but not
+# pod deletion. Set control.state.hostPath to keep them across pod replacement; the
+# directory must exist on every node and be writable by the container's UID (1001 in the
+# published image) since a hostPath is created root-owned.
+control:
+  enabled: false
+  # host:port the listener binds on the node (hostNetwork). Port 8087 by default.
+  listen: "0.0.0.0:8087"
+  # Comma-separated CIDRs allowed to connect at all (checked before authentication).
+  # Strongly recommended: the fleet manager's address, e.g. "10.0.1.5/32".
+  allowedSources: ""
+  # Shared secret every fleet-manager request must present. Either set it here (rendered
+  # into a chart-managed Secret) or point existingSecret at a Secret you manage with a
+  # `token` key. Minimum 16 characters; generate with
+  #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+  # Required unless tls.existingSecret carries a client CA (mutual TLS); if both are
+  # configured, both are required.
+  token: ""
+  existingSecret: ""
+  # Mutual TLS. A Secret with `tls.crt` + `tls.key` (this node's server certificate; SAN
+  # must cover the node IP the fleet manager dials) and optionally `ca.crt` (the CA that
+  # signed the fleet manager's client certificate -- present means client certs are
+  # required). Same shape as a kubernetes.io/tls Secret plus ca.crt.
+  # extras/fleet-manager/gen-control-certs.sh produces a matching set.
+  tls:
+    existingSecret: ""
+    # Require a client certificate signed by the Secret's ca.crt (mutual TLS). Set false
+    # for server-side TLS only (token auth over https); the Secret then needs no ca.crt.
+    requireClientCert: true
+    # Client-certificate CNs that may change policies / may only read.
+    authorizedClients: "fleet-manager"
+    readonlyClients: ""
+  statePath: /var/lib/cert-analyzer/policy-state.json
+  state:
+    hostPath: ""
+
 # Ports the tcp-connect-tls TracingPolicy filters on at the kernel boundary (see
 # templates/policies/tcp-connect-tls.yaml). Also rendered as cert-analyzer's own
 # TLS_OUTBOUND_PORTS env var so the two can't drift out of sync the way the plain-manifest

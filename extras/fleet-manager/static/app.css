@@ -1,0 +1,136 @@
+:root {
+  color-scheme: light dark;
+  --border: #8888;
+  --ok: #2e7d32;
+  --warn: #b26a00;
+  --error: #c62828;
+  --muted: #777;
+  --surface: #8881;
+  --primary: #1565c0;
+}
+
+* { box-sizing: border-box; }
+
+/* The hidden attribute must win over the display rules below (nav, modal,
+   iframe are display:flex/block), or a hidden dialog still renders. */
+[hidden] { display: none !important; }
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  padding: 1rem 1.5rem;
+}
+
+.header-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+h1 { font-size: 1.4rem; margin: 0 0 0.5rem; }
+h2 { margin-top: 0; font-size: 1rem; }
+
+.header-right { display: flex; align-items: baseline; gap: 0.8rem; }
+.whoami { font-size: 0.85rem; color: var(--muted); }
+
+.powered-by {
+  font-size: 0.85rem; font-weight: 600; text-decoration: none;
+  color: inherit; opacity: 0.7; white-space: nowrap;
+}
+.powered-by:hover { opacity: 1; }
+
+nav {
+  display: flex; gap: 0.4rem; align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.6rem; margin-bottom: 1rem; flex-wrap: wrap;
+}
+.nav-btn {
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 0.4rem 0.8rem; font-size: 0.9rem; font-weight: 600;
+  color: inherit; cursor: pointer; opacity: 0.7;
+}
+.nav-btn:hover { opacity: 1; }
+.nav-btn.active { opacity: 1; border-color: var(--border); background: var(--surface); }
+.nav-spacer { flex: 1; }
+.status { font-size: 0.8rem; color: var(--muted); }
+.status.error { color: var(--error); }
+
+.view { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+.banner {
+  border: 1px solid var(--muted); border-radius: 8px; padding: 0.6rem 1rem;
+  margin-bottom: 1rem; font-size: 0.9rem; background: #77777714;
+}
+/* A misconfiguration the admin should fix, as opposed to a read-only view that's by design */
+.banner-warn { border-color: var(--warn); background: #b26a0014; }
+.control-url { font-size: 0.75rem; color: var(--muted); font-family: monospace; }
+.viewer-entry { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #ddd; font-size: 0.95rem; }
+.viewer-entry a { font-weight: 600; }
+.viewer-entry .muted { display: block; margin-top: 0.3rem; }
+.muted { color: var(--muted); font-size: 0.9rem; max-width: 70em; }
+.error { color: var(--error); font-size: 0.9rem; margin-top: 0.5rem; }
+code { font-size: 0.85em; }
+
+.btn {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  color: inherit; padding: 0.35rem 0.7rem; font-size: 0.85rem; cursor: pointer;
+}
+.btn:hover { border-color: currentColor; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn-quiet { background: none; }
+.btn-sm { padding: 0.15rem 0.45rem; font-size: 0.75rem; }
+
+#login-form { display: flex; flex-direction: column; gap: 0.7rem; max-width: 22em; }
+#login-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
+#login-form input { padding: 0.4rem; font: inherit; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: inherit; }
+
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+th { font-weight: 600; font-size: 0.8rem; color: var(--muted); }
+th.node-col { white-space: normal; max-width: 12em; }
+td.policy-name { font-weight: 600; }
+td.policy-ns { color: var(--muted); font-weight: normal; font-size: 0.8rem; }
+tr.empty td { color: var(--muted); text-align: center; padding: 1.5rem; }
+
+.badge {
+  display: inline-block; border-radius: 999px; padding: 0.1rem 0.55rem;
+  font-size: 0.75rem; font-weight: 600; border: 1px solid currentColor;
+}
+.badge-ok { color: var(--ok); }
+.badge-warn { color: var(--warn); }
+.badge-error { color: var(--error); }
+.badge-muted { color: var(--muted); }
+
+.cell-wrap { display: inline-flex; align-items: center; gap: 0.5rem; }
+.cell {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  border-radius: 999px; padding: 0.15rem 0.55rem;
+  font-size: 0.8rem; font-weight: 600; min-width: 6.5em; justify-content: center;
+}
+.cell-toggle { min-width: 4.6em; }
+.cell-toggle.toggle-disable { color: var(--error); }
+.cell-toggle.toggle-enable { color: var(--ok); }
+.cell.state-enabled { color: var(--ok); }
+.cell.state-disabled { color: var(--muted); }
+.cell.state-load_error, .cell.state-error { color: var(--error); }
+.cell.state-loading, .cell.state-unloading, .cell.state-unknown { color: var(--warn); }
+.cell.state-absent { color: var(--muted); border-style: dashed; }
+.cell .dot { width: 0.55em; height: 0.55em; border-radius: 50%; background: currentColor; }
+.drift { color: var(--warn); font-size: 0.7rem; margin-left: 0.3rem; }
+
+.row-actions { display: inline-flex; gap: 0.3rem; }
+
+.subnav { display: flex; gap: 0.4rem; margin-bottom: 0.7rem; flex-wrap: wrap; }
+#explorer-frame { width: 100%; height: calc(100vh - 16rem); min-height: 30rem; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+
+.modal { position: fixed; inset: 0; background: #0006; display: flex; align-items: center; justify-content: center; }
+.modal-box { background: Canvas; color: CanvasText; border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; max-width: 30em; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+
+@media (max-width: 700px) {
+  body { padding: 0.8rem; }
+  th, td { padding: 0.35rem 0.4rem; }
+}

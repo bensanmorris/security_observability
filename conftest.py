@@ -33,3 +33,19 @@ mock_events_pb2.GetEventsRequest = MagicMock()
 mock_events_pb2.Filter = MagicMock()
 mock_sensors_pb2_grpc.FineGuidanceSensorsStub = MagicMock()
 mock_sensors_pb2.GetVersionRequest = MagicMock()
+
+
+class _KwargsRequest:
+    """
+    Stand-in for the policy-configure request protos. A bare MagicMock would
+    accept any kwargs but return MagicMocks for .name/.namespace/.enable,
+    making it impossible for a test's mock stub to assert *which* policy
+    was toggled -- so these keep the fields the caller set.
+    """
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+mock_sensors_pb2.ConfigureTracingPolicyRequest = _KwargsRequest
+mock_sensors_pb2.EnableTracingPolicyRequest = _KwargsRequest
+mock_sensors_pb2.DisableTracingPolicyRequest = _KwargsRequest

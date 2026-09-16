@@ -1,0 +1,52 @@
+[Unit]
+Description=CertSight fleet manager (policy control console)
+Documentation=https://github.com/your-org/cert-analyzer
+After=network.target
+
+[Service]
+Type=simple
+User=certsight-fleet-manager
+Group=certsight-fleet-manager
+
+# All FLEET_MANAGER_* settings (incl. the two secrets) come from this file
+# -- see FLEET-MANAGER-README.md.
+EnvironmentFile=/etc/certsight-fleet-manager/fleet-manager.conf
+
+# certsight-test-server (a declared package Requires) installs to
+# /opt/certsight-test-server -- server.py imports the fleet explorer
+# modules from there rather than bundling copies that could drift, exactly
+# as certsight-mcp does.
+Environment=CERTSIGHT_TEST_SERVER_DIR=/opt/certsight-test-server
+
+ExecStart=/usr/bin/certsight-fleet-manager
+
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=certsight-fleet-manager
+
+# /var/lib/certsight-fleet-manager for the audit log, created and owned by
+# systemd for the service user and writable under ProtectSystem=strict.
+StateDirectory=certsight-fleet-manager
+
+# Security hardening. This process makes outbound HTTP calls to Prometheus
+# and to every node's control port and needs nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/certsight-fleet-manager
+
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

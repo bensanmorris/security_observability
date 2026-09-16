@@ -182,6 +182,7 @@ Only emitted when `bind_probe_enabled=true` or `connect_probe_enabled=true` (bot
 | `kafka_last_published_timestamp_seconds` | Gauge | `node_name` | Unix timestamp of the last message successfully acked by the broker. Absent if Kafka is disabled or nothing has published yet |
 | `tetragon_policy_info` | Gauge | `name`, `namespace`, `state` | One series per tracing policy, value always `1`. Stale series are removed when a policy is deleted or changes state. `namespace` is empty for cluster-scoped policies |
 | `tetragon_policies_total` | Gauge | `state` | Count of tracing policies in each state. All state values are always emitted (including `0`) so alert rules can rely on the series being present |
+| `cert_analyzer_policy_reconciliations_total` | Counter | `policy` | Times a recorded fleet-control enable/disable decision (`[control]` in `cert-analyzer.conf`) was re-applied because Tetragon reported the policy in the other state -- typically once per Tetragon restart per disabled policy. A node that keeps climbing is in a Tetragon restart loop or has someone flipping the policy by hand with `tetra`. Only emitted once a reconciliation has happened |
 
 `state` values for `tetragon_policy_info` and `tetragon_policies_total`:
 

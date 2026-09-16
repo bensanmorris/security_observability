@@ -17,6 +17,17 @@ from typing import Dict, Set, Tuple
 from tetragon import sensors_pb2
 
 from .constants import _POLICY_STATE_NAMES
+# Fleet control is a separate package (cert-analyzer-control, or the
+# -control image): the base cert-analyzer ships no agent/control.py.
+# Everything below that needs it checks CONTROL_AVAILABLE; the policy check
+# itself never depends on it.
+try:
+    from .control import (
+        POLICY_NAME_RE, observed_matches_desired, policy_key, set_tracing_policy_enabled,
+    )
+    CONTROL_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised by the base package
+    CONTROL_AVAILABLE = False
 
 # Logger name is hardcoded (not __name__) so log records from this mixin keep
 # reporting under "agent.analyzer" -- see the identical note in java_fips.py.
@@ -148,7 +159,7 @@ class _TetragonMonitorMixin:
         thread.start()
         logger.info(f"Started Tetragon version monitor (interval: {interval}s)")
 
-    def check_tetragon_policies(self, stub) -> None:
+    def check_tetragon_policies(self, stub, blocking: bool = True) -> None:
         """
         Query Tetragon for all tracing policies and update Prometheus metrics.
 
@@ -159,7 +170,31 @@ class _TetragonMonitorMixin:
         Stale series are removed when a policy is deleted or changes state,
         so the metrics always reflect the live policy table. Failures are
         logged as warnings and never propagate.
+
+        Callers: the main thread at startup and on each event-stream
+        reconnect, the policy monitor thread, and -- with [control] on --
+        every HTTP worker handling a PUT. One run at a time, under
+        _policy_check_lock (see analyzer.py).
+
+        blocking=False makes the call opportunistic: if another thread is
+        mid-check, return without doing anything rather than wait for it.
+        The event-stream reconnect path uses this -- its purpose is "make
+        sure recorded state gets re-applied promptly after Tetragon comes
+        back", and a check already in flight on the monitor or a control
+        PUT is doing exactly that, so the stream thread must not queue
+        behind it (a monitor spinning on a zero interval would otherwise
+        starve it -- seen in the reconnect tests, where time.sleep is a
+        no-op).
         """
+        if not self._policy_check_lock.acquire(blocking=blocking):
+            logger.debug("Tetragon policy check already in progress on another thread; skipping")
+            return
+        try:
+            self._check_tetragon_policies_locked(stub)
+        finally:
+            self._policy_check_lock.release()
+
+    def _check_tetragon_policies_locked(self, stub) -> None:
         if not hasattr(sensors_pb2, 'ListTracingPoliciesRequest'):
             logger.warning(
                 "ListTracingPoliciesRequest not available in Tetragon protobuf "
@@ -201,7 +236,173 @@ class _TetragonMonitorMixin:
             )
 
         self._known_policy_labels = new_labels
+        # Snapshot for the /control/policies route, so a read never has to
+        # make its own gRPC round-trip on the HTTP thread.
+        self._last_policy_list = [
+            {'name': p.name, 'namespace': p.namespace or '',
+             'state': _POLICY_STATE_NAMES.get(p.state, 'unknown'), 'state_code': p.state}
+            for p in response.policies
+        ]
         logger.debug(f"Tetragon policy states: {state_counts}")
+
+        self._reconcile_policy_state(stub, response.policies)
+
+    # ── Fleet control: desired policy state ──────────────────────────────────
+
+    def _reconcile_policy_state(self, stub, policies) -> None:
+        """
+        Re-apply any recorded enable/disable decision that Tetragon's live
+        state no longer reflects -- the step that makes a fleet-manager
+        disable survive a Tetragon restart (see agent/control.py's module
+        docstring for why the RPC alone doesn't).
+
+        Runs on every policy check (startup, each event-stream reconnect,
+        and the periodic monitor), so the longest a policy can be in the
+        wrong state after Tetragon comes back is one monitor interval. Only
+        policies Tetragon currently lists are touched; a recorded decision
+        for a policy that's gone is left in the file and reported as stale
+        by /control/policies rather than acted on. Policies in error or
+        transitional states are skipped -- there is nothing a configure call
+        can do for them.
+        """
+        state = getattr(self, '_policy_state', None)
+        if state is None or not CONTROL_AVAILABLE:
+            return
+        desired = state.all()
+        if not desired:
+            return
+        for policy in policies:
+            entry = desired.get(policy_key(policy.name, policy.namespace or ''))
+            if entry is None:
+                continue
+            matches = observed_matches_desired(policy.state, entry['enabled'])
+            if matches is None or matches:
+                continue
+            want = 'enabled' if entry['enabled'] else 'disabled'
+            try:
+                set_tracing_policy_enabled(stub, policy.name, policy.namespace or '', entry['enabled'])
+            except Exception as e:
+                logger.warning(
+                    f"Could not re-apply recorded state ({want}) to Tetragon policy "
+                    f"{policy.name!r}: {e}"
+                )
+                continue
+            self.metrics.policy_reconciliations_total.labels(
+                policy=policy.name, node_name=self.metrics._node_name,
+            ).inc()
+            logger.info(
+                f"Re-applied recorded state to Tetragon policy {policy.name!r}: "
+                f"{_POLICY_STATE_NAMES.get(policy.state, 'unknown')} -> {want}"
+            )
+
+    def list_policies_for_control(self) -> dict:
+        """
+        Observed (last check) + desired (recorded) state of every policy, for
+        GET /control/policies. Desired entries for policies Tetragon no
+        longer lists are included with stale=True so the fleet manager can
+        show them rather than have them vanish.
+        """
+        if not CONTROL_AVAILABLE:  # base package: no control server can call this, but be safe
+            return {'policies': []}
+        state = getattr(self, '_policy_state', None)
+        desired = state.all() if state is not None else {}
+        observed = list(getattr(self, '_last_policy_list', []) or [])
+        seen = set()
+        out = []
+        for p in observed:
+            key = policy_key(p['name'], p['namespace'])
+            seen.add(key)
+            entry = desired.get(key)
+            matches = None
+            if entry is not None:
+                matches = observed_matches_desired(p['state_code'], entry['enabled'])
+            out.append({
+                'name': p['name'],
+                'namespace': p['namespace'],
+                'state': p['state'],
+                'desired': entry['enabled'] if entry else None,
+                'drift': (matches is False),
+                'stale': False,
+            })
+        for key, entry in desired.items():
+            if key in seen:
+                continue
+            out.append({
+                'name': entry['name'],
+                'namespace': entry['namespace'],
+                'state': 'absent',
+                'desired': entry['enabled'],
+                'drift': False,
+                'stale': True,
+            })
+        out.sort(key=lambda p: (p['namespace'], p['name']))
+        return {'policies': out}
+
+    def set_policy_enabled_for_control(self, name: str, namespace: str, enabled: bool) -> tuple:
+        """
+        The PUT /control/policies/{name} action. Returns (http_status, body).
+
+        Order matters: the decision is recorded *before* the RPC so that if
+        Tetragon is mid-restart the reconcile loop still applies it once
+        Tetragon is back -- the operator's intent is not lost to a transient
+        failure. Only policies Tetragon currently lists can be toggled; the
+        list is refreshed first so a policy loaded seconds ago is accepted.
+        """
+        stub = getattr(self, '_tetragon_stub', None)
+        state = getattr(self, '_policy_state', None)
+        if not CONTROL_AVAILABLE or stub is None or state is None:
+            return 503, {'error': 'tetragon_not_connected'}
+        if not POLICY_NAME_RE.match(name) or (namespace and not POLICY_NAME_RE.match(namespace)):
+            return 400, {'error': 'invalid_policy_name'}
+        # Held across refresh -> record -> RPC -> refresh so the policy
+        # monitor's reconcile can't see the new desired flag against the
+        # old observed state mid-way and issue the same RPC first, which
+        # would make Tetragon refuse ours and turn a successful toggle into
+        # a 502. Two concurrent PUTs serialise here for the same reason.
+        with self._policy_check_lock:
+            return self._set_policy_enabled_locked(stub, state, name, namespace, enabled)
+
+    def _set_policy_enabled_locked(self, stub, state, name: str, namespace: str, enabled: bool) -> tuple:
+        try:
+            self.check_tetragon_policies(stub)
+        except Exception as e:  # never expected -- check_tetragon_policies swallows
+            logger.warning(f"Policy refresh before toggle failed: {e}")
+        known = {
+            policy_key(p['name'], p['namespace']): p
+            for p in (getattr(self, '_last_policy_list', []) or [])
+        }
+        current = known.get(policy_key(name, namespace))
+        if current is None:
+            return 404, {'error': 'unknown_policy', 'name': name, 'namespace': namespace}
+        state.set(name, namespace, enabled)
+        if observed_matches_desired(current['state_code'], enabled):
+            # Tetragon rejects a no-op transition ("tracing policy X is not
+            # disabled"), so an idempotent re-PUT of the current state is
+            # answered here: the decision is still recorded so it survives
+            # the next Tetragon restart, which is the part that matters.
+            return 200, {'name': name, 'namespace': namespace,
+                         'desired': enabled, 'state': current['state']}
+        try:
+            set_tracing_policy_enabled(stub, name, namespace, enabled)
+        except Exception as e:
+            logger.error(f"Tetragon refused {'enable' if enabled else 'disable'} of policy {name!r}: {e}")
+            return 502, {'error': 'tetragon_rpc_failed', 'detail': str(e),
+                         'name': name, 'namespace': namespace, 'desired': enabled}
+        try:
+            self.check_tetragon_policies(stub)
+        except Exception as e:  # never expected -- check_tetragon_policies swallows
+            logger.debug(f"Policy refresh after toggle failed: {e}")
+        observed = next(
+            (p for p in (getattr(self, '_last_policy_list', []) or [])
+             if p['name'] == name and p['namespace'] == namespace),
+            None,
+        )
+        return 200, {
+            'name': name,
+            'namespace': namespace,
+            'desired': enabled,
+            'state': observed['state'] if observed else 'unknown',
+        }
 
     def _start_policy_monitor(self, stub) -> None:
         """

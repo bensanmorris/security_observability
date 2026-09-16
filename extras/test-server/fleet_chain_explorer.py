@@ -330,7 +330,7 @@ def generate(prometheus_url):
 <style>{chain_explorer.PAGE_CSS}{EXTRA_CSS}</style>
 </head>
 <body>
-<p><a href="/">&larr; Back to test console</a></p>
+<p><a href="/" target="_top">&larr; Back to console</a></p>
 <h1>Fleet Certificate Chain Explorer</h1>
 <p class="subtitle">{len(entries)} distinct path(s) across the fleet &middot; {critical_count} with a missing intermediate somewhere &middot; {warn_count} with chain-length drift &middot; {info_count} resolved via another file somewhere &middot; click one to see the per-node breakdown</p>
 <p class="note">Data comes from Prometheus's last scrape of every scraped node's cert-analyzer metrics -- a newly-discovered or newly-broken chain can take up to one scrape interval to show up here. Cross-file issuer resolution only ever searches other bundles on the *same* node -- a fix that only exists on a different host is never counted as resolving a gap here.</p>

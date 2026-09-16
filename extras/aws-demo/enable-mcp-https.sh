@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # enable-mcp-https.sh — Terminate TLS at nginx for the MCP server (port 8092)
-# with a real Let's Encrypt certificate, rather than adding TLS support to
-# server.py itself -- matches how the rest of this stack already works
+# and the fleet manager (port 8094, when installed) with a real Let's Encrypt
+# certificate, rather than adding TLS support to either server.py itself --
+# matches how the rest of this stack already works
 # (nginx already fronts the MCP server for rate-limiting; see
 # user-data.sh's "nginx reverse proxy in front of the MCP server" section).
 #
@@ -81,6 +82,17 @@ if ! grep -q "listen 8092 ssl" /etc/nginx/conf.d/certsight-mcp.conf; then
         /etc/nginx/conf.d/certsight-mcp.conf
 fi
 
+echo "--- adding TLS to the fleet manager's nginx block, if present (idempotent) ---"
+# The fleet manager's login goes over this port, so it matters more here
+# than for the read-only MCP server. nginx forwards X-Forwarded-Proto, so
+# once this block is ssl the app marks its session cookie Secure on its own.
+FM_CONF=/etc/nginx/conf.d/certsight-fleet-manager.conf
+if [[ -f "${FM_CONF}" ]] && ! grep -q "listen 8094 ssl" "${FM_CONF}"; then
+    sed -i \
+        -e "s#listen 8094 default_server;#listen 8094 ssl default_server;\n    ssl_certificate ${CERT_DIR}/fullchain.pem;\n    ssl_certificate_key ${CERT_DIR}/privkey.pem;#" \
+        "${FM_CONF}"
+fi
+
 nginx -t && systemctl reload nginx
 echo "--- done ---"
 REMOTE
@@ -88,3 +100,4 @@ REMOTE
 echo ""
 echo "==> Point an MCP client at the TLS endpoint:"
 echo "    claude mcp add --transport http certsight https://${DOMAIN}:8092/mcp"
+echo "==> Fleet manager (if installed): https://${DOMAIN}:8094"

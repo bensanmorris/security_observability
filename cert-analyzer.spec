@@ -7,6 +7,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024 Your Organisation
 
+# ── Packages ──────────────────────────────────────────────────────────────────
+# cert-analyzer          the monitor. Contains *no* fleet-control code: the
+#                        two modules behind the [control] listener are not
+#                        in this package, so there is no listener to enable
+#                        ([control] enabled = true is a logged error) and no
+#                        code path that can change a Tetragon policy on
+#                        request. Upgrading from a release that predates
+#                        fleet control adds no control surface.
+# cert-analyzer-control  the two modules (agent/control.py,
+#                        agent/control_server.py), version-locked to the
+#                        base package. Installing it is the opt-in for
+#                        certsight-fleet-manager; removing it takes the
+#                        capability away again without touching the monitor.
+
 # ── Suppress rpmbuild post-processing that breaks bundled venvs ───────────────
 
 # Do not mangle shebangs inside the bundled virtualenv — third-party packages
@@ -70,6 +84,25 @@ fd_install kprobe events. When a process opens a certificate file the
 analyzer parses it, extracts expiry metadata, and publishes Prometheus
 metrics. Supports PEM, DER, JKS, and PKCS12 formats with Kubernetes
 workload enrichment.
+
+
+%package control
+Summary:        Fleet-control modules for cert-analyzer (certsight-fleet-manager opt-in)
+Requires:       %{name} = %{version}-%{release}
+
+%description control
+The two modules behind cert-analyzer's [control] listener (agent/control.py,
+agent/control_server.py): a small authenticated HTTP(S) endpoint, separate
+from the health/metrics ports and off until [control] enabled = true, that
+lets certsight-fleet-manager enable or disable this node's Tetragon tracing
+policies, with the decision persisted so it survives a Tetragon restart.
+
+Not installed by default on purpose -- the base cert-analyzer package has no
+code that can change what the node detects on request. Install this only on
+nodes a fleet manager should be able to drive; `dnf remove
+cert-analyzer-control` withdraws the capability without touching the
+monitor. cert-analyzer is restarted on install/removal so the change takes
+effect.
 
 
 
@@ -388,6 +421,15 @@ echo "  systemctl enable --now cert-analyzer"
 %systemd_postun_with_restart cert-analyzer.service
 systemctl daemon-reload >/dev/null 2>&1 || true
 
+# The control modules are imported at cert-analyzer start-up (agent/config.py
+# reports "unavailable" when they are missing), so a running monitor only
+# notices the subpackage coming or going after a restart.
+%post control
+systemctl try-restart cert-analyzer.service >/dev/null 2>&1 || true
+
+%postun control
+systemctl try-restart cert-analyzer.service >/dev/null 2>&1 || true
+
 
 %files
 %license %{_defaultlicensedir}/%{name}/LICENSE
@@ -396,6 +438,9 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 %dir %{ana_home}
 %attr(0755, %{ana_user}, %{ana_group}) %{ana_home}/cert_analyzer.py
 %{ana_home}/agent/
+# Fleet control lives in the -control subpackage below.
+%exclude %{ana_home}/agent/control.py
+%exclude %{ana_home}/agent/control_server.py
 %{ana_home}/tetragon/
 %{ana_venv}/
 
@@ -412,6 +457,9 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 /etc/systemd/system/tetragon.service.d/cert-analyzer.conf
 
 
+%files control
+%{ana_home}/agent/control.py
+%{ana_home}/agent/control_server.py
 
 
 %changelog

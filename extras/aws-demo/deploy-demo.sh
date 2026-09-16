@@ -125,6 +125,7 @@ if [[ -z "${SG_ID}" || "${SG_ID}" == "None" ]]; then
         "IpProtocol=tcp,FromPort=3000,ToPort=3000,IpRanges=[{CidrIp=0.0.0.0/0,Description='Grafana dashboard'}]" \
         "IpProtocol=tcp,FromPort=8090,ToPort=8090,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight test console'}]" \
         "IpProtocol=tcp,FromPort=8092,ToPort=8092,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight MCP server (rate-limited by nginx)'}]" \
+        "IpProtocol=tcp,FromPort=8094,ToPort=8094,IpRanges=[{CidrIp=0.0.0.0/0,Description='CertSight fleet manager (read-only; admin login to change)'}]" \
         "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description='Lets Encrypt HTTP-01 challenge (see enable-mcp-https.sh)'}]" \
         >/dev/null
     echo "    Created security group ${SG_ID}"
@@ -265,8 +266,13 @@ fi
 echo ""
 echo " Dashboard:     http://${LINK_HOST}:3000/d/certsight-v1  (up: ${GRAFANA_UP})"
 echo " Test console:  http://${LINK_HOST}:8090                (up: ${CONSOLE_UP})"
+echo " Fleet manager: http://${LINK_HOST}:8094   read-only for visitors;"
+echo "                to change policies sign in as admin, password:"
+echo "                ssh ... sudo cat /root/certsight-fleet-manager-password"
 echo ""
-echo " Both are open to the internet with no authentication."
+echo " Dashboard and test console are open to the internet with no"
+echo " authentication; the fleet manager is viewable by anyone but only"
+echo " the admin login above can change anything."
 echo " Tear down when done:  ./teardown-demo.sh"
 echo "============================================================"
 

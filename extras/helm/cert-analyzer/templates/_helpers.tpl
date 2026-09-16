@@ -21,3 +21,15 @@ Usage: {{ include "cert-analyzer.image" (dict "registry" .Values.image.registry 
 {{- printf "%s:%s" .repository .tag -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Name of the Secret holding the fleet-control token: the operator's own
+(control.existingSecret) or the chart-managed one rendered from control.token.
+*/}}
+{{- define "cert-analyzer.controlSecretName" -}}
+{{- if .Values.control.existingSecret -}}
+{{ .Values.control.existingSecret }}
+{{- else -}}
+{{ printf "%s-control" .Release.Name }}
+{{- end -}}
+{{- end -}}

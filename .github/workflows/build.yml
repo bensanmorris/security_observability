@@ -32,6 +32,7 @@ jobs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       test-server: ${{ steps.filter.outputs.test-server }}
       mcp-server: ${{ steps.filter.outputs.mcp-server }}
+      fleet-manager: ${{ steps.filter.outputs.fleet-manager }}
     steps:
     - uses: actions/checkout@v4
     - uses: dorny/paths-filter@v3
@@ -69,9 +70,12 @@ jobs:
           mcp-server:
             - 'extras/mcp-server/**'
             - '.github/workflows/build.yml'
+          fleet-manager:
+            - 'extras/fleet-manager/**'
+            - '.github/workflows/build.yml'
 
   build:
-    name: Build Container (UBI ${{ matrix.ubi-version }})
+    name: Build Container (UBI ${{ matrix.ubi-version }}${{ matrix.variant }})
     runs-on: ubuntu-latest
     needs: changes
     # Always run on tags and PRs; on branch pushes only run if relevant files changed
@@ -83,14 +87,32 @@ jobs:
       contents: read
       packages: write
 
+    # Two variants per UBI base. The default image has no fleet-control code
+    # at all (the container equivalent of the base cert-analyzer RPM); the
+    # "-control" image is built with WITH_CONTROL=1 and is the one to run
+    # when the Helm chart's control.enabled=true (the equivalent of also
+    # installing cert-analyzer-control). Tagged and archived with a -control
+    # suffix so the two never collide.
     strategy:
       fail-fast: false
       matrix:
         include:
           - ubi-version: "8"
             python-version: "311"
+            variant: ""
+            with-control: "0"
           - ubi-version: "9"
             python-version: "311"
+            variant: ""
+            with-control: "0"
+          - ubi-version: "8"
+            python-version: "311"
+            variant: "-control"
+            with-control: "1"
+          - ubi-version: "9"
+            python-version: "311"
+            variant: "-control"
+            with-control: "1"
 
     steps:
     - name: Checkout code
@@ -126,7 +148,7 @@ jobs:
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}
         flavor: |
-          suffix=-ubi${{ matrix.ubi-version }},onlatest=true
+          suffix=-ubi${{ matrix.ubi-version }}${{ matrix.variant }},onlatest=true
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -151,8 +173,9 @@ jobs:
           PYTHON_VERSION=${{ matrix.python-version }}
           TETRAGON_VERSION=${{ env.TETRAGON_VERSION }}
           VERSION=${{ steps.version.outputs.value }}
-        cache-from: type=gha,scope=ubi${{ matrix.ubi-version }}
-        cache-to: type=gha,scope=ubi${{ matrix.ubi-version }},mode=max
+          WITH_CONTROL=${{ matrix.with-control }}
+        cache-from: type=gha,scope=ubi${{ matrix.ubi-version }}${{ matrix.variant }}
+        cache-to: type=gha,scope=ubi${{ matrix.ubi-version }}${{ matrix.variant }},mode=max
         platforms: linux/amd64
 
     - name: Export container image as tar
@@ -160,8 +183,8 @@ jobs:
       id: tar
       run: |
         SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-        PULL_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:sha-${SHORT_SHA}-ubi${{ matrix.ubi-version }}"
-        TAR_NAME="cert-analyzer-ubi${{ matrix.ubi-version }}-${{ steps.version.outputs.value }}.tar.gz"
+        PULL_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:sha-${SHORT_SHA}-ubi${{ matrix.ubi-version }}${{ matrix.variant }}"
+        TAR_NAME="cert-analyzer-ubi${{ matrix.ubi-version }}${{ matrix.variant }}-${{ steps.version.outputs.value }}.tar.gz"
         docker pull "${PULL_TAG}"
         docker save "${PULL_TAG}" | gzip > "${TAR_NAME}"
         echo "tar_name=${TAR_NAME}" >> $GITHUB_OUTPUT
@@ -170,13 +193,13 @@ jobs:
       if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: cert-analyzer-container-ubi${{ matrix.ubi-version }}-${{ steps.version.outputs.value }}
+        name: cert-analyzer-container-ubi${{ matrix.ubi-version }}${{ matrix.variant }}-${{ steps.version.outputs.value }}
         path: ${{ steps.tar.outputs.tar_name }}
         retention-days: 30
 
     - name: Build summary
       run: |
-        echo "## 🐳 Container Build (UBI ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
+        echo "## 🐳 Container Build (UBI ${{ matrix.ubi-version }}${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Event:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Pushed:** \`${{ github.event_name != 'pull_request' }}\`" >> $GITHUB_STEP_SUMMARY
@@ -201,6 +224,9 @@ jobs:
       image: registry.access.redhat.com/ubi${{ matrix.ubi-version }}/ubi:latest
     permissions:
       contents: read
+    # One build per RHEL base produces two packages from the one spec:
+    # cert-analyzer (no fleet-control code) and cert-analyzer-control (the
+    # two [control] modules, Requires: cert-analyzer = same version-release).
     strategy:
       fail-fast: false
       matrix:
@@ -295,19 +321,37 @@ jobs:
           --define "_release ${{ steps.version.outputs.release }}" \
           --define "_tetragon_version ${{ env.TETRAGON_VERSION }}" \
           "${HOME}/rpmbuild/SPECS/cert-analyzer.spec"
+        # The split must really hold -- fail the build if the base package
+        # carries any control code, or the subpackage lacks it.
+        BASE=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-[0-9]*.rpm" | head -1)
+        CONTROL=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-control-*.rpm" | head -1)
+        test -n "${BASE}" && test -n "${CONTROL}"
+        ! rpm -qlp "${BASE}" | grep -q "agent/control"
+        rpm -qlp "${CONTROL}" | grep -q "agent/control_server.py"
+        rpm -qpR "${CONTROL}" | grep -q "^cert-analyzer = "
 
     - name: Locate built RPMs
       id: rpm
       run: |
-        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-*.rpm" | head -1)
-        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
-        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+        BASE_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-[0-9]*.rpm" | head -1)
+        CONTROL_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "cert-analyzer-control-*.rpm" | head -1)
+        echo "path=${BASE_PATH}" >> $GITHUB_OUTPUT
+        echo "name=$(basename ${BASE_PATH})" >> $GITHUB_OUTPUT
+        echo "control_path=${CONTROL_PATH}" >> $GITHUB_OUTPUT
+        echo "control_name=$(basename ${CONTROL_PATH})" >> $GITHUB_OUTPUT
 
     - name: Upload RPM as build artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ steps.rpm.outputs.name }}
         path: ${{ steps.rpm.outputs.path }}
+        retention-days: 30
+
+    - name: Upload control subpackage as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.control_name }}
+        path: ${{ steps.rpm.outputs.control_path }}
         retention-days: 30
 
     - name: Build summary
@@ -317,7 +361,7 @@ jobs:
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tetragon Version:** \`${{ env.TETRAGON_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**RPMs:** \`${{ steps.rpm.outputs.name }}\`, \`${{ steps.rpm.outputs.control_name }}\`" >> $GITHUB_STEP_SUMMARY
 
   build-test-server-rpm:
     name: Build Test Server RPM (RHEL ${{ matrix.ubi-version }})
@@ -477,6 +521,92 @@ jobs:
     - name: Build summary
       run: |
         echo "## 📦 MCP Server RPM Build (RHEL ${{ matrix.ubi-version }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**RPM:** \`${{ steps.rpm.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+
+  build-fleet-manager-rpm:
+    name: Build Fleet Manager RPM (noarch)
+    runs-on: ubuntu-latest
+    needs: changes
+    # Same trigger conditions as build-mcp-server-rpm. Built once, noarch:
+    # the package is pure Python with no vendored dependencies, so the same
+    # RPM installs on RHEL 8 and 9 (both provide python3.11) -- see
+    # extras/fleet-manager/FLEET-MANAGER-README.md.
+    if: |
+      github.ref_type == 'tag' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.fleet-manager == 'true'
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Install build prerequisites
+      run: |
+        dnf install -y \
+          python3.11 \
+          rpm-build \
+          systemd-rpm-macros \
+          git \
+          findutils \
+          openssl \
+          which
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Fix git safe directory
+      run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+    - name: Run fleet manager tests
+      # Stdlib-only tests against fake Prometheus/node servers on loopback;
+      # the explorer import needs the sibling extras/test-server checkout,
+      # which is present here. No pip install required.
+      run: |
+        python3.11 -m ensurepip --upgrade
+        python3.11 -m pip install --quiet pytest
+        cd extras/fleet-manager && python3.11 -m pytest test_fleet_manager.py -q
+
+    - name: Determine version string
+      id: version
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          VERSION="${{ github.ref_name }}"
+          echo "value=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        else
+          SHA=$(git rev-parse --short HEAD)
+          echo "value=0.0.0~git${SHA}" >> $GITHUB_OUTPUT
+          echo "release=1" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build RPM
+      run: |
+        bash extras/fleet-manager/build-rpm.sh \
+          --version "${{ steps.version.outputs.value }}" \
+          --release "${{ steps.version.outputs.release }}"
+
+    - name: Locate built RPM
+      id: rpm
+      run: |
+        RPM_PATH=$(find "${HOME}/rpmbuild/RPMS" -name "certsight-fleet-manager-*.rpm" | head -1)
+        echo "path=${RPM_PATH}" >> $GITHUB_OUTPUT
+        echo "name=$(basename ${RPM_PATH})" >> $GITHUB_OUTPUT
+
+    - name: Upload RPM as build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.rpm.outputs.name }}
+        path: ${{ steps.rpm.outputs.path }}
+        retention-days: 30
+
+    - name: Build summary
+      run: |
+        echo "## 📦 Fleet Manager RPM Build (noarch)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Version:** \`${{ steps.version.outputs.value }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
@@ -1097,7 +1227,7 @@ jobs:
     # today. Once the secrets exist and both AMI jobs are proven reliable,
     # add them to this needs: list and wire their ami_id outputs into the
     # release body below.
-    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms, build-test-server-rpm, build-test-server-container, build-mcp-server-rpm ]
+    needs: [ build, build-rpm, build-policies, build-test-generator, build-probe-tests, build-java-agent-rpms, build-test-server-rpm, build-test-server-container, build-mcp-server-rpm, build-fleet-manager-rpm ]
     permissions:
       contents: write
 
@@ -1158,6 +1288,13 @@ jobs:
         merge-multiple: true
         path: ./release-assets
 
+    - name: Download Fleet Manager RPM artifact
+      uses: actions/download-artifact@v4
+      with:
+        pattern: certsight-fleet-manager-*.rpm
+        merge-multiple: true
+        path: ./release-assets
+
     - name: Download cert-test-server container artifacts
       uses: actions/download-artifact@v4
       with:
@@ -1176,8 +1313,13 @@ jobs:
       id: assets
       run: |
         POLICIES_PATH=$(find ./release-assets -name "tetragon-policies-*.tar.gz" | head -1)
-        CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" | head -1)
-        CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" | head -1)
+        CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-*.tar.gz" ! -name "*-control-*" | head -1)
+        CONTAINER_UBI9_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-*.tar.gz" ! -name "*-control-*" | head -1)
+        CONTAINER_UBI8_CONTROL_PATH=$(find ./release-assets -name "cert-analyzer-ubi8-control-*.tar.gz" | head -1)
+        CONTAINER_UBI9_CONTROL_PATH=$(find ./release-assets -name "cert-analyzer-ubi9-control-*.tar.gz" | head -1)
+        echo "container_ubi8_control_path=${CONTAINER_UBI8_CONTROL_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi9_control_path=${CONTAINER_UBI9_CONTROL_PATH}" >> $GITHUB_OUTPUT
+        echo "container_ubi9_control_name=$(basename ${CONTAINER_UBI9_CONTROL_PATH})" >> $GITHUB_OUTPUT
         GENERATOR_PATH=$(find ./release-assets -name "cert-test-generator-*.tar.gz" | head -1)
         echo "policies_path=${POLICIES_PATH}" >> $GITHUB_OUTPUT
         echo "policies_name=$(basename ${POLICIES_PATH})" >> $GITHUB_OUTPUT
@@ -1201,6 +1343,8 @@ jobs:
         echo "mcp_ubi8_name=$(basename ${MCP_UBI8_PATH})" >> $GITHUB_OUTPUT
         MCP_UBI9_PATH=$(find ./release-assets -name "certsight-mcp-*.el9*.rpm" | head -1)
         echo "mcp_ubi9_name=$(basename ${MCP_UBI9_PATH})" >> $GITHUB_OUTPUT
+        FLEET_MANAGER_PATH=$(find ./release-assets -name "certsight-fleet-manager-*.noarch.rpm" | head -1)
+        echo "fleet_manager_name=$(basename ${FLEET_MANAGER_PATH})" >> $GITHUB_OUTPUT
         TEST_SERVER_CONTAINER_UBI8_PATH=$(find ./release-assets -name "cert-test-server-ubi8-*.tar.gz" | head -1)
         echo "test_server_container_ubi8_path=${TEST_SERVER_CONTAINER_UBI8_PATH}" >> $GITHUB_OUTPUT
         echo "test_server_container_ubi8_name=$(basename ${TEST_SERVER_CONTAINER_UBI8_PATH})" >> $GITHUB_OUTPUT
@@ -1219,9 +1363,12 @@ jobs:
           ./release-assets/cert-agent-deployer-*.rpm
           ./release-assets/certsight-test-server-*.rpm
           ./release-assets/certsight-mcp-*.rpm
+          ./release-assets/certsight-fleet-manager-*.rpm
           ${{ steps.assets.outputs.policies_path }}
           ${{ steps.assets.outputs.container_ubi8_path }}
           ${{ steps.assets.outputs.container_ubi9_path }}
+          ${{ steps.assets.outputs.container_ubi8_control_path }}
+          ${{ steps.assets.outputs.container_ubi9_control_path }}
           ${{ steps.assets.outputs.generator_path }}
           ${{ steps.assets.outputs.probe_tests_path }}
           ${{ steps.assets.outputs.dashboard_path }}
@@ -1231,12 +1378,22 @@ jobs:
         body: |
           ## cert-analyzer ${{ github.ref_name }}
 
+          The `cert-analyzer` RPM and the default container images contain **no
+          fleet-control code**: there is no `[control]` listener to enable, and setting
+          `[control] enabled = true` there is a logged error -- upgrading adds no control
+          surface. Fleet control (for `certsight-fleet-manager`) is a separate opt-in:
+          the **`cert-analyzer-control`** RPM (the two `[control]` modules, version-locked
+          to `cert-analyzer`) or the **`-control`** image tag. Off by default and loopback
+          by default even then -- see the README.
+
           ### Container Images
 
           Pull from GHCR:
           ```
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9
+          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi8-control   # with fleet control
+          ghcr.io/${{ github.repository_owner }}/cert-analyzer:${{ github.ref_name }}-ubi9-control   # with fleet control
           ghcr.io/${{ github.repository_owner }}/cert-test-generator:${{ github.ref_name }}
           ghcr.io/${{ github.repository_owner }}/cert-test-server:${{ github.ref_name }}-ubi8
           ghcr.io/${{ github.repository_owner }}/cert-test-server:${{ github.ref_name }}-ubi9
@@ -1263,8 +1420,10 @@ jobs:
 
           **cert-analyzer** (Tetragon event consumer):
           ```bash
-          sudo dnf install ./cert-analyzer-<version>.el8.x86_64.rpm   # RHEL 8
-          sudo dnf install ./cert-analyzer-<version>.el9.x86_64.rpm   # RHEL 9
+          sudo dnf install ./cert-analyzer-<version>-1.el8.x86_64.rpm             # RHEL 8
+          sudo dnf install ./cert-analyzer-<version>-1.el9.x86_64.rpm             # RHEL 9
+          # Only on nodes certsight-fleet-manager should be able to drive:
+          sudo dnf install ./cert-analyzer-control-<version>-1.el9.x86_64.rpm     # adds the [control] modules; `dnf remove cert-analyzer-control` withdraws them
           ```
 
           **Java agent** (JVM certificate interception — install on hosts running JVMs):
@@ -1291,6 +1450,13 @@ jobs:
           certsight-mcp
           ```
           See `extras/mcp-server/MCP-SERVER-README.md` for the network-transport configuration and Claude Desktop/Code setup.
+
+          **certsight-fleet-manager** (fleet control console: node inventory, nodes × policies matrix, per-node and fleet-wide Tetragon policy enable/disable that survives Tetragon restarts, the fleet explorers, and an audit log — pure Python, one noarch RPM for RHEL 8 and 9; requires certsight-test-server, installed automatically alongside it):
+          ```bash
+          sudo dnf install ./${{ steps.assets.outputs.fleet_manager_name }}
+          certsight-fleet-manager --hash-password   # -> FLEET_MANAGER_ADMIN_PASSWORD_HASH
+          ```
+          Needs `[control] enabled = true` plus a token in each node's `cert-analyzer.conf`. See `extras/fleet-manager/FLEET-MANAGER-README.md`.
 
           ### Tetragon Policies (tar.gz)
 

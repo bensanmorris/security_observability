@@ -21,6 +21,22 @@ What gets installed on the instance:
   rate-limits requests (see [Rate limiting](#rate-limiting) below), so any
   MCP-capable assistant (e.g. Claude Desktop) can query fleet cert/FIPS/chain
   state live during a demo
+- The [fleet manager](../fleet-manager/FLEET-MANAGER-README.md), bound to
+  `127.0.0.1:8095` behind nginx on `0.0.0.0:8094`. The landing page is the
+  admin sign-in with a *Continue as read-only viewer* link beneath it:
+  visitors get a **read-only** view (nodes, policy matrix, explorers,
+  audit log, every toggle disabled and refused server-side); **changing**
+  a policy needs the admin login, because it can switch a node's Tetragon
+  policies off.
+  Fleet control is opt-in per node: the base `cert-analyzer` RPM has no
+  `[control]` code, so this box additionally installs `cert-analyzer-control`
+  and enables `[control]` on its loopback-only listener (the manager is
+  local); `deploy-k8s-node.sh` hands the same token to the k8s node, whose
+  chart install then uses the `-control` cert-analyzer image tag (listener
+  on the node IP, restricted to this box by `allowed_sources`, the SG and
+  firewalld), so both nodes appear in its policy matrix. The demo uses token auth inside the VPC; the mutual-TLS
+  option is documented in the fleet manager README. Only present when the release being deployed ships the
+  `certsight-fleet-manager` RPM (first shipped after v0.99).
 
 ---
 
@@ -42,6 +58,15 @@ internet with no authentication**, by design, so you can share a link (or a
   every tool is a bounded Prometheus query, so the exposure here is cost/load
   from anyone (or any bot) hitting it, not data mutation. nginx rate-limits
   it the same way it does the test console.
+- The fleet manager is browsable read-only by anyone, but every write needs
+  the admin login (user `admin`, password generated at install and saved
+  root-only on the instance -- `sudo cat /root/certsight-fleet-manager-password`);
+  it rate-limits login attempts both in nginx and in the app, and appends
+  every policy change to `/var/lib/certsight-fleet-manager/audit.jsonl`.
+  The read-only view does show each node's control URL (private VPC
+  addresses), as Grafana's `instance` labels already do. Until
+  `enable-mcp-https.sh` has been run its login travels over plain HTTP, so
+  run that script before sharing the link.
 - SSH (port 22) is restricted to your current public IP at deploy time, not
   opened to the internet.
 
@@ -139,6 +164,15 @@ The MCP server needs no separate credential -- point a client at it directly:
 ```bash
 claude mcp add --transport http certsight http://certsight-demo.com:8092/mcp
 ```
+
+The fleet manager is at `http://certsight-demo.com:8094` (*Continue as
+read-only viewer* needs no login; sign in as `admin` to change anything --
+password:
+`ssh ... sudo cat /root/certsight-fleet-manager-password`). It
+lists both nodes once the k8s node is up, and a policy toggled there stays
+toggled across a `systemctl restart tetragon` on the main box or a Tetragon
+pod restart on the k8s node -- the exit criteria in
+`extras/FLEET-MANAGER-PLAN.md`.
 
 The instance gets an Elastic IP (stays fixed for the life of the instance,
 unlike a plain EC2 public IP which changes on stop/start), and the script

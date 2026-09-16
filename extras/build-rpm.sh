@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# build-rpm.sh — Build the cert-analyzer RPM on RHEL9
+# build-rpm.sh — Build the cert-analyzer RPMs on RHEL9
 #
 # Usage:
 #   ./build-rpm.sh [--version <version>] [--release <release>]
 #                  [--tetragon-version <version>]
+#
+# Produces two packages from one spec: cert-analyzer (the monitor, with no
+# fleet-control code) and cert-analyzer-control (the two [control] modules,
+# version-locked to it -- the opt-in for certsight-fleet-manager).
 #
 # Defaults:
 #   version          — git tag if on a tag, otherwise short SHA
@@ -167,6 +171,8 @@ find "$RPMBUILD_ROOT/SRPMS" -name "cert-analyzer-*.src.rpm" | sort
 echo ""
 echo "To install:"
 echo "  sudo dnf install $RPMBUILD_ROOT/RPMS/$(uname -m)/cert-analyzer-${VERSION}-${RPM_RELEASE}.*.rpm"
+echo "Add fleet control (only on nodes certsight-fleet-manager should drive):"
+echo "  sudo dnf install $RPMBUILD_ROOT/RPMS/$(uname -m)/cert-analyzer-control-${VERSION}-${RPM_RELEASE}.*.rpm"
 echo ""
 echo "After install:"
 echo "  sudo vi /etc/cert-analyzer/cert-analyzer.conf"

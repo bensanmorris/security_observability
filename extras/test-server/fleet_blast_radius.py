@@ -432,7 +432,7 @@ def _render_page(all_certs, coverage):
 <style>{blast_radius.PAGE_CSS}{EXTRA_CSS}</style>
 </head>
 <body>
-<p><a href="/">&larr; Back to test console</a></p>
+<p><a href="/" target="_top">&larr; Back to console</a></p>
 <h1>Fleet Certificate Blast Radius</h1>
 <p class="subtitle">{len(all_certs)} certificate instance(s) monitored fleet-wide &middot; grouped by shared certificate identity, not file path &mdash; click a group to see every node, process, and pod affected</p>
 <p class="note">Data comes from Prometheus's last scrape of every scraped node's cert-analyzer metrics -- a newly-discovered certificate or process can take up to one scrape interval to show up here.</p>
