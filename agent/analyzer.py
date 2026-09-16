@@ -969,8 +969,10 @@ class CertificateAnalyzer(
                         # came back with every policy at its on-disk default.
                         # Re-check now rather than waiting out the policy
                         # monitor's interval, so recorded disables are
-                        # re-applied before the first events flow.
-                        self.check_tetragon_policies(stub)
+                        # re-applied before the first events flow. Non-blocking:
+                        # if a check is already running on another thread it
+                        # covers this, and the stream thread must not wait on it.
+                        self.check_tetragon_policies(stub, blocking=False)
                     reconnects += 1
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(1)
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(1)

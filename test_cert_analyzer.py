@@ -6459,6 +6459,38 @@ class TestSetTracingPolicyEnabled:
 class TestPolicyReconciliation:
     """check_tetragon_policies() re-applies recorded decisions Tetragon lost."""
 
+    def test_non_blocking_check_skips_when_another_check_holds_the_lock(self, analyzer, tmp_path):
+        """
+        The event-stream reconnect path calls check_tetragon_policies with
+        blocking=False: when the monitor (or a control PUT) is mid-check it
+        must return at once and do nothing, never queue behind it. A monitor
+        spinning on a no-op'd time.sleep starved the stream thread of the
+        lock for >3s in TestReconnection on a CI runner.
+        """
+        stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
+        _control_analyzer(analyzer, tmp_path, stub)
+        analyzer._policy_state.set('p', '', False)         # recorded disable, live enabled -> drift
+        held = _threading.Event()
+        release = _threading.Event()
+
+        def hold_lock():
+            with analyzer._policy_check_lock:
+                held.set()
+                release.wait(5)
+
+        holder = _threading.Thread(target=hold_lock, daemon=True)
+        holder.start()
+        assert held.wait(2)
+        t0 = _time.time()
+        analyzer.check_tetragon_policies(stub, blocking=False)
+        assert _time.time() - t0 < 0.5, "non-blocking check waited for the lock"
+        assert stub.configure_calls == [], "skipped check must not touch Tetragon"
+        release.set()
+        holder.join(2)
+        # With the lock free, the same call (default blocking) does the work.
+        analyzer.check_tetragon_policies(stub)
+        assert stub.configure_calls == [('p', '', False)]
+
     def test_no_state_store_means_no_reconcile(self, analyzer):
         stub = _MockControlStub(policies=[_MockPolicyStatus('p', state=1)])
         analyzer.check_tetragon_policies(stub)

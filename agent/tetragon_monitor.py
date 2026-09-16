@@ -159,7 +159,7 @@ class _TetragonMonitorMixin:
         thread.start()
         logger.info(f"Started Tetragon version monitor (interval: {interval}s)")
 
-    def check_tetragon_policies(self, stub) -> None:
+    def check_tetragon_policies(self, stub, blocking: bool = True) -> None:
         """
         Query Tetragon for all tracing policies and update Prometheus metrics.
 
@@ -175,9 +175,24 @@ class _TetragonMonitorMixin:
         reconnect, the policy monitor thread, and -- with [control] on --
         every HTTP worker handling a PUT. One run at a time, under
         _policy_check_lock (see analyzer.py).
+
+        blocking=False makes the call opportunistic: if another thread is
+        mid-check, return without doing anything rather than wait for it.
+        The event-stream reconnect path uses this -- its purpose is "make
+        sure recorded state gets re-applied promptly after Tetragon comes
+        back", and a check already in flight on the monitor or a control
+        PUT is doing exactly that, so the stream thread must not queue
+        behind it (a monitor spinning on a zero interval would otherwise
+        starve it -- seen in the reconnect tests, where time.sleep is a
+        no-op).
         """
-        with self._policy_check_lock:
+        if not self._policy_check_lock.acquire(blocking=blocking):
+            logger.debug("Tetragon policy check already in progress on another thread; skipping")
+            return
+        try:
             self._check_tetragon_policies_locked(stub)
+        finally:
+            self._policy_check_lock.release()
 
     def _check_tetragon_policies_locked(self, stub) -> None:
         if not hasattr(sensors_pb2, 'ListTracingPoliciesRequest'):
@@ -375,8 +390,8 @@ class _TetragonMonitorMixin:
                          'name': name, 'namespace': namespace, 'desired': enabled}
         try:
             self.check_tetragon_policies(stub)
-        except Exception:
-            pass
+        except Exception as e:  # never expected -- check_tetragon_policies swallows
+            logger.debug(f"Policy refresh after toggle failed: {e}")
         observed = next(
             (p for p in (getattr(self, '_last_policy_list', []) or [])
              if p['name'] == name and p['namespace'] == namespace),
