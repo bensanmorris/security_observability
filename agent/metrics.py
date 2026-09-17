@@ -336,6 +336,16 @@ class PrometheusMetrics:
             'Whether the analyzer has an active gRPC event stream to Tetragon (1=connected, 0=disconnected)',
             ['node_name']
         )
+        # Times the analyzer threw away its gRPC channel to Tetragon and opened
+        # a fresh one because the event stream kept failing (see
+        # CertificateAnalyzer.start). Expected to tick once or twice per
+        # Tetragon restart; a node that climbs steadily has a Tetragon that
+        # isn't coming back, or a socket path that no longer points at it.
+        self.tetragon_channel_resets_total = Counter(
+            'cert_analyzer_tetragon_channel_resets_total',
+            'Times the gRPC channel to Tetragon was recreated after consecutive event-stream failures',
+            ['node_name']
+        )
         self.tetragon_connected.labels(node_name=self._node_name).set(0)
 
         self.last_event_timestamp = Gauge(

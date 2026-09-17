@@ -5443,6 +5443,111 @@ class TestReconnection:
         # loop spinning as fast as possible forever as a zombie daemon thread.
         _stop_daemon_loop_thread(t, monkeypatch)
 
+    def test_channel_replaced_after_consecutive_stream_failures(self, analyzer, monkeypatch):
+        """
+        Regression for the k8s Tetragon-pod-restart wedge: when GetEvents keeps
+        failing, start() must stop trusting gRPC's transparent reconnect and
+        replace the channel -- pointing the health server at the new one
+        *before* closing the old (liveness treats SHUTDOWN as dead), updating
+        _tetragon_stub for the control/monitor paths, and counting the reset.
+        """
+        from unittest.mock import Mock
+        events = []
+        channels = []
+
+        def _make_channel(*a, **kw):
+            ch = Mock(name=f"channel{len(channels)}")
+            ch.close.side_effect = lambda c=ch: events.append(('close', c))
+            channels.append(ch)
+            return ch
+
+        stubs = []
+
+        class _AlwaysFailingStub:
+            def __init__(self_, ch):
+                self_.channel = ch
+                stubs.append(self_)
+
+            def GetEvents(self_, request, **kwargs):
+                raise _MockRpcError(grpc.StatusCode.UNAVAILABLE)
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        health = Mock()
+        health.set_channel.side_effect = lambda c: events.append(('set', c))
+        analyzer.health_server = health
+
+        monkeypatch.setattr(grpc, 'insecure_channel', _make_channel)
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', _AlwaysFailingStub)
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _starve_side_monitor_intervals(monkeypatch)
+
+        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t.start()
+        deadline = _time.time() + 3.0
+        while len(channels) < 2 and _time.time() < deadline:
+            _time.sleep(0.02)
+        _stop_daemon_loop_thread(t, monkeypatch)
+
+        assert len(channels) >= 2, "channel was never replaced despite continuous stream failures"
+        first, second = channels[0], channels[1]
+        assert ('close', first) in events, "the replaced channel was not closed"
+        # Health server re-pointed before the old channel went SHUTDOWN
+        assert events.index(('set', second)) < events.index(('close', first))
+        # Control PUTs / monitors read the current stub
+        assert analyzer._tetragon_stub.channel is not first
+        assert analyzer.metrics.tetragon_channel_resets_total.labels(
+            node_name=analyzer.metrics._node_name)._value.get() >= 1
+
+    def test_single_stream_failure_keeps_channel(self, analyzer, monkeypatch):
+        """One failure is an ordinary blip: retry on the same channel, no reset."""
+        from unittest.mock import Mock
+        channels = []
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: channels.append(Mock()) or channels[-1])
+        calls = [0]
+        second_call = _threading.Event()
+
+        class _FailOnceStub:
+            def GetEvents(self_, request, **kwargs):
+                calls[0] += 1
+                if calls[0] >= 2:
+                    second_call.set()
+                    _time.sleep(10)          # hold the "connection" open for the assertion window
+                raise _MockRpcError(grpc.StatusCode.UNAVAILABLE)
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', lambda ch: _FailOnceStub())
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _starve_side_monitor_intervals(monkeypatch)
+
+        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t.start()
+        assert second_call.wait(timeout=3.0)
+        _stop_daemon_loop_thread(t, monkeypatch)
+
+        assert len(channels) == 1, f"channel replaced after a single failure ({len(channels)} created)"
+        assert analyzer.metrics.tetragon_channel_resets_total.labels(
+            node_name=analyzer.metrics._node_name)._value.get() == 0
+
+    def test_policy_monitor_uses_current_stub_after_reset(self, analyzer, monkeypatch):
+        """A channel reset must reach the monitor threads, which run for the process lifetime."""
+        from unittest.mock import Mock
+        used = _threading.Event()
+        old_stub, new_stub = Mock(name='old'), Mock(name='new')
+        new_stub.ListTracingPolicies.side_effect = lambda *a, **k: (used.set(), Mock(policies=[]))[1]
+        analyzer._tetragon_stub = new_stub          # what _reset_tetragon_channel would leave behind
+        monkeypatch.setenv('TETRAGON_POLICY_CHECK_INTERVAL', '0')
+
+        thread = _capture_started_thread(
+            monkeypatch, lambda: analyzer._start_policy_monitor(old_stub), 'tetragon-policy-monitor'
+        )
+        assert used.wait(timeout=2.0), "monitor never queried through the current stub"
+        _stop_daemon_loop_thread(thread, monkeypatch)
+        assert not old_stub.ListTracingPolicies.called
+
     def test_keyboard_interrupt_propagates_after_cleanup(self, analyzer, monkeypatch):
         """
         start() must re-raise KeyboardInterrupt after its own cleanup (metrics,

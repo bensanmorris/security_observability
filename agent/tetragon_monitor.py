@@ -150,7 +150,10 @@ class _TetragonMonitorMixin:
             while True:
                 time.sleep(interval)
                 try:
-                    self.check_tetragon_version(stub)
+                    # The current stub, not the one captured at start: the
+                    # stream loop replaces the channel when it's stuck
+                    # (CertificateAnalyzer._reset_tetragon_channel).
+                    self.check_tetragon_version(getattr(self, '_tetragon_stub', None) or stub)
                 except Exception as e:
                     logger.warning(f"Version monitor error: {e}")
 
@@ -418,7 +421,8 @@ class _TetragonMonitorMixin:
             while True:
                 time.sleep(interval)
                 try:
-                    self.check_tetragon_policies(stub)
+                    # Current stub, same reason as the version monitor.
+                    self.check_tetragon_policies(getattr(self, '_tetragon_stub', None) or stub)
                 except Exception as e:
                     logger.warning(f"Policy monitor error: {e}")
 
