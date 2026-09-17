@@ -909,33 +909,80 @@ class CertificateAnalyzer(
             with self._new_path_lock:
                 self._new_file_in_flight.discard(cert_path)
 
+    # How many event-stream failures in a row before the channel itself is
+    # suspected and replaced (see start()). 1 would churn the channel on every
+    # ordinary blip; 2 means "the retry after backoff failed too".
+    _CHANNEL_RESET_AFTER_FAILURES = 2
+
+    def _open_tetragon_channel(self):
+        """New insecure channel to self.tetragon_address (unix:// or host:port)."""
+        if self.tetragon_address.startswith('unix://'):
+            socket_path = self.tetragon_address[7:]
+            return grpc.insecure_channel(f'unix:{socket_path}')
+        return grpc.insecure_channel(self.tetragon_address)
+
+    def _install_tetragon_channel(self, channel):
+        """
+        Make `channel` the one every Tetragon caller uses: the stream loop's
+        stub, the control PUT path and the version/policy monitors (all read
+        self._tetragon_stub), and the health server's liveness check.
+        Returns the new stub.
+        """
+        stub = sensors_pb2_grpc.FineGuidanceSensorsStub(channel)
+        self._tetragon_stub = stub
+        if self.health_server:
+            self.health_server.set_channel(channel)
+        return stub
+
+    def _reset_tetragon_channel(self, old_channel):
+        """
+        Replace a channel that keeps failing with a fresh one; returns
+        (channel, stub).
+
+        Why this exists: gRPC is supposed to reconnect a channel transparently,
+        and on bare metal (systemd restart of Tetragon, same socket path) it
+        does. On Kubernetes, after the Tetragon *pod* is replaced, the
+        analyzer's long-lived channel was seen looping on UNAVAILABLE
+        ("connection attempt timed out before receiving SETTINGS frame") for
+        many minutes while a brand-new channel from the same pod connected
+        instantly (2026-09-16, grpcio 1.68 image). Whatever grpc-core's
+        subchannel state is in at that point, a new channel is not in it --
+        and a new channel costs one unix-socket connect. The order matters:
+        the health server is pointed at the new channel *before* the old one
+        is closed, because liveness reports a SHUTDOWN channel as dead.
+        """
+        channel = self._open_tetragon_channel()
+        stub = self._install_tetragon_channel(channel)
+        try:
+            old_channel.close()
+        except Exception as e:  # never fatal: the old channel is being abandoned anyway
+            logger.debug(f"Closing the old Tetragon channel raised: {e}")
+        self.metrics.tetragon_channel_resets_total.labels(node_name=self.metrics._node_name).inc()
+        logger.warning(
+            f"Tetragon event stream failed {self._CHANNEL_RESET_AFTER_FAILURES} times in a row; "
+            f"replaced the gRPC channel to {self.tetragon_address} with a fresh one"
+        )
+        return channel, stub
+
     def start(self):
         """
         Start listening to Tetragon events with automatic reconnection.
 
-        Establishes the gRPC channel once and re-issues GetEvents after any
-        stream failure, using exponential backoff. This handles Tetragon
-        restarts and upgrades transparently.
+        Establishes the gRPC channel and re-issues GetEvents after any stream
+        failure, using exponential backoff. gRPC normally reconnects the
+        channel's transport by itself; if the stream nevertheless fails
+        _CHANNEL_RESET_AFTER_FAILURES times in a row the channel is treated as
+        stuck and replaced (_reset_tetragon_channel), which is what makes a
+        Tetragon pod restart on Kubernetes survivable.
 
-        The version monitor thread is started once and reuses the same channel —
-        gRPC handles transport reconnection automatically so the stub remains
-        valid across Tetragon restarts.
+        The version/policy monitor threads are started once and pick up the
+        current stub from self._tetragon_stub on every tick, so a channel
+        reset reaches them too.
         """
         logger.info(f"Connecting to Tetragon at {self.tetragon_address}")
 
-        if self.tetragon_address.startswith('unix://'):
-            socket_path = self.tetragon_address[7:]
-            channel = grpc.insecure_channel(f'unix:{socket_path}')
-        else:
-            channel = grpc.insecure_channel(self.tetragon_address)
-
-        stub = sensors_pb2_grpc.FineGuidanceSensorsStub(channel)
-        self._tetragon_stub = stub
-
-        # Give the health server a reference to the channel so liveness
-        # checks can inspect its connectivity state
-        if self.health_server:
-            self.health_server.set_channel(channel)
+        channel = self._open_tetragon_channel()
+        stub = self._install_tetragon_channel(channel)
 
         # Version and policy checks on startup, then periodically in background
         self.check_tetragon_version(stub)
@@ -959,6 +1006,7 @@ class CertificateAnalyzer(
         retry_delay = 5
         max_delay   = 60
         reconnects  = 0
+        consecutive_failures = 0
 
         try:
             while True:
@@ -978,6 +1026,7 @@ class CertificateAnalyzer(
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(1)
 
                     for response in stub.GetEvents(request):
+                        consecutive_failures = 0     # events flowing: the channel is fine
                         try:
                             self.process_event(response)
                         except Exception as e:
@@ -989,10 +1038,12 @@ class CertificateAnalyzer(
                     # Stream ended without error — Tetragon closed it cleanly
                     logger.warning("Tetragon event stream ended, reconnecting...")
                     retry_delay = 5
+                    consecutive_failures = 0
 
                 except grpc.RpcError as e:
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
                     self.metrics.tetragon_connected.labels(node_name=self.metrics._node_name).set(0)
+                    consecutive_failures += 1
                     # Jittered (50-100% of retry_delay) so that many analyzer
                     # instances losing their Tetragon connection at the same
                     # moment (e.g. a Tetragon rollout) don't all reconnect in
@@ -1004,6 +1055,9 @@ class CertificateAnalyzer(
                     )
                     time.sleep(sleep_for)
                     retry_delay = min(retry_delay * 2, max_delay)
+                    if consecutive_failures >= self._CHANNEL_RESET_AFTER_FAILURES:
+                        channel, stub = self._reset_tetragon_channel(channel)
+                        consecutive_failures = 0
 
                 except Exception as e:
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)
