@@ -5166,10 +5166,15 @@ def _starve_side_monitor_intervals(monkeypatch):
     monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '9999')
 
 
-def _stop_daemon_loop_thread(thread, monkeypatch, timeout=2.0):
+def _stop_daemon_loop_thread(thread, monkeypatch, timeout=2.0, release=None):
     """
     Force a background monitor/reconnect-loop thread to exit, then join it
     with a timeout so it's guaranteed dead before the test returns.
+
+    `release`, if given, is called once time.sleep has been armed to raise:
+    for a thread parked on a threading.Event inside a mock stub (which
+    patching sleep can't preempt), it sets that Event so the thread's next
+    step is the raising sleep rather than another loop iteration.
 
     _start_version_monitor, _start_process_metrics_monitor, and start()'s own
     reconnect loop are all `while True: time.sleep(interval); try: ... except
@@ -5204,6 +5209,8 @@ def _stop_daemon_loop_thread(thread, monkeypatch, timeout=2.0):
         raise KeyboardInterrupt()
 
     monkeypatch.setattr(_time, 'sleep', _raise)
+    if release is not None:
+        release()
     thread.join(timeout=timeout)
     assert not thread.is_alive(), f"{thread.name or thread} did not stop within {timeout}s"
 
@@ -5507,13 +5514,17 @@ class TestReconnection:
         monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: channels.append(Mock()) or channels[-1])
         calls = [0]
         second_call = _threading.Event()
+        hold = _threading.Event()
 
         class _FailOnceStub:
             def GetEvents(self_, request, **kwargs):
                 calls[0] += 1
                 if calls[0] >= 2:
                     second_call.set()
-                    _time.sleep(10)          # hold the "connection" open for the assertion window
+                    # Park the "connection" until the test has looked. A
+                    # time.sleep here would be a no-op (this test patches
+                    # sleep) and the second failure would race the assertions.
+                    hold.wait(timeout=10)
                 raise _MockRpcError(grpc.StatusCode.UNAVAILABLE)
 
             def GetVersion(self_, request, timeout=None):
@@ -5526,11 +5537,12 @@ class TestReconnection:
         t = _threading.Thread(target=analyzer.start, daemon=True)
         t.start()
         assert second_call.wait(timeout=3.0)
-        _stop_daemon_loop_thread(t, monkeypatch)
-
+        # Exactly one failure has happened and the loop is parked in the
+        # retry: this is the state "one blip, retrying on the same channel".
         assert len(channels) == 1, f"channel replaced after a single failure ({len(channels)} created)"
         assert analyzer.metrics.tetragon_channel_resets_total.labels(
             node_name=analyzer.metrics._node_name)._value.get() == 0
+        _stop_daemon_loop_thread(t, monkeypatch, release=hold.set)
 
     def test_events_between_failures_do_not_accumulate_toward_reset(self, analyzer, monkeypatch):
         """
@@ -5543,13 +5555,14 @@ class TestReconnection:
         monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: channels.append(Mock()) or channels[-1])
         calls = [0]
         enough = _threading.Event()
+        hold = _threading.Event()
 
         class _EventThenDropStub:
             def GetEvents(self_, request, **kwargs):
                 calls[0] += 1
                 if calls[0] >= 4:
                     enough.set()
-                    _time.sleep(10)          # park until the assertions have run
+                    hold.wait(timeout=10)    # park until the assertions have run (sleep is patched)
                 yield Mock(name='event')
                 raise _MockRpcError(grpc.StatusCode.UNAVAILABLE)
 
@@ -5564,11 +5577,10 @@ class TestReconnection:
         t = _threading.Thread(target=analyzer.start, daemon=True)
         t.start()
         assert enough.wait(timeout=3.0)
-        _stop_daemon_loop_thread(t, monkeypatch)
-
         assert len(channels) == 1, f"channel replaced although every stream delivered events ({len(channels)} created)"
         assert analyzer.metrics.tetragon_channel_resets_total.labels(
             node_name=analyzer.metrics._node_name)._value.get() == 0
+        _stop_daemon_loop_thread(t, monkeypatch, release=hold.set)
 
     def test_open_tetragon_channel_address_forms(self, analyzer, monkeypatch):
         """unix:// URLs are rewritten to grpc's unix: form; host:port is passed through."""
