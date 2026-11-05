@@ -60,6 +60,15 @@ if [[ -n "${K8S_NODE_ALLOCATION_ID:-}" ]]; then
     aws ec2 release-address --region "${AWS_REGION}" --allocation-id "${K8S_NODE_ALLOCATION_ID}" || true
 fi
 
+if [[ -n "${K8S_ON_DEMAND_ROLE:-}" ]]; then
+    echo "==> Deleting on-demand IAM role ${K8S_ON_DEMAND_ROLE}..."
+    # Both instances are terminated by now, so nothing still holds the profile.
+    aws iam remove-role-from-instance-profile --instance-profile-name "${K8S_ON_DEMAND_ROLE}" --role-name "${K8S_ON_DEMAND_ROLE}" || true
+    aws iam delete-instance-profile --instance-profile-name "${K8S_ON_DEMAND_ROLE}" || true
+    aws iam delete-role-policy --role-name "${K8S_ON_DEMAND_ROLE}" --policy-name start-k8s-node || true
+    aws iam delete-role --role-name "${K8S_ON_DEMAND_ROLE}" || true
+fi
+
 if [[ -n "${K8S_NODE_SG_ID:-}" ]]; then
     echo "==> Deleting k8s node security group ${K8S_NODE_SG_ID}..."
     for i in $(seq 1 12); do

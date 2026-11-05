@@ -1,0 +1,26 @@
+[Unit]
+Description=CertSight demo: start the k8s node on demand
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/k8s-demo-control/control.conf
+ExecStart=/usr/bin/python3.11 /usr/local/lib/k8s-demo-control/k8s_demo_control.py
+DynamicUser=yes
+StateDirectory=k8s-demo-control
+Restart=on-failure
+RestartSec=5
+MemoryMax=64M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

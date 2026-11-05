@@ -81,6 +81,9 @@ jobs:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     needs: [lint]
+    # The suite takes about a minute: fail a hang fast rather than holding a
+    # runner until it dies.
+    timeout-minutes: 10
     
     strategy:
       fail-fast: false

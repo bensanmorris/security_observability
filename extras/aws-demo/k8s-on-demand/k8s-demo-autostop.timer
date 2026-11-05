@@ -1,0 +1,12 @@
+# Lives on the node itself so a session ends even if the main box is down.
+# The instance's shutdown behaviour is "stop", so this stops it, not terminates
+# it. enable-k8s-on-demand.sh overrides OnBootSec with K8S_SESSION_MINUTES.
+[Unit]
+Description=CertSight demo: stop this k8s node after one session
+
+[Timer]
+OnBootSec=60min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -10,6 +10,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Runs the suite more than once: fail a hang fast rather than holding a
+    # runner until it dies.
+    timeout-minutes: 15
     
     strategy:
       matrix:
