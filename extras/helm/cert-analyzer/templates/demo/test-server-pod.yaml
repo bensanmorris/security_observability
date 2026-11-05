@@ -118,5 +118,7 @@ spec:
     hostPath:
       path: /var/certsight-test-server
       type: DirectoryOrCreate
-  restartPolicy: Never
+  # Always, not Never: this is a bare Pod with no controller, so with Never a
+  # node reboot leaves it Failed for good and the console stays down.
+  restartPolicy: Always
 {{- end }}
