@@ -5166,6 +5166,31 @@ def _starve_side_monitor_intervals(monkeypatch):
     monkeypatch.setenv('PROCESS_METRICS_INTERVAL', '9999')
 
 
+_START_THREAD_NAME = 'test-analyzer-start'
+
+
+def _skip_start_backoff(monkeypatch):
+    """
+    Shorten start()'s retry back-off to 1ms, for threads named
+    _START_THREAD_NAME only.
+
+    time is one shared module, so a blanket no-op time.sleep also removes the
+    wait from every other thread in the process: the version, policy and
+    process-metrics monitors and the retry drainer then spin for as long as
+    the patch is in place, however long their configured interval is, flooding
+    the captured logs. The 1ms is a real sleep for the same reason: it stops
+    start() itself from spinning.
+    """
+    real_sleep = _time.sleep
+
+    def _sleep(seconds):
+        if _threading.current_thread().name == _START_THREAD_NAME:
+            seconds = 0.001
+        real_sleep(seconds)
+
+    monkeypatch.setattr(_time, 'sleep', _sleep)
+
+
 def _stop_daemon_loop_thread(thread, monkeypatch, timeout=2.0, release=None):
     """
     Force a background monitor/reconnect-loop thread to exit, then join it
@@ -5354,7 +5379,7 @@ class TestReconnection:
         )
         _starve_side_monitor_intervals(monkeypatch)
 
-        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t = _threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
         connected.wait(timeout=2.0)
 
@@ -5395,12 +5420,10 @@ class TestReconnection:
         monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: Mock())
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
                             lambda ch: _DisconnectingStub())
-        # Patch sleep on the cert_analyzer module so the retry backoff is instant
-        import cert_analyzer as _ca
-        monkeypatch.setattr(_ca.time, 'sleep', lambda s: None)
+        _skip_start_backoff(monkeypatch)
         _starve_side_monitor_intervals(monkeypatch)
 
-        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t = _threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
 
         assert metric_set_to_zero.wait(timeout=3.0), \
@@ -5437,10 +5460,10 @@ class TestReconnection:
         monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: Mock())
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub',
                             lambda ch: _ReconnectingStub())
-        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _skip_start_backoff(monkeypatch)
         _starve_side_monitor_intervals(monkeypatch)
 
-        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t = _threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
 
         assert second_call.wait(timeout=3.0), "GetEvents was not called a second time"
@@ -5487,10 +5510,10 @@ class TestReconnection:
 
         monkeypatch.setattr(grpc, 'insecure_channel', _make_channel)
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', _AlwaysFailingStub)
-        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _skip_start_backoff(monkeypatch)
         _starve_side_monitor_intervals(monkeypatch)
 
-        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t = _threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
         deadline = _time.time() + 3.0
         while len(channels) < 2 and _time.time() < deadline:
@@ -5531,10 +5554,10 @@ class TestReconnection:
                 return _MockGetVersionResponse('v1.1.0')
 
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', lambda ch: _FailOnceStub())
-        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _skip_start_backoff(monkeypatch)
         _starve_side_monitor_intervals(monkeypatch)
 
-        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t = _threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
         assert second_call.wait(timeout=3.0)
         # Exactly one failure has happened and the loop is parked in the
@@ -5571,10 +5594,10 @@ class TestReconnection:
 
         monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', lambda ch: _EventThenDropStub())
         monkeypatch.setattr(analyzer, 'process_event', lambda ev: None)
-        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        _skip_start_backoff(monkeypatch)
         _starve_side_monitor_intervals(monkeypatch)
 
-        t = _threading.Thread(target=analyzer.start, daemon=True)
+        t = _threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
         assert enough.wait(timeout=3.0)
         assert len(channels) == 1, f"channel replaced although every stream delivered events ({len(channels)} created)"
@@ -10025,7 +10048,7 @@ class TestTetragonConnected:
         for thread, stub in self._started:
             _stop_daemon_loop_thread(thread, monkeypatch, release=stub.stop.set)
 
-    def _start_in_thread(self, analyzer, stub, monkeypatch, mock_sleep=None):
+    def _start_in_thread(self, analyzer, stub, monkeypatch, skip_backoff=False):
         """Patch channel/stub creation and launch start() in a daemon thread."""
         import cert_analyzer as _ca
         _starve_side_monitor_intervals(monkeypatch)
@@ -10037,10 +10060,10 @@ class TestTetragonConnected:
                             lambda *a, **kw: _MockChannel())
         monkeypatch.setattr(_ca.sensors_pb2_grpc, 'FineGuidanceSensorsStub',
                             lambda ch: stub)
-        if mock_sleep is not None:
-            monkeypatch.setattr(_ca.time, 'sleep', mock_sleep)
+        if skip_backoff:
+            _skip_start_backoff(monkeypatch)
 
-        t = threading.Thread(target=analyzer.start, daemon=True)
+        t = threading.Thread(target=analyzer.start, daemon=True, name=_START_THREAD_NAME)
         t.start()
         self._started.append((t, stub))
         return t
@@ -10060,7 +10083,6 @@ class TestTetragonConnected:
     def test_set_to_0_on_grpc_error(self, analyzer, monkeypatch):
         """tetragon_connected drops to 0 when GetEvents raises a gRPC error."""
         error_triggered = threading.Event()
-        real_sleep = time.sleep
 
         class _FailingStub:
             stop = threading.Event()
@@ -10075,15 +10097,12 @@ class TestTetragonConnected:
                 error_triggered.set()
                 raise _GrpcRpcError()
 
-        self._start_in_thread(
-            analyzer, _FailingStub(), monkeypatch,
-            mock_sleep=lambda s: real_sleep(0.01),  # short enough to stop promptly
-        )
+        self._start_in_thread(analyzer, _FailingStub(), monkeypatch, skip_backoff=True)
 
         assert error_triggered.wait(timeout=3), "gRPC error was never triggered"
         # The except grpc.RpcError handler sets tetragon_connected=0 immediately
         # after the raise. A short real sleep ensures the except block has run.
-        real_sleep(0.05)
+        time.sleep(0.05)
         assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_recovers_to_1_after_grpc_error(self, analyzer, monkeypatch):
@@ -10091,7 +10110,7 @@ class TestTetragonConnected:
         stub = _StreamingStub(fail_first=True)
         self._start_in_thread(
             analyzer, stub, monkeypatch,
-            mock_sleep=lambda s: None,  # skip retry back-off
+            skip_backoff=True,
         )
 
         assert stub.streaming_started.wait(timeout=3), "Stream did not recover"
