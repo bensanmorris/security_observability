@@ -31,3 +31,8 @@ jobs:
     - name: Run tests
       run: |
         pytest test_cert_analyzer.py test_fips_compliance_checker.py -v
+
+    - name: Run AWS demo control service tests
+      working-directory: extras/aws-demo/k8s-on-demand
+      run: |
+        pytest test_k8s_demo_control.py -v

@@ -221,6 +221,35 @@ behind the same nginx rate-limiting as the main instance's (see
 127.0.0.1-reachable `30091`, not the public `30090`, so the security group
 only ever reaches nginx.
 
+#### Run the k8s node on demand
+
+The k8s node is about two thirds of the demo's bill, so `./enable-k8s-on-demand.sh`
+keeps it off until someone asks for it. Run it once after `deploy-k8s-node.sh`,
+with the node running. After that:
+
+- A panel on the main test console starts the node. It takes about two minutes,
+  and the panel only says it's ready once the node has seen a real event.
+- The node powers itself off 60 minutes after each boot, using a systemd timer on
+  the node, so sessions end even if the main box is down. To keep it up for a
+  longer live demo, SSH in and run `sudo systemctl stop k8s-demo-autostop.timer`,
+  then stop the instance yourself afterwards.
+- Only 4 starts are allowed per UTC day, which caps it at 4 hours of compute. The
+  cap is enforced on the main box and stored in
+  `/var/lib/k8s-demo-control/quota.json`.
+- While it's off, the fleet pages carry a note saying so. They and Grafana only
+  show the main node, and Prometheus reports the k8s target as down.
+
+The panel is a script that nginx injects into the console and fleet manager
+pages, and `k8s-demo-control` runs on the main box behind nginx, so nothing here
+ships in a product RPM. The main box gets an IAM role that can start this one
+instance and read instance state, nothing else. Change the limits with
+`K8S_SESSION_MINUTES` and `K8S_STARTS_PER_DAY`, then re-run the script.
+
+The node must run v0.101 or later, and chart 0.7.1 or later: older analyzers can
+wedge when Tetragon restarts, and older charts leave the test console down after
+a reboot. `restartPolicy` can't be changed in place, so when upgrading to chart
+0.7.1, delete the `cert-test-server` pod first.
+
 | Demo | URL | Shows |
 |---|---|---|
 | Dashboard (Grafana) | `http://certsight-demo.com:3000/d/certsight-v1` | Both nodes side by side -- filter `$node`/`$namespace` |

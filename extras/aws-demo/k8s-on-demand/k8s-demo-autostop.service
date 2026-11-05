@@ -1,0 +1,6 @@
+[Unit]
+Description=CertSight demo: end this k8s node's on-demand session
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl poweroff
