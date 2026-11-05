@@ -14,6 +14,8 @@ on:
 jobs:
   quick-test:
     runs-on: ubuntu-latest
+    # Fail a hang fast rather than holding a runner until it dies.
+    timeout-minutes: 10
     
     steps:
     - uses: actions/checkout@v4

@@ -914,6 +914,12 @@ class CertificateAnalyzer(
     # ordinary blip; 2 means "the retry after backoff failed too".
     _CHANNEL_RESET_AFTER_FAILURES = 2
 
+    # Pause before reconnecting after Tetragon closes the stream cleanly. A
+    # clean close is normally a one-off, so this stays short and doesn't
+    # escalate -- it only has to stop a server that accepts and immediately
+    # closes every stream from turning start() into a tight reconnect loop.
+    _STREAM_END_RECONNECT_DELAY_SECONDS = 1.0
+
     def _open_tetragon_channel(self):
         """New insecure channel to self.tetragon_address (unix:// or host:port)."""
         if self.tetragon_address.startswith('unix://'):
@@ -1039,6 +1045,7 @@ class CertificateAnalyzer(
                     logger.warning("Tetragon event stream ended, reconnecting...")
                     retry_delay = 5
                     consecutive_failures = 0
+                    time.sleep(self._STREAM_END_RECONNECT_DELAY_SECONDS)
 
                 except grpc.RpcError as e:
                     self.metrics.analyzer_healthy.labels(node_name=self.metrics._node_name).set(0)

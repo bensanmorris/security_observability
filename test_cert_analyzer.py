@@ -5630,6 +5630,48 @@ class TestReconnection:
         _stop_daemon_loop_thread(thread, monkeypatch)
         assert not old_stub.ListTracingPolicies.called
 
+    def test_clean_stream_end_waits_before_reconnecting(self, analyzer, monkeypatch):
+        """A server that closes every stream cleanly must not cause a tight reconnect loop."""
+        from unittest.mock import Mock
+
+        streams = []
+
+        class _ClosingStub:
+            def GetEvents(self_, request, **kwargs):
+                streams.append(request)
+                if len(streams) > 1:  # no wait happened: end the loop, fail below
+                    raise KeyboardInterrupt()
+                return iter(())
+
+            def GetVersion(self_, request, timeout=None):
+                return _MockGetVersionResponse('v1.1.0')
+
+            def ListTracingPolicies(self_, request, timeout=None):
+                return _MockListPoliciesResponse([])
+
+        monkeypatch.setattr(grpc, 'insecure_channel', lambda *a, **kw: Mock())
+        monkeypatch.setattr(sensors_pb2_grpc, 'FineGuidanceSensorsStub', lambda ch: _ClosingStub())
+        _starve_side_monitor_intervals(monkeypatch)
+
+        real_sleep = _time.sleep
+        slept = []
+
+        def _sleep(seconds):
+            # time is one shared module: only start() itself runs on this
+            # thread, so the side monitors keep parking in a real sleep.
+            if _threading.current_thread() is not _threading.main_thread():
+                return real_sleep(seconds)
+            slept.append(seconds)
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(_time, 'sleep', _sleep)
+
+        with pytest.raises(KeyboardInterrupt):
+            analyzer.start()
+
+        assert len(streams) == 1
+        assert slept == [analyzer._STREAM_END_RECONNECT_DELAY_SECONDS]
+
     def test_keyboard_interrupt_propagates_after_cleanup(self, analyzer, monkeypatch):
         """
         start() must re-raise KeyboardInterrupt after its own cleanup (metrics,
@@ -9925,7 +9967,10 @@ class _BlockingEventIterator:
     def __next__(self):
         while not self._stop.is_set():
             time.sleep(0.02)
-        raise StopIteration
+        # Not StopIteration: a clean stream end only makes start() reconnect,
+        # so this thread would outlive the test. KeyboardInterrupt is start()'s
+        # own shutdown signal, so it actually ends the thread.
+        raise KeyboardInterrupt()
 
 
 class _StreamingStub:
@@ -9965,9 +10010,25 @@ class TestTetragonConnected:
     and stub so no real Tetragon socket is required.
     """
 
+    @pytest.fixture(autouse=True)
+    def _stop_started_threads(self, monkeypatch):
+        """Stop every start() thread before monkeypatch reverts its mocks.
+
+        Left running, these threads outlive the test: start()'s channel reset
+        then picks up the real (MagicMock) stub factory, whose GetEvents
+        "ends" instantly, so they keep reconnecting and logging for the rest
+        of the session. pytest retains that log output, so a slow test later
+        on could grow the process by tens of MB/s.
+        """
+        self._started = []
+        yield
+        for thread, stub in self._started:
+            _stop_daemon_loop_thread(thread, monkeypatch, release=stub.stop.set)
+
     def _start_in_thread(self, analyzer, stub, monkeypatch, mock_sleep=None):
         """Patch channel/stub creation and launch start() in a daemon thread."""
         import cert_analyzer as _ca
+        _starve_side_monitor_intervals(monkeypatch)
 
         class _MockChannel:
             def close(self): pass
@@ -9981,6 +10042,7 @@ class TestTetragonConnected:
 
         t = threading.Thread(target=analyzer.start, daemon=True)
         t.start()
+        self._started.append((t, stub))
         return t
 
     def test_initial_value_is_0(self, analyzer):
@@ -9994,27 +10056,34 @@ class TestTetragonConnected:
 
         assert stub.streaming_started.wait(timeout=3), "Event stream did not start"
         assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
-        stub.stop.set()
 
     def test_set_to_0_on_grpc_error(self, analyzer, monkeypatch):
         """tetragon_connected drops to 0 when GetEvents raises a gRPC error."""
         error_triggered = threading.Event()
+        real_sleep = time.sleep
 
         class _FailingStub:
+            stop = threading.Event()
+
             def GetVersion(self, req, timeout=None):
                 return _MockGetVersionResponse('v1.0.0')
             def ListTracingPolicies(self, req, timeout=None):
                 return _MockListPoliciesResponse([])
             def GetEvents(self, req):
+                if self.stop.is_set():
+                    raise KeyboardInterrupt()
                 error_triggered.set()
                 raise _GrpcRpcError()
 
-        self._start_in_thread(analyzer, _FailingStub(), monkeypatch)
+        self._start_in_thread(
+            analyzer, _FailingStub(), monkeypatch,
+            mock_sleep=lambda s: real_sleep(0.01),  # short enough to stop promptly
+        )
 
         assert error_triggered.wait(timeout=3), "gRPC error was never triggered"
         # The except grpc.RpcError handler sets tetragon_connected=0 immediately
         # after the raise. A short real sleep ensures the except block has run.
-        time.sleep(0.05)
+        real_sleep(0.05)
         assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 0.0
 
     def test_recovers_to_1_after_grpc_error(self, analyzer, monkeypatch):
@@ -10027,7 +10096,6 @@ class TestTetragonConnected:
 
         assert stub.streaming_started.wait(timeout=3), "Stream did not recover"
         assert analyzer.metrics.tetragon_connected.labels(node_name=analyzer.metrics._node_name)._value.get() == 1.0
-        stub.stop.set()
 
     def test_is_independent_of_analyzer_healthy(self, analyzer):
         """tetragon_connected and analyzer_healthy are separate metric objects."""
@@ -11133,6 +11201,9 @@ class TestPortProbe:
                 'connect', f'127.0.0.{i + 2}', 443, 'curl', 1000 + i, 'node1', None,
             )
 
+        deadline = _time.monotonic() + 3.0  # each probe runs on its own background thread
+        while _time.monotonic() < deadline and len(calls) < 2:
+            _time.sleep(0.01)
         assert len(calls) == 2
 
     def test_schedule_probe_throttled_endpoint_is_dropped_not_queued(self, probe_analyzer, monkeypatch):
@@ -11185,6 +11256,9 @@ class TestPortProbe:
 
         bucket._tokens = 1  # simulate the bucket having refilled by the time a later event arrives
         probe_analyzer._schedule_tls_probe('connect', '127.0.0.2', 443, 'curl', 1001, 'node1', None)
+        deadline = _time.monotonic() + 3.0  # the probe runs on its own background thread
+        while _time.monotonic() < deadline and not calls:
+            _time.sleep(0.01)
         assert calls == [('connect', '127.0.0.2', 443)]
 
     def test_rate_limiter_disabled_when_probe_events_per_second_is_zero(self, monkeypatch):
