@@ -124,18 +124,23 @@ python3.11 -m venv %{_builddir}/venv
 
 %{_builddir}/venv/bin/pip install --quiet --upgrade pip
 
-# Install all runtime dependencies
+# Install all runtime dependencies.
+# KEEP IN SYNC WITH requirements.txt: CI's safety scan only reads
+# requirements.txt, so a pin that drifts here ships unscanned in the RPM.
+# (These had sat at grpcio 1.60.1 / protobuf 4.25.3 / cryptography 41.0.7 /
+# kafka-python 2.0.2 -- every CVE the requirements.txt upgrades fixed was
+# still in the RPM.)
 %{_builddir}/venv/bin/pip install \
-    grpcio==1.60.1 \
-    grpcio-tools==1.60.1 \
-    protobuf==4.25.3 \
+    grpcio==1.78.2 \
+    grpcio-tools==1.68.1 \
+    protobuf==5.29.6 \
     prometheus-client==0.19.0 \
-    cryptography==41.0.7 \
+    cryptography==50.0.0 \
     pyyaml==6.0.1 \
     kubernetes>=28.1.0 \
     pyjks==20.0.0 \
     psutil>=5.9.0 \
-    kafka-python==2.0.2
+    kafka-python==2.3.2
 
 # Make the venv relocatable by rewriting the shebang paths.
 # We do this by replacing the absolute build-time prefix with the
